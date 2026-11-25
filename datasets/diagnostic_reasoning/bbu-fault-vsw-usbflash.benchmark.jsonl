@@ -1,0 +1,24 @@
+{"id": "neg-clean-01", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：USB FLASH 正常识别、读写正常，protect_status=0，SMART 正常。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-other-port-disconnect", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：断开的是 usb 1-2，不是本设备 usb 1-1，不能归因到本 USB FLASH。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-smart-normal-zero", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：SMART 各项 raw_value 为 0，不能把正常字段当介质故障。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-protect-zero", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：protect_status 等于 0 是正常状态，是本资料最容易误报的边界。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-protect-00", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：protect_status 写成前导 0 的 00，数值仍是 0，不能误判写保护。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-io-other-dev", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：I/O 错误发生在 sdc，USB 只是被 reset；不能把别的块设备错误算到本设备。", "root_cause": "NONE", "expected_rules": []}
+{"id": "pos-protect-1", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：protect_status=1，USB FLASH 处于写保护。", "root_cause": "R1", "expected_rules": ["E2"]}
+{"id": "pos-protect-2", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：写保护状态码为 2，不属于正常值，判写保护。", "root_cause": "R1", "expected_rules": ["E2"]}
+{"id": "pos-protect-20102", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：protect_status 为非 0 的复合错误码，按资料判写保护。", "root_cause": "R1", "expected_rules": ["E2"]}
+{"id": "pos-protect-65535", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：写保护寄存器全 1，需先解除写保护再判断介质。", "root_cause": "R1", "expected_rules": ["E2"]}
+{"id": "pos-io-buffer", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：protect_status=0，但本设备 sdb 出现 Buffer I/O error，判器件或 I/O 故障。", "root_cause": "R2", "expected_rules": ["E1"]}
+{"id": "pos-io-critical", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：sdb 出现 critical medium error，说明不是写保护而是介质读写失败。", "root_cause": "R2", "expected_rules": ["E1"]}
+{"id": "pos-io-sdb4", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：I/O 错误落在 sdb4 分区，仍属于本 USB 设备的介质 I/O。", "root_cause": "R2", "expected_rules": ["E1"]}
+{"id": "pos-disconnect", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：本设备 usb 1-1 发生断开，且写保护为 0，按器件或 I/O 故障排查。", "root_cause": "R2", "expected_rules": ["E1"]}
+{"id": "pos-protect-and-io", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：写保护与 I/O 错误同时存在，按优先级先判写保护，同时记录 I/O 佐证。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-smart-unsupported", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：设备可识别但 SMART 不支持，写保护和 I/O 均无证据，判 SMART/识别异常。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-smart-vendor-zero", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：SMART 属性全为 0 且无可读阈值，识别信息异常但无直接 I/O 错误。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-smart-manufacturer-null", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：SMART 厂商与型号字段为空，无法读取设备身份，按识别异常处理。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-smart-and-io", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：SMART 不可用同时存在 sdb I/O 错误，按更高优先级的器件 I/O 判定，SMART 作为佐证。", "root_cause": "R2", "expected_rules": ["E1", "E3"]}
+{"id": "pos-smart-and-protect", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：写保护与 SMART 不可用并存，先处理写保护，SMART 作为次要异常。", "root_cause": "R1", "expected_rules": ["E2", "E3"]}
+{"id": "pos-all-signals", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：写保护、断开和 SMART 不可用同时出现，仍按写保护优先。", "root_cause": "R1", "expected_rules": ["E1", "E2", "E3"]}
+{"id": "pos-io-nested", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：深度站点目录下的 sdb I/O 错误仍要命中。", "root_cause": "R2", "expected_rules": ["E1"]}
+{"id": "pos-protect-zip", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：采集包为 zip，解压后 protect_status 非 0。", "root_cause": "R1", "expected_rules": ["E2"]}
+{"id": "pos-io-nested-zip", "skill": "bbu-fault-vsw-usbflash", "query": "VSW 单板 USBFLASH 故障：双层 zip 下的 sdb I/O 错误，验证解包链路和规则同时生效。", "root_cause": "R2", "expected_rules": ["E1"]}

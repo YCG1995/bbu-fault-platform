@@ -1,0 +1,82 @@
+故障名称（必填）：VSW单板SSD故障
+别名 / 现场叫法（选填）：SSD故障
+一句话描述（必填）：VSW单板SSD故障时使用，主要表现为“单板硬件故障”告警附加信息“SSD不可用”、蜂鸟扫描SSD不在位、容器运行异常、版本升级失败
+设备 / 制式 / 单板 / 版本（选填）：V9200，所有VSW单板，所有版本
+常见关键词（选填）：SSD不可用；SSD不在位；容器运行异常；镜像文件下载校验失败
+
+2. 现象与影响
+现场能看到的现象（必填）：“单板硬件故障”告警附加信息“SSD不可用”；蜂鸟扫描SSD不在位；容器运行异常，服务退出；版本升级失败，镜像文件下载校验失败
+影响（选填）：业务容器和版本升级受影响
+出现规律（选填）：器件故障导致，偶发
+容易混淆的故障 + 怎么区分（选填）：SSD告警和扫描不在位故障明确；容器异常和升级失败不一定与SSD有关
+
+3. 日志在哪、长什么样
+日志类型 / 来源（设备全量日志 / SDR 网管采集 / DCM / CloudMAT 工装 / 其他）：DCM 一键式采集、CloudMAT工装导出、登录故障单板直接获取
+大致路径或文件名（说个大概就行）：
+内核打印：OssLogVsw\kernel_1-1-1-1-HWM_APP.EXE_6\kernel.klog
+Smart信息：/BspLog/BSP_1-1-1-1-HWM_APP.EXE_0/BSP/BoardInit.log
+贴 1~2 条真实日志样例（必填，最关键）：正常kernel_1-1-1-1-HWM_APP.EXE_6.tar；正常BoardInit.log.bak.1
+关键字段说明（选填）：
+内核正常情况有ata17 SATA link up和ssd name识别到SSD型号
+内核打印有如下字段说明有明确的SSD故障：
+COMRESET failed
+SError: { HostInt 10B8B }
+failed command: READ FPDMA QUEUED
+failed command: WRITE FPDMA QUEUED
+ATA bus error
+READ LOG DMA EXT failed
+blk_update_request: I/O error
+Buffer I/O error on dev sda
+softreset failed
+SMART信息关键字段：
+169 100 10 Remain Life Percentage
+160 100 10 Uncorrectable Sector Count
+5 100 6 Reallocated Sectors Count
+Remain Life Percentage当前值低于30 -> SSD寿命低
+Uncorrectable Sector Count当前值高于0 -> 存在不可修复扇区
+Reallocated Sectors Count当前值高于0 -> 存在重映射扇区
+
+4. 怎么判断（用大白话写排查思路）
+判断思路（必填）：
+1.首先查看内核日志kernel.log里面是否有明显的SSD报错关键字，如果匹配到说明SSD异常
+2.查看BoardInit.log里面的SMART信息，关键参数是否有异常，如果异常说明SSD异常
+阈值 / 参数（选填）：
+Remain Life Percentage当前值低于30 -> SSD寿命低
+Uncorrectable Sector Count当前值高于0 -> 存在不可修复扇区
+Reallocated Sectors Count当前值高于0 -> 存在重映射扇区
+一条日志里怎么区分站点/网元/槽位（选填）：不涉及
+
+5. 根因与处理
+可能的原因（按可能性列，一条一行）：SSD器件故障
+每种原因怎么处理：1、首先尝试复位单板 2、复位单板不生效，单板返修
+风险 / 注意事项（选填）：复位单板后可能站点无法恢复
+怎么确认已恢复（选填）：复位单板后故障恢复，告警消除、蜂鸟扫描正常、容器运行恢复、版本升级成功
+
+6. 故障案例
+案例编号：C1
+案例类型（勾选）：正常（应排除）
+日志包（必填，上传文件）：正常kernel_1-1-1-1-HWM_APP.EXE_6.tar；正常BoardInit.log.bak.1
+故障现象（一句话）（必填）：正常
+期望结论（必填）：应排除本故障
+期望证据从哪看（选填）：kernel未匹配相关关键字；SMART关键参数无异常
+
+案例编号：C2
+案例类型（勾选）：故障正例
+日志包（必填，上传文件）：735845200429_SSD IO ERROR[Com COM1] (2023-04-21_144732).7z
+故障现象（一句话）（必填）：SSD I/O error
+期望结论（必填）：是本故障，根因是SSD I/O error
+期望证据从哪看（选填）：匹配到blk_update_request: I/O error关键字
+
+案例编号：C3
+案例类型（勾选）：故障正例
+日志包（必填，上传文件）：SATA COMRESET failed [Com COM12] (2023-06-29_190939).7z
+故障现象（一句话）（必填）：SSD SATA链路异常
+期望结论（必填）：是本故障，根因是SSD SATA链路异常
+期望证据从哪看（选填）：匹配到ata17: COMRESET failed (errno=-16)关键字
+
+案例编号：C4
+案例类型（勾选）：故障正例
+日志包（必填，上传文件）：寿命耗尽BoardInit.log.bak.7z
+故障现象（一句话）（必填）：SSD寿命耗尽
+期望结论（必填）：是本故障，根因是SSD寿命耗尽
+期望证据从哪看（选填）：169 100 22 Remain Life Percentage，剩余寿命小于30

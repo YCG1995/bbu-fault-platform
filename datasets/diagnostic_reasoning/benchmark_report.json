@@ -1,0 +1,30 @@
+{
+  "skills": [
+    "bbu-fault-vsw-ssd",
+    "bbu-fault-vsw-usbflash",
+    "bbu-fault-vsw-watchdog"
+  ],
+  "total_cases": 75,
+  "top1": 75,
+  "top1_rate": 1.0,
+  "top3": 75,
+  "top3_rate": 1.0,
+  "by_skill": {
+    "bbu-fault-vsw-ssd": {
+      "cases": 26,
+      "top1": 26,
+      "failures": []
+    },
+    "bbu-fault-vsw-usbflash": {
+      "cases": 24,
+      "top1": 24,
+      "failures": []
+    },
+    "bbu-fault-vsw-watchdog": {
+      "cases": 25,
+      "top1": 25,
+      "failures": []
+    }
+  },
+  "failures": []
+}

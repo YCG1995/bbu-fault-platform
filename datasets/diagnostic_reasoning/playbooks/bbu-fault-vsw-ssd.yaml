@@ -1,0 +1,100 @@
+strategy: 先找内核里的 I/O 与 SATA 直接错误，再看 BoardInit 的 SMART 退化；直接 I/O/SATA 优先于 SMART，寿命耗尽优先于扇区介质异常。
+decision_order:
+- order: 1
+  action: 首先查看内核日志kernel.log里面是否有明显的SSD报错关键字，如果匹配到说明SSD异常
+  rule_ids:
+  - E1
+  - E2
+  if_hit: 继续用命中证据校验对应根因条件
+  if_miss: 记录该证据缺失，不用缺失反推根因
+- order: 2
+  action: 查看BoardInit.log里面的SMART信息，关键参数是否有异常，如果异常说明SSD异常
+  rule_ids:
+  - E3
+  - E4
+  - E5
+  if_hit: 继续用命中证据校验对应根因条件
+  if_miss: 记录该证据缺失，不用缺失反推根因
+hypotheses:
+- id: H1
+  root_cause: R1
+  name: SSD I/O error
+  condition: E1
+  supporting_rules:
+  - E1
+  excluding_rules: []
+  expected_evidence:
+  - 内核记录 SSD 直接 I/O 错误
+  why: SSD 读写或命令执行失败
+- id: H2
+  root_cause: R2
+  name: SSD SATA 链路异常
+  condition: E2 and not E1
+  supporting_rules:
+  - E2
+  excluding_rules:
+  - E1
+  expected_evidence:
+  - 内核记录 SSD SATA 链路异常
+  why: SSD SATA 链路协商或复位失败
+- id: H3
+  root_cause: R3
+  name: SSD 寿命耗尽
+  condition: E3 and not E1 and not E2
+  supporting_rules:
+  - E3
+  excluding_rules:
+  - E1
+  - E2
+  expected_evidence:
+  - SMART 剩余寿命低于 30%
+  why: SMART Remain Life Percentage 原始值低于 30，SSD 剩余寿命不足
+- id: H4
+  root_cause: R4
+  name: SSD 扇区介质异常
+  condition: (E4 or E5) and not E1 and not E2
+  supporting_rules:
+  - E4
+  - E5
+  excluding_rules:
+  - E1
+  - E2
+  expected_evidence:
+  - SMART 存在不可修复扇区
+  - SMART 存在重映射扇区
+  why: SMART 报告不可修复或重映射扇区
+discriminators:
+- rule_id: E1
+  meaning: 内核记录 SSD 直接 I/O 错误
+  supports:
+  - SSD I/O error
+  excludes:
+  - SSD SATA 链路异常
+  - SSD 寿命耗尽
+  - SSD 扇区介质异常
+  use: 先看 E1；命中时优先验证SSD I/O error，并排除SSD SATA 链路异常、SSD 寿命耗尽、SSD 扇区介质异常
+- rule_id: E2
+  meaning: 内核记录 SSD SATA 链路异常
+  supports:
+  - SSD SATA 链路异常
+  excludes:
+  - SSD 寿命耗尽
+  - SSD 扇区介质异常
+  use: 先看 E2；命中时优先验证SSD SATA 链路异常，并排除SSD 寿命耗尽、SSD 扇区介质异常
+checks:
+- Remain Life Percentage当前值低于30 -> SSD寿命低
+- Uncorrectable Sector Count当前值高于0 -> 存在不可修复扇区
+- Reallocated Sectors Count当前值高于0 -> 存在重映射扇区
+pitfalls:
+- SATA link down 可能是未使用端口，不能单独当 SSD 故障；要看 COMRESET failed、ATA bus error 等直接错误。
+- SMART 的 raw_value 是每行第三个数值，不能把 current 值或序号当阈值。
+- Remain Life Percentage 等于 30 不算低于 30；只有小于 30 才判寿命耗尽。
+- Uncorrectable/Reallocated 必须大于 0；0 是正常。寿命与扇区同时异常时，优先寿命耗尽。
+stop_conditions:
+- E1 成立：直接判 SSD I/O error，停止扩根因。
+- E2 成立且 E1 不成立：判 SATA 链路异常，停止。
+- E3 成立且 E1/E2 不成立：判寿命耗尽，停止。
+- E4 或 E5 成立且 E1/E2/E3 不成立：判扇区介质异常，停止。
+data_needed:
+- 内核日志
+- BoardInit 启动日志

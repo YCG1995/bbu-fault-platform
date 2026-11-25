@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# 仅允许 bbu 用户通过 sudo 调用：校验任务 ID 后启动固定 systemd 模板。
+set -euo pipefail
+JOB="${1:-}"
+[[ "$JOB" =~ ^U[A-Za-z0-9_-]{6,40}$ ]] || { echo "任务 ID 非法" >&2; exit 2; }
+exec /usr/bin/systemctl start "bbu-upgrade-helper@${JOB}.service"

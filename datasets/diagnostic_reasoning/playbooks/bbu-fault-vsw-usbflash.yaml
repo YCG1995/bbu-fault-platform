@@ -1,0 +1,85 @@
+strategy: 先看 protect_status 是否非 0，再看内核是否有该 USB 设备的断开/介质 I/O 错误，最后看 SMART/识别信息是否可取；写保护优先于器件
+  I/O，器件 I/O 优先于 SMART 获取失败。
+decision_order:
+- order: 1
+  action: 先看写保护
+  rule_ids:
+  - E2
+  if_hit: 继续用命中证据校验对应根因条件
+  if_miss: 记录该证据缺失，不用缺失反推根因
+- order: 2
+  action: 再看 USB/块设备 I/O 错误
+  rule_ids:
+  - E1
+  if_hit: 继续用命中证据校验对应根因条件
+  if_miss: 记录该证据缺失，不用缺失反推根因
+- order: 3
+  action: 最后看 SMART 获取是否失败
+  rule_ids:
+  - E3
+  if_hit: 继续用命中证据校验对应根因条件
+  if_miss: 记录该证据缺失，不用缺失反推根因
+hypotheses:
+- id: H1
+  root_cause: R1
+  name: USB FLASH 写保护
+  condition: E2
+  supporting_rules:
+  - E2
+  excluding_rules: []
+  expected_evidence:
+  - USB FLASH 写保护状态非零
+  why: protect_status 非零，介质处于写保护状态
+- id: H2
+  root_cause: R2
+  name: USB FLASH 器件或 I/O 故障
+  condition: E1 and not E2
+  supporting_rules:
+  - E1
+  excluding_rules:
+  - E2
+  expected_evidence:
+  - USB FLASH 设备断开或块设备 I/O 错误
+  why: USB FLASH 断开或块设备出现介质/I/O 错误
+- id: H3
+  root_cause: R3
+  name: USB FLASH SMART 信息获取失败
+  condition: E3 and not E2 and not E1
+  supporting_rules:
+  - E3
+  excluding_rules:
+  - E2
+  - E1
+  expected_evidence:
+  - USB FLASH SMART/识别信息异常
+  why: 设备识别或 SMART 信息异常，无法取得有效健康状态
+discriminators:
+- rule_id: E1
+  meaning: USB FLASH 设备断开或块设备 I/O 错误
+  supports:
+  - USB FLASH 器件或 I/O 故障
+  excludes:
+  - USB FLASH SMART 信息获取失败
+  use: 先看 E1；命中时优先验证USB FLASH 器件或 I/O 故障，并排除USB FLASH SMART 信息获取失败
+- rule_id: E2
+  meaning: USB FLASH 写保护状态非零
+  supports:
+  - USB FLASH 写保护
+  excludes:
+  - USB FLASH 器件或 I/O 故障
+  - USB FLASH SMART 信息获取失败
+  use: 先看 E2；命中时优先验证USB FLASH 写保护，并排除USB FLASH 器件或 I/O 故障、USB FLASH SMART 信息获取失败
+checks: []
+pitfalls:
+- protect_status=0 是正常，不能因为字段存在就判写保护。
+- 其他 USB 口（如 usb 1-2）的断开不能直接归因到本 USB FLASH，必须对齐设备实例。
+- SMART 不支持不等于器件损坏；需结合是否可读写、是否有 I/O 错误判断。
+- 写保护与 I/O 错误同时存在时，先处理写保护，因为它会阻止所有写入。
+stop_conditions:
+- E2 成立：先判写保护；E1 同时成立时在报告中并列提示。
+- E1 成立且 E2 不成立：判器件或 I/O 故障，停止。
+- E3 成立且 E1/E2 不成立：判 SMART/识别异常，停止。
+data_needed:
+- 内核日志
+- BoardInit 启动日志
+- BoardHealth/SMART 日志

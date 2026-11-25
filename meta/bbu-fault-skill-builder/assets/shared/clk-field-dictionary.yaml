@@ -1,0 +1,731 @@
+# 时钟字段共享字典 v2.0
+# 来源：BBU 时钟日志（clockstatuslog / clockdatalog / clockocxolog / gnsssvinfo / gnssspecinfo 等）
+# 用途：子 Skill 解析时钟日志时引用枚举含义，避免在每个子 Skill 里重复硬编码。
+# 结构：key 为枚举名，values 为 {整数码: 含义}；meta 记录字段所属 CLK 索引。
+
+meta:
+  version: "2.0"
+  description: BBU 时钟日志共享枚举字典；与 parse_clock.py 配合使用。
+
+# === 参考源 Ref / BabyID 枚举（CLK000/001/033/036/085/091/093/094/100 等多处复用）===
+FIELD_REF:
+  desc: 参考源 ID（Ref / RefId / ActiveRef / CurId / BetId / Id）
+  values:
+    255: 无参考源
+    1: GNSS
+    2: 外置面板卫星
+    3: 外置背板卫星
+    4: 1PPS+TOD
+    5: 级联从框
+    6: BITS-2MHz时钟
+    7: BITS-2Mbps时钟
+    8: 线路时钟-本板
+    9: 线路时钟-其他板
+    10: SyncE+1588
+    11: 1588频率
+    12: 1588相位同步
+    13: SyncE频率同步
+    14: 1PPS+TOD备份
+    15: 背板备份时钟(暂用作背板1588)
+    16: 堆叠时钟
+    17: RRU GNSS
+    18: 空口同步时钟
+    19: 背板1PPS+TOD
+    20: 空口+TDS子卡时钟
+    21: 1PPS+TOD其它板
+    22: 1588其它板
+    23: 宽松1588
+    24: 内置GPS备份
+    25: 默认时钟源
+    26: 互联时钟
+
+# === 系统控制状态 sts / PllStat / PllSts / ref_sts 枚举 ===
+FIELD_STS:
+  desc: 系统时钟状态（sts / PllStat / ref_sts / Sts）
+  normal_values: [2, 3]
+  values:
+    0: 预热
+    1: 快捕
+    2: 锁定
+    3: 高精度锁定
+    5: 保持
+    7: SYNCE增强保持
+    8: 自由运行
+    9: 辅助相位控
+
+# === 天馈状态 Ant（CLK001 / CLK094；VSWe IntRcvAntStatusGet 同枚举）===
+FIELD_ANT:
+  desc: 天馈状态（Ant= 当前(记录)；IntRcvAntStatusGet 返回值同此枚举）
+  normal_values: [1]
+  values:
+    1: 正常
+    126: 初始化中
+    127: 未知
+    128: 天馈短路
+    129: 天馈开路
+
+# === 定位类型 FixType（CLK001）===
+FIELD_FIX_TYPE:
+  desc: GNSS 定位类型
+  normal_values: [4, 5]
+  values:
+    0: 无定位
+    1: 仅航位推算
+    2: GPS和航位推算组合
+    3: 2D定位
+    4: 3D定位
+    5: 位置保持
+
+# === PPS 状态 PpsStat / PpsSts（CLK005）===
+FIELD_PPS_STAT:
+  desc: 1PPS 信号状态
+  normal_values: [0]
+  values:
+    0: 正常
+    1: 一级钟(原子钟)保持
+    2: 不可用
+    3: 三级钟(普通晶振)保持
+    4: 传输承载设备(PTN/TCXO)保持
+    5: 二级钟保持
+
+# === 串口状态 SerialSts（CLK005）===
+FIELD_SERIAL_STS:
+  desc: TOD 串口状态
+  normal_values: [0]
+  values:
+    0: 正常
+    1: 电文中断
+    2: 校验错误
+    3: 帧错误
+
+# === CLK032 时钟告警类型（alarm_type）===
+# 行格式：ref:X <AlarmType> -a / -r [time]
+# -a=告警激活，-r=告警恢复
+CLK032_ALARM_TYPE:
+  desc: CLK[032] 告警类型
+  action:
+    "-a": 告警激活
+    "-r": 告警恢复
+  common_alarms:
+    PpsUnavail: 1PPS 不可用
+    PpsLost: 1PPS 丢失
+    AntOpen: 天馈开路
+    AntShort: 天馈短路
+    SatLow: 卫星信号弱
+    LockSatFail: 卫星锁定失败
+    UartErr: 串口错误
+    FreqJump: 频率跳变
+    PhaseJump: 相位跳变
+    FreqLow: 频率偏低
+    FreqHigh: 频率偏高
+
+# === CLK036 参考源差异检查 Flg（-1 异常 / 2 正常 / 0 未校验）===
+CLK036_FLG:
+  desc: 参考源相位差校验标志（Flg）
+  normal_values: [0, 2]
+  values:
+    "-1": 异常（频偏>2倍门限或相位差>1.5us）→ 排查该参考源
+    0: 未校验（初始或无跳变）
+    2: 正常（相差<1.5us，频偏<10ppb）
+
+# === CLK094 GNSS 接收机复位原因 ReasonId / RstIdx ===
+CLK094_RESET_REASON:
+  desc: GNSS 接收机复位原因（ReasonId / LastReasonId / RstIdx）
+  values:
+    1: 天馈正常但无法锁定卫星
+    2: 卫星锁定但是无法进入FIX状态
+    3: 接收机初始化完成但是电文丢失
+    4: 初始化完成后出现已关闭的电文
+    5: 接收机指令回应超时
+    7: 模式切换后复位（如从单星授时恢复）
+    8: 升级结束后复位
+    9: 手动测试复位
+    10: 接收机故障导致复位，不冷启
+    11: 接收机串口异常复位
+    12: 伪GNSS保持24小时后复位
+    13: 接收机和本地相位值跳变复位
+    14: 接收机初始化超时复位
+    15: 复位原因最大数
+
+# === CLK099 ClkHealth bitmask（VBP 32bit）===
+# 行格式：Clk[099]... ClkHealth=0x... Sv=... R10=... R30=... Pll=...
+# 出现 M_R10 字段时为 VBPd1 7bit 简化版。
+# 行格式：Clk[099]... ClkHealth=0x... Sv=... R10=... R30=... Pll=...
+# 出现 M_R10 字段时为 VBPd1 7bit 简化版。
+CLK099_CLKHEALTH_VBP:
+  desc: VBP ClkHealth 32bit 位定义
+  bits:
+    0: 61.44M输入丢失(EPLD)
+    1: 61.44M输入丢失(PLL)
+    2: 61.44M输入频偏(PLL)
+    3: 预留(FSYNC丢失)
+    4: FSYNC异常(EPLD)
+    5: FSYNC异常(MCS主)
+    6: FSYNC异常(MCS从)
+    7: FSYNC异常(CPU)
+    8: PLL XO本振异常
+    9: PLL参考源丢失
+    10: PLL参考源频偏
+    11: PLL本地环失锁
+    12: PLL syncE环失锁
+    13: PLL CPRI环失锁
+    15: MCS主内部PLL失锁
+    16: MCS主PSYNC失锁
+    18: MCS从内部PLL失锁
+    19: MCS从PSYNC失锁
+    21: CPU内部PLL失锁
+    22: EPLD帧同步信号抖动
+    23: MCS帧同步信号抖动
+    24: CPU帧同步信号抖动
+    25: MCS帧号异常
+    26: CPU帧号异常
+    27: MCS主1PPS同步异常
+    28: MCS从1PPS同步异常
+    29: CPU 1PPS同步异常
+    30: MCS主1588同步异常
+    31: MCS从1588同步异常
+
+CLK099_CLKHEALTH_VBPD1:
+  desc: VBPd1 ClkHealth 7bit 位定义（出现 M_R10 字段时）
+  bits:
+    0: PSYNC参考源无效
+    1: MCS通用PLL未锁定
+    2: PSYNC未锁定
+    3: EPLD检测参考源异常
+    4: PLL芯片参考源缺失
+    5: EPLD检测锁相环未锁定
+    6: PLL时钟芯片输出未锁定
+
+# === CLK100 OCXO 黑匣子特殊值 ===
+CLK100_SPECIAL:
+  desc: OCXO 黑匣子记录特殊值
+  special_values:
+    99999.99: 未配置参考源或周期内未锁定（avg_fcv_locked）
+    "-9999.99": 晶振电压无效或未配置（osc_voltage）
+  sentinel_note: |
+    cur_fcv 是黑匣子频率校准值（Hz），判 OCXO 老化时必须先剔除失锁哨兵：
+    - 失锁/未收敛填充值：|cur_fcv| ≥ 500Hz（如固定重复的 -1163.92、未收敛的 +573.9），
+      常伴 ref_sts=9（辅助相位控）、avg_fcv_locked=9999.99（未锁定）、osc_voltage 异常（如 3276.4），
+      这类值不是真实频偏，常见于 GNSS 失锁连锁，禁止据此判 OCXO 老化；
+    - 真实老化：锁定/快捕态下 50 < |cur_fcv| < 500Hz，且在多个自然日持续出现（缓慢变化）。
+    ref_sts 枚举：0 预热 / 1 快捕 / 2 锁定 / 3 高精度锁定 / 5 保持 / 7 SYNCE增强保持 /
+    8 自由运行 / 9 辅助相位控。
+  threshold_note: |
+    cur_fcv 超出 ±50Hz 说明晶振老化或调频异常（须先剔除上述失锁哨兵）；
+    ref_sts=8 为自由运行；avg_fcv_locked 为空表示未锁定。
+
+# === Clk085 主备相位差 / Clk036 参考源差异 Dif 哨兵 ===
+DIF_SENTINEL:
+  desc: 相位差字段 Dif（ns）的非物理/寄存器哨兵值
+  rule: |
+    - |Dif| ≥ 1 亿 ns（100ms）判为无参考/无效填充，不判相位差超差：
+      包括 ±1000000000（无参考）、-134218494（0x08000002 寄存器编码）等；
+    - 真实失锁相位差（如 ±4.5e7 以内）仍按超差保留；
+    - Clk036 正常 Dif 一般为 ns 级（数百~数千），与 Clk085 尺度不同，不混用阈值。
+
+# === gz 轮转合并规则（clockstatuslog 等）===
+gz_rotation:
+  desc: 时钟日志按文件名倒序合并
+  rules:
+    - 同基名的 clockstatuslog.01.gz / .02.gz ... 与 clockstatuslog.txt 按文件名列序倒序合并（.01 最新在前）
+    - 同时存在 .gz 与解压后 .txt 时去重，优先合并 .gz 序列
+    - 损坏的 gzip 单文件跳过继续，不中断合并
+    - 合并后写入 `<基名>.txt`，便于 parse_clock.py 读取
+
+# === fix_timestamp（单板复位时间修复）===
+fix_timestamp:
+  desc: 单板复位后时间退到 2021-01-01 的识别与修复
+  symptom: 复位后日志时间戳回跳到 2021-01-01,00:00:xx，随后随同步逐渐恢复正常
+  method: |
+    1. 识别连续的 2021 时间段（时间倒退段）；
+    2. 在该段与相邻正常段各取一条带 tick= 的行；
+    3. tick_diff = (normal_tick - reset_tick) / 100 秒；
+    4. 复位段所有时间戳 += (normal_dt - tick_diff - reset_dt)；
+    5. 修复后时间不得超过相邻正常段时间，否则放弃修复该行。
+  note: parse_clock.py 默认开启 --fix-timestamp；分析时序关系前必须先跑修复，否则复位段事件会被误排到 2021 年。
+
+# === GNSS 欺骗检测阈值（多星 C/N0 一致高簇）===
+gnss_spoofing:
+  desc: 伪 GPS 欺骗识别（多星一致高 C/N0 + 仰角跨度异常）
+  thresholds:
+    cno_window_db: 2.0       # 顶部一致高簇 C/N0 窗口宽度
+    min_cluster_sats: 4      # 最少一致卫星数
+    min_group_sats: 5         # 组内最少有效卫星数
+    elevation_span_deg: 30.0 # 簇内仰角跨度最小值
+    cno_floor_db: 20.0       # 低于此值视为未跟踪/噪声，剔除
+    sep_gap_db: 10.0         # 顶部簇与下方卫星分离间隙
+    dominance_ratio: 0.8     # 顶部簇占有效卫星比例（整体接管场景）
+    cluster_avg_cno_db: 35.0  # 主导场景簇均值绝对高值
+  logic: |
+    1. 按 (卫星系统, 频点) 分组；
+    2. 以最高 C/N0 为锚取 >= max-2dB 的"顶部一致高簇"；
+    3. 簇内仰角跨度需 >=30°（低仰角本应更弱却与高仰角同强 → 异常）；
+    4. 簇与下方存在 >=10dB 分离间隙，或顶部簇占比 >=80% 且均值 >=35dB；
+    5. 顶部簇与仰角显著正相关（r>0.3）时排除（正常信号随仰角增强）。
+
+# === CLK099 Lock/Loss/Drift 4bit/5bit ===
+CLK099_LOCK_BITS:
+  desc: CLK099 Lock 失锁位掩码
+  bits:
+    0: CPU环失锁
+    1: SYNCE环失锁
+    2: CPRI环失锁
+    3: DCO环失锁
+CLK099_LOSS_BITS:
+  desc: CLK099 Loss 信号丢失位掩码
+  bits:
+    0: 50M丢失
+    1: SYNCE丢失
+    2: DCO丢失
+    3: OCXO丢失
+    4: 54M丢失
+CLK099_DRIFT_BITS:
+  desc: CLK099 Drift 频偏位掩码
+  bits:
+    0: 50M频偏
+    1: SYNCE频偏
+    2: DCO频偏
+    3: OCXO频偏
+    4: 54M频偏
+
+# === CLK099 XO/OC 频偏斜杠格式 ===
+CLK099_XO_OC:
+  desc: |
+    XO=3.219/4.411/0.000/5.007 为相对频偏（ppb），斜杠分隔：
+      XO 顺序 OCXO_XO / DCO_XO / 50M_XO / DCO_10M_XO；
+      OC 顺序 DCO_OCXO / SYNCE_OCXO / DCO_976k_OCXO / LT_976k_OCXO / 125M_OCXO。
+    Temp=in/out 为板内/板外温度（℃）。
+
+# === 无关键词位置格式（按空格顺序解析，parse_clock.py 内置）===
+POS_FORMATS:
+  desc: 部分 CLK 行无 key=，字段位置固定
+  CLK021:
+    order: [Ref, Lock, FixT, FixF, Agc, MPhase, APhase, CurDa, RecDa]
+    note: 参考源/锁定/定位类型/定位标志/AGC/主备相位/当前数据/接收数据
+  CLK027_028:
+    order: [PllStat, MPhase, cFCV, rFCV, Toffset]
+    note: 锁相状态/测量相位/计算FCV/参考FCV/时间偏差；5 值
+  CLK095:
+    order: [serial, pull_min, pull_max]
+    note: OCXO 黑匣子：序列号/最小牵引量/最大牵引量
+  CLK100_GNS:
+    header: "GNS Ant View Lock Fix State"
+    satellite_5: [prn, cno1, cno2, cno3, lock_state]
+    satellite_3: [prn, cno1, lock_state]
+  inputclock:
+    note: inputclock 文件无 Clk[099] 前缀，含 10ms= / RefClk= 的行归入 CLK099
+
+# === gnsssvinfo 行结构（GNSS 卫星信息）===
+GNSS_SVINFO:
+  desc: |
+    每行：时间, 状态头(15字段), 卫星记录...
+    旧格式 9 字段自动补齐 15。
+  status_15: [Ref, View, Lock, Fix, AGC, AGC1, AGC2,
+               JamInd, JamStatus, JamInd1, JamStatus1, JamInd2, JamStatus2,
+               Spoofing, Drift]
+  satellite_5: [prn, used, ele, azi, cno]
+  satellite_7: [prn, used, ele, azi, cno, cno1, cno2]
+  prn_map_nmea:
+    GP: [0-32, 0-158]
+    GL: [0-64, 64-96]
+    QZ: [0-202]
+    GA: [300-336]
+    BD: [400-500]
+  note: |
+    ele 为仰角（0-90）；cno 为载噪比（dB-Hz）；Spoofing 字段为设备侧欺骗指示。
+    parse_clock.py 对每行按 SatType 分组执行欺骗检测。
+
+# === UBX 0x0A1D SPEC 频谱报文（gnssspecinfo 二进制）===
+UBX_SPEC:
+  sync: "B5 62"
+  class: "0x0A"
+  id: "0x1D"
+  header: "payload[0:12]"
+  payload:
+    0: "rang U1（量程/档位）"
+    1: "type U1（频谱类型）"
+    2_3: "specLen U2 LE（频谱数据长度）"
+    4_7: "freOffect I4 LE signed（频偏，Hz）"
+    8_11: "fre U4 LE（中心频率，Hz）"
+    12_end: "data U1[specLen] 频谱采样"
+  note: parse_clock.py 对含 B5 62 0A 1D 的 CLK099 行输出 _ubx 结构。
+
+# === 关键数值字段阈值（parse_clock.py DEFAULT_RULES，单位见字段定义）===
+FIELD_THRESHOLDS:
+  desc: 关键字段默认正常范围；异常时 parse_clock 输出 anomaly
+  status_enum:
+    sts: [2, 3]
+    PllStat: [2, 3]
+    PllSts: [2, 3]
+    FixType: [4, 5]
+    FixFlg: [1]
+    Ant: [1]
+    UartErr: [0]
+    PpsStat: [0]
+    PpsSts: [0]
+    SerialSts: [0]
+    Flg: [0, 2]
+  absolute:
+    Dif: [-1500, 1500]        # 参考源相位差 ns
+    TE: [-100, 100]           # 时间偏差 ns
+    Pdv: [0, 1000]            # 分组时延偏差
+    DegVal: [-100, 100]       # 劣化值
+    cur_fcv: [-50.0, 50.0]    # OCXO 当前频偏 Hz
+    avg_temp: [20.0, 70.0]    # 板内平均温度 ℃
+
+# === mList 时钟文件清单 ===
+clock_files_mlist:
+  desc: 时钟模块 10 个固定日志文件（基名）
+  files:
+    - gnsssvinfo        # 卫星信息（欺骗检测主输入）
+    - clockdatalog      # 时钟运行数据
+    - clockstatuslog    # 时钟状态（主日志）
+    - gnssspecinfo      # GNSS 频谱（UBX 0x0A1D）
+    - gnssoriginalmsg   # GNSS 原始报文（二进制，默认人工）
+    - clockhwinfolog    # 硬件信息
+    - clockocxolog      # OCXO 日志
+    - gnssmovinfolog    # 移动信息
+    - gnsscrosscnomsg   # CNO 交叉信息
+    - inputclock        # 输入时钟（无前缀，归 CLK099）
+  collect_paths:
+    SDR: "OMMB_NE_LOG.zip → xx.gz"
+    ITRAN_VSW: "xx.zip → BSPxxHWM_APPxx.tar → BSP/xx.gz"
+    ITRAN_VBP: "xx.zip → xxPLATxxclockstatuslogxx.gz（另有 *Bsp*clockstatuslog* 配对）"
+  merge_note: |
+    parse_clock.py <目录> --merge 按 mList 基名 rglob 检索；
+    按父目录分组（不同网元/槽位不混合）；文件名列序倒序（.01 最新）；
+    排除名称含 all/db 的散文件；同名 .gz 与非 .gz 去重；坏 gz/bz2 跳过。
+
+# =============================================================================
+# 主控时钟告警码 ↔ 日志字段/门限映射（与 alarm-code-dictionary.yaml 联动）
+# 用途：子 Skill 从 fm-active 读到告警码后，按下表定位时钟日志中的判定字段。
+# 告警码权威定义（原因码/防抖/处理）见 alarm-code-dictionary.yaml。
+# =============================================================================
+alarm_field_mapping:
+  "198092217":
+    name: 系统时钟不可用
+    log_evidence:
+      - {clk: 99, field: sts, abnormal: [8, 9], meaning: "8=自由运行 / 9=辅助相位控"}
+      - {clk: 100, field: ref_sts, abnormal: [8], meaning: 自由运行}
+    note: 初始化 600s 后自由运行、300s 后辅助相位控才上报；复位初期不计
+  "198096802":
+    name: 同步丢失（控制电压异常）
+    log_evidence:
+      - {file: clockocxolog, field: 压控电压/控制电压, out_of_range_hex: ["<0x500", ">0xFB00"],
+         out_of_range_dec: ["<1280", ">64256"]}
+      - {clk: 95, field: maxVol}
+    note: 具体日志字段名需在真实 clockocxolog 案例上确认，确认前规则标人工核对
+  "198096830":
+    name: 时钟源相位差过大
+    log_evidence:
+      - {clk: 85, field: Dif, note: 主备相位差 ns，持续30s}
+      - {clk: 36, field: Flg, abnormal: [-1]}
+  "198096831/198096841":
+    name: 1588时钟链路异常
+    reason_code_field: 告警附加参数原因码 1-5
+    log_evidence:
+      - {clk: 23, field: Pdv}
+      - {clk: 23, field: TE}
+      - {clk: 23, field: PllSts}
+    masking: 报文接收异常 > 协商异常 > 时钟质量差 > 服务器时间异常 > PDV抖动
+    note: 屏蔽顺序用于根因收敛；5 个原因码的检测周期见告警字典
+  "198096833":
+    name: SyncE时钟异常
+    reason_code_field: 告警原因码 1-5
+    thresholds: {degraded_ppb: 400, ssm_lost_s: 63, phy_master_s: 63}
+    log_evidence:
+      - {clk: 11, field: frq}
+      - {clk: 12, field: DegVal}
+  "198096834":
+    name: 1PPS+TOD时钟源异常
+    reason_code_field: 告警原因码 1/2/3/17
+    thresholds: {degraded_phase_us: 15, degraded_ppb: 100}
+    log_evidence:
+      - {clk: 5, field: PpsStat, abnormal: [1,2,3,4,5]}
+      - {clk: 5, field: SerialSts, abnormal: [1,2,3]}
+      - {clk: 5, field: UartErr, abnormal: [1,2,3]}
+  "198096835":
+    name: GNSS接收机故障
+    reason_code_field: 告警原因码 1/2
+    log_evidence:
+      - {clk: 1, field: LockGps}
+      - {clk: 1, field: LockBd}
+      - {clk: 5, field: PpsStat}
+  "198096836":
+    name: GNSS天馈链路故障
+    reason_code_field: 告警原因码 1开路/2短路
+    log_evidence:
+      - {clk: 1, field: Ant, abnormal: {129: 天馈开路, 128: 天馈短路}}
+      - {clk: 32, alarm: "AntOpen / AntShort"}
+  "198096837":
+    name: GNSS接收机搜星故障
+    reason_code_field: 告警原因码 1-4
+    thresholds:
+      init_grace_s: 720
+      min_satellites: 4
+      visible_strong: {count: 6, cno_gt_db: 35}
+      lock_less_than: 4
+      lock_fail_persist_s: 120
+      signal_unavailable: {freq_ppb: 50, phase_us: 20, tod_min_year: 2018, pos_change_deg: 0.01}
+      degraded: {jump_ppb: 100, phase_diff_us: 1.5}
+    log_evidence:
+      - {file: gnsssvinfo, field: "status.View/Lock/Fix"}
+      - {file: gnsssvinfo, field: "satellites[].Cno/Ele"}
+  "198096840":
+    name: 系统时钟处于保持模式
+    log_evidence:
+      - {clk: 99, field: sts, abnormal: [5,7], meaning: "5=保持 / 7=SYNCE增强保持"}
+  "198097004":
+    name: 单板硬件故障（时钟域）
+    reason_code_field: 告警原因码 1-8（时钟相关为 2-1..2-6）
+    log_evidence:
+      - {clk: 99, field: ClkHealth, meaning: bitmask 见 CLK099_CLKHEALTH_VBP/VBPD1}
+  "198098315":
+    name: 单板输入时钟异常
+    reason_code_field: 告警原因码 1-4
+    log_evidence:
+      - {clk: 99, field: ClkHealth}
+      - {clk: 99, field: "Loss/Drift bitmask"}
+
+# === VSWe 主控板时钟工装测试（单板域；其它单板可能不同，详见 references/domains/clk-fixture-map.md）===
+VSWE_FIXTURE_REG:
+  desc: VSWe 主控板工装测试 FPGA/EPLD 寄存器位图（板内时钟告警测试/61.44M/PLL/接收机）
+  board: VSWe
+  source: VSWe 时钟工装测试方案（2022-06 初稿，评审后修订）
+  registers:
+    "0x4200": {name: 工作测试模式使能, values: {"21930": "进入工装测试模式(0x55aa)", "other": "正常工作模式"}}
+    "0x4204": {name: 工装测试模式模拟控制, bits: {"0": "模拟主备数据 SDA", "1": "模拟主备时钟 SCL", "2": "模拟单板状态 MS_STATUS", "4:3": "背板 2 路 fsync 使能", "6:5": "背板 2 路 61.44M 使能"}}
+    "0xC408": {name: FPGA 10M 时钟丢失告警, bits: {"1": "DCO 10M 时钟异常"}}
+    "0xC448": {name: 下发 61.44M 时钟错误, bits: {"8": "主 61.44M 输入异常"}}
+    "0xC458": {name: 主备 61.44M 时钟错误, bits: {"9": "主备 61.44M 输入异常"}}
+    "0xC468": {name: 反馈 61.44M 时钟错误(第0路), bits: {"16": "反馈 61.44M 信号异常"}}
+    "0xC4C8": {name: 反馈 FSYNC0 丢失, bits: {"4": "FSYNC0 异常"}}
+    "0xC4D8": {name: 反馈 FSYNC1 丢失, bits: {"22": "FSYNC1 异常(未使用)"}}
+    "0xC4E8": {name: OCXO 原始 10M 丢失告警, bits: {"?": "OCXO 10M 检测(待新增)"}}
+    "0xC488": {name: FPGA 250M 丢失告警, bits: {"3": "未使用"}}
+    "0x810": {name: FPGA I2C 状态, bits: {"0": "器件无应答", "1": "总线忙", "2": "读写完成", "15:5": "接收 FIFO 剩余字节数"}}
+    "0x120": {name: EPLD PLL 类型, values: {"0": "AU5518", "1": "8A35018"}}
+    "0x124": {name: EPLD OCXO 类型, bits: {"0": "1=有压控(启用有压控烧电压)/0=无压控"}}
+    "0x20C": {name: EPLD 接收机复位, bits: {"6": "0=拉低复位/1=复位解除(3.3V)"}}
+    "0xAA8": {name: 接收机电源, bits: {"6": "0=断电/1=上电"}}
+    "0xC600": {name: PP1S 告警事件控制, bits: {"0": "写1清/写0观察"}}
+    "0xC608": {name: PP1S 丢失状态, values: {"0": "正常"}}
+
+VSWE_FIXTURE_BSP:
+  desc: VSWe 主控板工装测试 BSP 返回值 BIT/错误码语义
+  board: VSWe
+  returns:
+    Bsp1588RefPpsTest:
+      desc: 1588 1PPS 测试
+      bits: {"0": "1588 1PPS 丢失", "1": "30s 内鉴相值获取超时(1.25s)", "2": "1588 1PPS 频偏异常(>50ppb)"}
+    UartLoopTest:
+      desc: 面板 485 环回（0=TOD(GPS串口)→1PPS(面板串口)，1=1PPS→TOD）
+      bits: {"0": "TOD→1PPS 环回失败", "1": "1PPS→TOD 环回失败"}
+    BspGcmVkStateGet:
+      desc: 烧电压状态（阶段用==判定、细节位用BIT、错误码用==判定）
+      stages: {"1": "读 0V 电压相位", "2": "读 5V 电压相位", "3": "读 2.5V 电压相位", "4": "存储时钟信息", "5": "烧电压完成", "6": "烧电压运行中"}
+      detail_bits: {"0x100": "相位 READY/PP1S 丢失", "0x200": "相位符号位异常", "0x400": "数据不合理"}
+      error_codes: {"0": "烧电压成功", "1": "未发起烧电压", "2": "电压标记清除失败", "3": "未检测到外部 1pps", "4": "0V 相位异常", "5": "5V 相位异常", "6": "中心电压异常", "7": "E2PROM 写异常", "8": "未知错误", "9": "2.5V 相位异常", "10": "2.5V-0V 相位检测异常", "11": "5V-2.5V 相位检测异常"}
+    DcoPllBiasTest:
+      desc: DCO 频率拉偏（-4ppm/0/+4ppm，门限 DCO_BAIS_ERROR_GATE）
+      bits: {"0": "-4ppm 频偏计算失败", "1": "+4ppm 频偏计算失败", "2": "0ppm 频偏计算失败", "3": "|P-4-P0+4ppm| 越界", "4": "|P4-P0-4ppm| 越界"}
+    IntRcvAntStatusGet:
+      desc: 天馈状态
+      values: {"1": "正常", "126": "初始化中", "127": "未知", "128": "天馈短路", "129": "天馈开路"}
+    BspGcmTestReceiver:
+      desc: 接收机状态检测（初始化状态>1=读写正常）
+      values: {"1": "接收机初始化状态阈值", "0": "OK 判定：查询到版本"}
+    Mte_BspGetPllLockStatus:
+      desc: "PLL 锁定状态（5518: reg0x06|0x07 & 0xF；35018: DPLL_STATUS burst 0x1F!=0x3 失锁）"
+      bits: {"0:3": "5518 PLL A-D 失锁", "31": "寄存器读写失败"}
+    Si5345InputRefSwTest:
+      desc: 1588_SyncE 恢复时钟
+      bits: {"0": "SyncE 本地 10M 参考失锁", "1:5": "外部 SyncE 参考失锁", "6:10": "FPGA 检测 SyncE 频偏>50ppm", "11": "面板五端口均未连接"}
+    BspPpsIntrTest:
+      desc: PP1S 中断（清中断延时 1.5s 重新触发=OK）
+    BspGetPtpStampTestResult:
+      desc: 1588 PTP 打戳（光口 50ns/电口 500ns 门限）
+      bits: {"0:10": "对应端口打戳失败", "11:21": "对应端口未测试"}
+
+# === ITRAN 单板 FPGA 寄存器（单板域：ITRAN；VSWe 等其它单板不得套用）===
+# 来源：ITRAN FPGA 寄存器表（精简版，AI 解析用）。N=板位/通道占位符；0xcxxN 基址 0xc000、
+# 0xd0xx 基址 0xd000；复位值默认 0。速查与排查决策链见 references/domains/fpga-register-map.md。
+ITRAN_FPGA_REG:
+  desc: ITRAN 单板 FPGA 寄存器速查（主控/时钟同步/告警检测，故障排查关键项）
+  board: ITRAN
+  source: ITRAN FPGA 寄存器表（精简版，AI 解析用）
+  registers:
+    # 主控区 · 时钟和复位（0x100~0x1ff）
+    "0x0104": {name: FPGA 内部 PLL 锁定, rw: R, bits: {"0": "250M 锁定(1=锁定)", "1": "260M 锁定(1=锁定)"}}
+    "0x0110": {name: 5331/xx18 参考输入选择, rw: R/W, values: {"0": "PHY synce 1.953125M", "1": "SW 第0路 synce(默认)", "2": "SW 第1路 synce"}}
+    "0x0114": {name: PLL 80227 状态, rw: R, bits: {"0": "STATUS 管脚输出", "1": "失锁 LD(0=锁定/1=失锁)", "2": "REFMON 输出"}}
+    "0x0118": {name: PLL 80227 控制, rw: R/W, bits: {"0": "复位控制(低有效)", "1": "下电控制(低有效)"}, note: 复位值 3}
+    "0x0128": {name: syncePP1S 配置选择, rw: R/W, values: {"0": "PHY synce PP1S", "1": "SW 第0路 PP1S(默认)", "2": "PHY 第1路 PP1S"}}
+    # 时钟同步区 · 单板及时钟主备（0x4300 起）
+    "0x4300": {name: B 类错误, rw: R/W, bits: {"0": "1=发生"}}
+    "0x4304": {name: B2 类错误, rw: R/W, bits: {"0": "1=发生"}}
+    "0x4308": {name: 初始上电结束(AD80227 初始化完成), rw: R/W, bits: {"0": "软件置1使能时钟主备竞争"}}
+    "0x4314": {name: 软件主备切换, rw: R/W, bits: {"0": "后台切换命令(高有效)"}}
+    "0x431c": {name: 主备控制 MS_CTL, rw: R/W, bits: {"0": "主备逻辑/主备信号驱动器使能", "1": "启动主备竞争(先置 EN_MS 再置 MS_ACT)", "2": "本板告警", "3": "本板运行", "4": "本板倒换请求(延时100us)", "5": "本板复位输出(延时100us)"}}
+    "0x4320": {name: 主备状态 MS_STATE, rw: R, bits: {"0": "对方板上电", "1": "对方板运行", "2": "本板主备(1=主用)", "3": "对方板主备(1=主用)", "4": "对方板告警", "5": "对方板复位", "6": "对方板请求倒换"}}
+    "0x4324": {name: 本板时钟状态, rw: R, values: {"10110": "主板正常", "01110": "备板正常", "10100": "主板 B 类", "01100": "备板 B 类", "10010": "主板 A 类", "01010": "备板 A 类", "01011": "备板 b2", "10011": "主板 b2", "00001": "初始上电"}}
+    "0x4328": {name: 对板时钟状态, rw: R, note: 编码定义同 0x4324}
+    "0x4348": {name: A 类错误, rw: R, bits: {"0": "1=发生过"}}
+    "0x4370": {name: 时钟主备状态, rw: R, values: {"1": "主", "0": "备"}}
+    "0x4408": {name: 主备时钟数据屏蔽, rw: R/W, values: {"0x55aa": "关闭时钟", "other": "打开(默认)"}}
+    # 告警及检测区（基址 0xc000）
+    "0xcxx0": {name: 告警清除, rw: R/W, bits: {"0": "告警清除(上升沿)", "1": "告警计数清零(上升沿)"}}
+    "0xcxx4": {name: 告警模拟, rw: R/W, bits: {"0": "告警模拟(高有效)"}}
+    "0xcxx8": {name: 告警状态, rw: R, bits: {"0": "告警事件(1=发生过)", "1": "告警实时(1=有告警)"}}
+    "0xcxxc": {name: 告警计数, rw: R, note: 计至 65535 回 0 重计}
+    "0xc30N": {name: 时钟错误类型告警, rw: R, bits: {"0": "B2 类", "1": "B 类", "2": "A 类"}}
+    "0xc40N": {name: A 类·10M 时钟丢失, rw: R}
+    "0xc41N": {name: A 类·80227 失锁, rw: R}
+    "0xc42N": {name: A 类·260M PLL 失锁, rw: R}
+    "0xc43N": {name: A 类·250M PLL 失锁, rw: R}
+    "0xc44N": {name: A 类·下发 61.44M 时钟错误, rw: R}
+    "0xc45N": {name: A 类·主备 61.44M 时钟错误, rw: R}
+    "0xc46N": {name: A 类·反馈第0路 61.44M 错误, rw: R}
+    "0xc47N": {name: A 类·反馈第1路 61.44M 错误, rw: R}
+    "0xc48N": {name: A 类·鉴相 250M 时钟错误, rw: R}
+    "0xc49N": {name: A 类·参考 pp1s 错误, rw: R}
+    "0xc4aN": {name: A 类·参考 pp1s 过长, rw: R}
+    "0xc4bN": {name: A 类·参考 pp1s 过短, rw: R}
+    "0xc4cN": {name: A 类·第0路 fsync 丢失, rw: R, note: 仅主板检测}
+    "0xc4dN": {name: A 类·第1路 fsync 丢失, rw: R, note: 仅主板检测}
+    "0xc4eN": {name: A 类·OCXO 输入 10M 丢失, rw: R, note: 5531/35081 方案}
+    "0xc50N": {name: 反馈 fsync·第0路错误, rw: R}
+    "0xc51N": {name: 反馈 fsync·第0路失步, rw: R}
+    "0xc52N": {name: 反馈 fsync·第0路早到, rw: R}
+    "0xc53N": {name: 反馈 fsync·第0路晚到, rw: R}
+    "0xc54N": {name: 反馈 fsync·第1路错误, rw: R}
+    "0xc55N": {name: 反馈 fsync·第1路失步, rw: R}
+    "0xc56N": {name: 反馈 fsync·第1路早到, rw: R}
+    "0xc57N": {name: 反馈 fsync·第1路晚到, rw: R}
+    "0xc58N": {name: 第0路 decode_pp2s 错误, rw: R}
+    "0xc59N": {name: 第0路 decode_pp2s 过长, rw: R}
+    "0xc5aN": {name: 第0路 decode_pp2s 过短, rw: R}
+    "0xc5bN": {name: 第1路 decode_pp2s 错误, rw: R}
+    "0xc5cN": {name: 第1路 decode_pp2s 过长, rw: R}
+    "0xc5dN": {name: 第1路 decode_pp2s 过短, rw: R}
+    "0xc60N": {name: PP1S 检测·gps_pp1s 错误, rw: R}
+    "0xc61N": {name: PP1S 检测·gps_pp1s 过长, rw: R}
+    "0xc62N": {name: PP1S 检测·gps_pp1s 过短, rw: R}
+    "0xc63N": {name: PP1S 检测·第0路 485pp1s 错误, rw: R}
+    "0xc64N": {name: PP1S 检测·第0路 485pp1s 过长, rw: R}
+    "0xc65N": {name: PP1S 检测·第0路 485pp1s 过短, rw: R}
+    "0xc66N": {name: PP1S 检测·第1路 485pp1s 错误, rw: R}
+    "0xc67N": {name: PP1S 检测·第1路 485pp1s 过长, rw: R}
+    "0xc68N": {name: PP1S 检测·第1路 485pp1s 过短, rw: R}
+    "0xc69N": {name: PP1S 检测·1588pp1s 错误, rw: R}
+    "0xc6aN": {name: PP1S 检测·1588pp1s 过长, rw: R}
+    "0xc6bN": {name: PP1S 检测·1588pp1s 过短, rw: R}
+    "0xc6cN": {name: PP1S 检测·第一路虚拟 pp1s 错误, rw: R}
+    "0xc6dN": {name: PP1S 检测·第一路虚拟 pp1s 过长, rw: R}
+    "0xc6eN": {name: PP1S 检测·第一路虚拟 pp1s 过短, rw: R}
+    "0xc6fN": {name: PP1S 检测·decode_pp1s 错误, rw: R}
+    "0xc70N": {name: PP1S 检测·decode_pp1s 过长, rw: R}
+    "0xc71N": {name: PP1S 检测·decode_pp1s 过短, rw: R}
+    "0xc72N": {name: PP1S 检测·vsc0_pp1s 错误, rw: R}
+    "0xc73N": {name: PP1S 检测·vsc0_pp1s 过长, rw: R}
+    "0xc74N": {name: PP1S 检测·vsc0_pp1s 过短, rw: R}
+    "0xc75N": {name: PP1S 检测·vsc1_pp1s 错误, rw: R}
+    "0xc76N": {name: PP1S 检测·vsc1_pp1s 过长, rw: R}
+    "0xc77N": {name: PP1S 检测·vsc1_pp1s 过短, rw: R}
+    "0xc78N": {name: PP1S 检测·第二路虚拟 pp1s 错误, rw: R}
+    "0xc79N": {name: PP1S 检测·第二路虚拟 pp1s 过长, rw: R}
+    "0xc7aN": {name: PP1S 检测·第二路虚拟 pp1s 过短, rw: R}
+    "0xc7bN": {name: PP1S 检测·第三路虚拟 pp1s 错误, rw: R}
+    "0xc7cN": {name: PP1S 检测·第三路虚拟 pp1s 过长, rw: R}
+    "0xc7dN": {name: PP1S 检测·第三路虚拟 pp1s 过短, rw: R}
+    "0xc80N": {name: 1588+SyncE·phy 第0路时钟错误, rw: R}
+    "0xc81N": {name: 1588+SyncE·phy 第1路时钟错误, rw: R}
+    "0xc83N": {name: 1588+SyncE·sw 第0路时钟错误, rw: R}
+    "0xc85N": {name: 1588+SyncE·sw 第1路时钟错误, rw: R}
+    "0xc86N": {name: 1588+SyncE·1588_250M 时钟错误, rw: R}
+    "0xc87N": {name: 1588+SyncE·外部 SyncE pp1s 过短, rw: R}
+    "0xc88N": {name: 1588+SyncE·外部 SyncE pp1s 过长, rw: R}
+    "0xc89N": {name: 1588+SyncE·外部 SyncE pp1s 丢失, rw: R}
+    "0xca0N": {name: I2C 应答·OCXO 地址无应答, rw: R}
+    "0xca1N": {name: I2C 应答·OCXO 数据无应答, rw: R}
+    "0xca2N": {name: I2C 应答·SFP 地址无应答, rw: R}
+    "0xca3N": {name: I2C 应答·SFP 数据无应答, rw: R}
+    "0xca4N": {name: I2C 应答·QSFP 地址无应答, rw: R}
+    "0xca5N": {name: I2C 应答·QSFP 数据无应答, rw: R}
+    # 中断（基址 0xd000）
+    "0xd000": {name: PP1S 中断清除, rw: R/W, bits: {"0": "事件清除(高有效)"}}
+    "0xd004": {name: PP1S 中断设置, rw: R/W, bits: {"0": "屏蔽输出管脚中断(不屏蔽内部)", "1": "模拟中断(高有效)"}}
+    "0xd008": {name: PP1S 中断寄存器, rw: R, bits: {"1": "实时状态(1ms 低脉冲)", "0": "中断事件(软件清)"}}
+    "0xd00c": {name: 普通中断清除, rw: R/W, bits: {"15:0": "每 bit 一路中断,1 有效"}}
+    "0xd010": {name: 普通中断模拟, rw: R/W, bits: {"0": "时钟错误(本板/对板时钟差 A/B/B2 类)", "1": "主备状态切换(主变备)", "2": "状态切换(备响应软件请求)", "3": "对板复位(EPLD 单独复位 FPGA)", "4": "对板拔出(检测不到对板时钟)", "14": "面板主备按键倒换"}}
+    "0xd014": {name: 普通中断掩码, rw: R/W, bits: {"15:0": "1=禁止/0=允许,只屏蔽输出管脚"}}
+    "0xd018": {name: 普通中断状态(实时), rw: R, bits: {"15:0": "bit 定义同 0xd010"}}
+    "0xd01c": {name: 普通中断事件, rw: R, bits: {"15:0": "高有效,软件清;bit 定义同 0xd010"}}
+    # 光模块告警（基址 0xd020；公共 bit：bit9-8=QSFP2、bit7-6=QSFP1、bit5-3=光模块2、bit2-0=光模块1，均按 los/错误/不在位）
+    "0xd020": {name: 光模块告警事件清零, rw: R/W, bits: {"15:0": "对应 bit 置1 上升沿清零事件"}}
+    "0xd024": {name: 光模块告警错误模拟, rw: R/W, bits: {"15:0": "对应 bit 置1 模拟告警"}}
+    "0xd028": {name: 光模块告警状态(实时), rw: R, bits: {"15:0": "1=实时告警"}}
+    "0xd02c": {name: 光模块告警事件, rw: R, bits: {"15:0": "1=已发生告警(事件)"}}
+    "0xd030": {name: 光模块告警次数清零, rw: R/W}
+    "0xd034": {name: SFP 不在位告警次数, rw: R, bits: {"15:8": "光模块2", "7:0": "光模块1"}}
+    "0xd038": {name: SFP 错误告警次数, rw: R, bits: {"15:8": "光模块2 tx_fault", "7:0": "光模块1 tx_fault"}}
+    "0xd03c": {name: SFP los 告警次数, rw: R, bits: {"15:8": "光模块2 rx_los", "7:0": "光模块1 rx_los"}}
+    "0xd040": {name: QSFP 不在位告警次数, rw: R, bits: {"15:8": "QSFP2", "7:0": "QSFP1"}}
+    "0xd044": {name: QSFP 中断告警次数, rw: R, bits: {"15:8": "QSFP2", "7:0": "QSFP1"}}
+    "0xd048": {name: 面板主备按键次数计数, rw: R}
+    "0xd04c": {name: DSFP 不在位告警次数, rw: R}
+    "0xd050": {name: DSFP 中断告警次数, rw: R}
+
+
+# === VSWe 维测手册补充（单板域：VSWe）===
+# 来源：VSWe 时钟维测手册（告警/网管/前台/CLK 日志语义，v2.9.8 沉淀）
+
+# === SSM 质量等级（CLK[011] SsmQL）===
+CLK011_SsmQL:
+  desc: SSM 质量等级（CLK[011] SsmQL）
+  values:
+    2: PRC 正常
+    other: 异常（外场按实际配置判断）
+
+# === CLK[037] SDR1588ATR 指示码（行首 %03u）===
+CLK037_ATR:
+  desc: SDR1588ATR 算法控制异常指示码（CLK[037] 行首 %03u）
+  bits:
+    0: 主相位对齐
+    1: TOffset/PDV 异常
+    2: Freq 抖动异常
+    3: 1588 宽松同步辅助相位控持续时间超过 1h
+    4: 滤波不可用超过 360 次
+    5: 后台手动调整 Offset
+    6: 通过调整 OCXO 频偏调整相位
+    7: 进入快捕时刻（非异常，记录用）
+
+# === 时钟保持能力（BspGetHoldCapability / ulHoldCapability / Hold Capability）===
+HOLD_CAPABILITY:
+  desc: 时钟保持能力（BspGetHoldCapability / ClockDiagInfoShow ulHoldCapability）
+  values:
+    0: 没有保持能力
+    1: 1 小时保持能力
+    2: 4 小时保持能力
+    3: 24 小时保持能力
+    4: SYNCE 增强保持
+
+# === VSWe 主控 CLK[099] 行格式（与 VBP ClkHealth 不同域）===
+# 行格式：10MHz=%u 80MHz=%u NetPll=%u Pps=%u Fsync=%03x 50Chip=%03x SesPLL=%u PLost=%u
+CLK099_VSWE:
+  desc: VSWe 主控 CLK[099] 行字段与 50Chip 位定义（VBP 用 CLK099_CLKHEALTH_VBP）
+  board: VSWe
+  line_format: "10MHz=%u 80MHz=%u NetPll=%u Pps=%u Fsync=%03x 50Chip=%03x SesPLL=%u PLost=%u"
+  fields:
+    "10MHz": {desc: 本地 10M 状态, values: {"0": "正常", "1": "本地 10M 丢失(PLL 检测 OCXO 丢失,xx18 扩展方式待定)"}}
+    "80MHz": {desc: 鉴相 250M 状态, values: {"0": "正常", "1": "鉴相 250M 时钟错误(0xc488)"}}
+    NetPll: {desc: 网口 PLL 状态, values: {"0": "正常", "1": "SYNCE 或 CPU 环失锁"}}
+    Pps: {desc: PPS 状态, note: 含义同 PpsStat 枚举}
+    Fsync: {desc: FSYNC 告警状态寄存器值(0x0c4xx 系列), note: 位定义见 50chip}
+    SesPLL: {desc: DCO/CPRI 环, values: {"0": "正常", "1": "DCO 或 CPRI 环失锁"}}
+    PLost: {desc: 鉴相值获取, values: {"0": "正常", "1": "持续 1min 从 FPGA 获取鉴相状态 error"}}
+  50chip:
+    fsync_bits: {0: FSYNC1 校验告警(1=故障), 1: FSYNC1 失步告警, 2: FSYNC1 晚到告警, 3: FSYNC1 早到告警, 8: FSYNC2 校验告警, 9: FSYNC2 失步告警, 10: FSYNC2 晚到告警, 11: FSYNC2 早到告警}
+    serdes_bits: {2: "0 路输出反馈 SERDES 时钟丢失", 3: "1 路", 4: "2 路", 5: "3 路", 6: "4 路", 7: "5 路"}
+    chip50_bits: {8: "10ms 计时 50chip 时钟错误", 9: "同步 50chip 时钟错误", 10: "级联 50chip 时钟错误", 11: "HW 50chip 时钟错误(仅 CC4/5/6)"}
+    note: 原文两段位定义在 bit2-3/8-11 重叠矛盾（fsync 位 vs serdes/50chip 位），沉淀保留两段并以实测为准

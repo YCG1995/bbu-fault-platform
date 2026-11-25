@@ -1,0 +1,211 @@
+skill:
+  name: bbu-fault-vsw-usbflash
+  title: "VSW 单板 USB FLASH 故障分析"
+  version: "0.1.0"
+  execution_mode: script
+
+category: "单板存储类"
+
+components:
+  unpack: true
+  search: true
+  report: true
+  common_rules: false
+
+fault:
+  name: "VSW 单板 USB FLASH 故障"
+  aliases: ["USBFLASH故障", "USB FLASH故障", "USB Flash故障", "FLASH写保护"]
+  alarm_codes: []
+  domain:
+    device_types: ["BBU/OSS", "SDR"]
+    modes: ["待补充"]
+    boards: ["VSWc", "VSWd"]
+    version_scope: "待补充"
+    collection_sources: ["dcm-zip", "cloudmat-text", "device-tar"]
+  triggers:
+    - "蜂鸟扫描反馈 FLASH 存在写保护"
+    - "版本升级失败，激活版本包超时"
+    - "基站处于初始化状态，文件系统无法写入，反复自愈复位"
+    - "sdb6 占用 100%，或升级所需 Flash 空间不足"
+    - "VSWd1 资源使用率过高，存储空间不足"
+  exclusions:
+    - "仅 usb 1-2 或其他非 USB FLASH 端口断开，且无 sdb/USB Mass Storage 证据"
+    - "仅 SSD/硬盘容量或升级包问题，USB FLASH 的 SMART 与内核均无异常"
+
+symptoms:
+  observable:
+    - "蜂鸟扫描结果反馈“FLASH存在写保护”"
+    - "版本升级失败，激活版本包超时"
+    - "基站初始化状态，文件系统无法写入，自愈复位"
+    - "查看内存 sdb6 占用 100%"
+    - "升级所需 Flash 空间不足"
+    - "VSWd1 资源使用率过高，存储空间不足"
+  description_keywords:
+    - "USBFLASH"
+    - "USB FLASH"
+    - "写保护"
+    - "版本升级失败"
+    - "文件系统无法写入"
+    - "sdb6"
+    - "空间不足"
+    - "资源使用率过高"
+    - "protect_status"
+  impact: "版本升级失败，站点反复复位"
+  time_pattern: "偶发"
+  lookalikes:
+    - fault: "SSD/硬盘升级失败"
+      differentiator: "SSD 相关日志与 USB FLASH 的 sdb/USB Mass Storage 无关；USB FLASH 故障会出现 sdb I/O error、protect_status 非 0 或 SMART 获取失败"
+    - fault: "其他 USB 端口设备异常"
+      differentiator: "只有 usb 1-1 是 USB FLASH；usb 1-2 或其他编号断开不能按本故障处理"
+
+analysis:
+  steps:
+    - id: S1
+      title: "排查内核 USB FLASH 报错"
+      objective: "确认 usb 1-1 是否断开，或 sdb 是否出现 I/O 错误"
+      targets:
+        - globs: ["**/kernel*", "**/*.klog*", "**/OssLogVsw/**", "**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E1
+          step: S1
+          description: "USB FLASH 对应的 usb 1-1 端口断开"
+          type: text
+          globs: ["**/kernel*", "**/*.klog*", "**/OssLogVsw/**", "**/*.log"]
+          encoding: auto
+          format: text
+          any_of: ["usb 1-1: USB disconnect"]
+          min_matches: 1
+          context_lines: 2
+          case_sensitive: false
+        - id: E2
+          step: S1
+          description: "sdb 出现 critical medium error 或 Buffer I/O error"
+          type: text
+          globs: ["**/kernel*", "**/*.klog*", "**/OssLogVsw/**", "**/*.log"]
+          encoding: auto
+          format: text
+          any_of:
+            - "blk_update_request: critical medium error"
+            - "Buffer I/O error on dev sdb"
+          min_matches: 1
+          context_lines: 3
+          case_sensitive: false
+      decision:
+        on_hit: {conclusion: "发现 USB FLASH 内核报错，继续检查 SMART", goto: S2}
+        on_miss: {conclusion: "未发现 USB FLASH 内核报错，继续检查 SMART", goto: S2}
+
+    - id: S2
+      title: "检查 SMART 写保护状态"
+      objective: "确认 USB FLASH 是否进入写保护状态"
+      targets:
+        - globs: ["**/BoardInit.log*", "**/BoardHealth.log*", "**/BSP/**/BoardInit.log*", "**/BSP/**/BoardHealth.log*", "**/BSP/**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E4
+          step: S2
+          description: "SMART protect_status 为非 0 值，USB FLASH 处于写保护"
+          type: text
+          globs: ["**/BoardInit.log*", "**/BoardHealth.log*", "**/BSP/**/BoardInit.log*", "**/BSP/**/BoardHealth.log*", "**/BSP/**/*.log"]
+          encoding: auto
+          format: text
+          any_of: ["protect_status\\s*:\\s*[1-9A-Fa-f]"]
+          min_matches: 1
+          context_lines: 2
+          case_sensitive: false
+      decision:
+        on_hit: {conclusion: "SMART 显示写保护，判定为 USB FLASH 写保护根因", goto: R1}
+        on_miss: {conclusion: "未发现写保护，继续检查 SMART 获取状态", goto: S3}
+
+    - id: S3
+      title: "检查 SMART 获取状态"
+      objective: "确认 SMART 信息是否可正常读取"
+      targets:
+        - globs: ["**/BoardInit.log*", "**/BoardHealth.log*", "**/BSP/**/BoardInit.log*", "**/BSP/**/BoardHealth.log*", "**/BSP/**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E5
+          step: S3
+          description: "SMART 信息无法读取，出现 this flash not support 或 idVendor=0"
+          type: text
+          globs: ["**/BoardInit.log*", "**/BoardHealth.log*", "**/BSP/**/BoardInit.log*", "**/BSP/**/BoardHealth.log*", "**/BSP/**/*.log"]
+          encoding: auto
+          format: text
+          any_of:
+            - "this flash not support"
+            - "idVendor\\s*=\\s*0"
+            - "Manufacturer:\\(null\\)"
+          min_matches: 1
+          context_lines: 3
+          case_sensitive: false
+      decision:
+        on_hit: {conclusion: "SMART 无法读取，判定为 USB FLASH 器件异常", goto: R3}
+        on_miss: {conclusion: "SMART 可读，按内核 I/O 证据判断", goto: R2}
+
+root_causes:
+  - id: R1
+    name: "USB FLASH 写保护"
+    condition: "E4"
+    mechanism: "USB FLASH 进入写保护状态后，文件系统无法写入，导致版本升级失败、sdb6 占用异常和反复自愈复位。"
+    confidence: high
+    actions:
+      - "通过打开写保护修复开关恢复 USB FLASH 写权限"
+      - "恢复后重新执行版本升级或蜂鸟扫描，确认写保护告警消失"
+    prerequisites:
+      - "确认现场具备写保护修复开关操作条件"
+      - "升级/复位操作前保留原日志和版本包"
+    risks: "修复/复位单板操作可能导致站点无法恢复"
+    rollback: "修复无效时恢复原状态，保留日志并升级二线处理"
+    verify:
+      - globs: ["**/BoardInit.log*", "**/BoardHealth.log*"]
+        patterns: ["protect_status\\s*:\\s*0{1,2}"]
+        expect: present
+        hold_time: "修复后观察蜂鸟扫描无写保护告警"
+    escalation: "写保护修复后仍无法写入时，附 BoardInit/BoardHealth 日志升级硬件分析"
+
+  - id: R2
+    name: "USB FLASH 器件或 I/O 链路故障"
+    condition: "(E1 or E2) and not E4"
+    mechanism: "USB FLASH 设备断开或 sdb 出现 medium error/Buffer I/O error，导致文件系统无法稳定读写，引起升级失败和复位。"
+    confidence: medium
+    actions:
+      - "先尝试复位单板，观察 USB FLASH 是否重新识别"
+      - "复位不生效时按单板返修流程处理"
+    prerequisites:
+      - "确认故障时段完整内核日志已采集"
+    risks: "复位单板可能导致站点暂时无法恢复"
+    rollback: "复位无效时保留原板与日志，升级返修"
+    verify:
+      - globs: ["**/kernel*", "**/*.klog*"]
+        patterns: ["USB Mass Storage device detected"]
+        expect: present
+        hold_time: "复位后观察 USB FLASH 识别正常、升级不再失败"
+    escalation: "反复出现 sdb I/O error 时附 kernel.klog 与 SMART 信息升级硬件分析"
+
+  - id: R3
+    name: "USB FLASH SMART 获取失败/器件异常"
+    condition: "E5 and not E4 and not E1 and not E2"
+    mechanism: "SMART 信息无法读取，说明 USB FLASH 器件或固件异常，平台无法判断写保护与健康状态，进而影响升级和文件系统写入。"
+    confidence: medium
+    actions:
+      - "先尝试复位单板，观察 SMART 信息是否恢复"
+      - "复位不生效时按单板返修流程处理"
+    prerequisites:
+      - "已获取 BoardInit/BoardHealth 日志"
+    risks: "复位单板可能导致站点暂时无法恢复"
+    rollback: "复位无效时保留原板与日志，升级返修"
+    verify:
+      - globs: ["**/BoardInit.log*", "**/BoardHealth.log*"]
+        patterns: ["protect_status\\s*:"]
+        expect: present
+        hold_time: "复位后观察 SMART 信息可正常读取"
+    escalation: "SMART 始终无法读取时附完整 BoardHealth 日志升级硬件分析"
+
+quick_signatures:
+  - id: Q1
+    file_hints: [".log", ".klog"]
+    any_of: ["USB disconnect", "Buffer I/O error on dev sdb", "protect_status", "this flash not support"]
+    note: "出现 USB FLASH 相关内核或 SMART 特征，先标疑似"
