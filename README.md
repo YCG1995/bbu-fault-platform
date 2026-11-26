@@ -21,6 +21,15 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.1 用户每日用量图表
+
+本版本把 1.24.0 的用户每日用量表升级为图表视图；数据库 schema 保持 21，接口字段不变。
+
+- **每日堆叠柱图**：按日期堆叠每个用户的用量，支持在 Token 与调用次数之间切换；图例显示每个用户在当前窗口内的合计，用户较多时合并为“其他用户”。
+- **图表 + 精确明细**：图表下方保留用户汇总表与可展开的每日明细，图表看趋势、表格核对数字。
+- **权限不变**：管理员可查看全部用户或指定用户；普通用户只显示自己的曲线。
+- 验证：单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.1.md`。
+
 ## 1.24.0 用户每日用量
 
 本版本在 1.23.0 用量统计基础上补充“每个用户每天的使用次数和总量”，数据库 schema 保持 21。
@@ -259,13 +268,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.0-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.1-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.0-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.1-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

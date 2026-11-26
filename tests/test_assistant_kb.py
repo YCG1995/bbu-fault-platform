@@ -31,7 +31,7 @@ class KnowledgeBaseTests(unittest.TestCase):
 
     def test_public_contract_unchanged(self) -> None:
         docs = self.kb.list_docs()
-        self.assertEqual(len(docs), 15)
+        self.assertEqual(len(docs), 16)
         self.assertEqual(set(docs[0]), {"slug", "title", "description", "uri", "path"})
         item = self.kb.read("user-guide")
         self.assertIsNotNone(item)

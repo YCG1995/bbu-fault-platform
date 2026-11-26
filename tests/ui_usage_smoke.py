@@ -128,7 +128,12 @@ def main() -> int:
             page.wait_for_selector("text=任务 Token")
             page.wait_for_selector("text=用户每日用量")
             assert page.locator(".usage-subdetails").count() == 1
+            assert page.locator(".usage-user-chart .usage-chart").count() == 1
             page.screenshot(path=str(out / "usage-1440.png"), full_page=True)
+            page.locator("[data-act='user-metric'][data-metric='calls']").click()
+            page.wait_for_timeout(600)
+            assert page.locator(".usage-user-chart .usage-chart").count() == 1
+            page.screenshot(path=str(out / "usage-user-calls.png"), full_page=True)
             assert page.locator(".usage-legend-item").count() >= 1
             assert page.locator(".usage-kpis .stat").count() == 4
             page.select_option("select[data-change='user']", str(

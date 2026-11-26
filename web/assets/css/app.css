@@ -882,3 +882,8 @@ table.data tr.row-hover:hover td { background: #f8fafc; }
 .usage-subdetails summary::-webkit-details-marker { display: none; }
 .usage-subdetails summary::before { content: "▸ "; }
 .usage-subdetails[open] summary::before { content: "▾ "; }
+
+/* 移动端图表随卡片宽度缩放，避免只能看到半张图 */
+@media (max-width: 720px) {
+  .usage-chart { min-width: 0; }
+}

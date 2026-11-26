@@ -3,6 +3,7 @@ import { api, bindActions, esc, fmtDur, fmtSize, icon, mount, state } from './co
 
 const RANGE_OPTIONS = [7, 30, 90];
 const MODEL_COLORS = ['#2f6fed', '#12a594', '#f59e0b', '#8b5cf6', '#ef6a5b', '#64748b', '#0ea5e9', '#84cc16'];
+const USER_COLORS = ['#0f766e', '#2563eb', '#d97706', '#7c3aed', '#dc2626', '#64748b', '#0891b2', '#65a30d'];
 const SCOPE_LABELS = { admin: '共享', personal: '个人' };
 const TASK_STATUS = {
   running: ['info', '运行中'], queued: ['muted', '排队中'], done: ['ok', '已完成'],
@@ -13,6 +14,7 @@ const TASK_STATUS = {
 let usageDays = 30;
 let usageUser = '';
 let usageMetric = 'total_tokens';
+let usageUserMetric = 'total_tokens';
 let usagePage = 1;
 let usageDirectory = [];
 let usageLoading = false;
@@ -104,6 +106,86 @@ function chartHtml(data) {
   return `<div class="usage-chart-wrap">
     <svg class="usage-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="每日模型使用统计">
       <title>每日各模型${usageMetric === 'calls' ? '调用次数' : 'Token 消耗'}</title>
+      ${grid}${bars}
+    </svg>
+    <div class="usage-legend">${legend}</div>
+  </div>`;
+}
+
+function userChartHtml(data) {
+  const userDaily = data.user_daily || [];
+  const labels = (data.daily || []).map((d) => d.date);
+  if (!userDaily.length || !labels.length) return '<div class="usage-empty">当前范围没有用户调用记录</div>';
+  const dayMap = new Map(userDaily.map((d) => [d.date, d]));
+  const aggregate = new Map();
+  userDaily.forEach((day) => (day.users || []).forEach((u) => {
+    const item = aggregate.get(String(u.user_id)) || {
+      key: String(u.user_id), name: u.user_name || `用户 #${u.user_id}`,
+      calls: 0, total_tokens: 0,
+    };
+    item.name = u.user_name || item.name;
+    item.calls += Number(u.calls || 0);
+    item.total_tokens += Number(u.total_tokens || 0);
+    aggregate.set(item.key, item);
+  }));
+  const userItems = [...aggregate.values()].sort((a, b) =>
+    (b.total_tokens - a.total_tokens) || (b.calls - a.calls) || a.key.localeCompare(b.key));
+  const top = userItems.slice(0, 6);
+  const topKeys = new Set(top.map((u) => u.key));
+  const other = { key: '__other', name: '其他用户', calls: 0, total_tokens: 0 };
+  userItems.forEach((u) => {
+    if (topKeys.has(u.key)) return;
+    other.calls += u.calls;
+    other.total_tokens += u.total_tokens;
+  });
+  const items = [...top, other];
+  const colors = new Map(items.map((u, i) => [u.key, u.key === '__other'
+    ? '#94a3b8' : USER_COLORS[i % USER_COLORS.length]]));
+  const metric = (u) => usageUserMetric === 'calls' ? Number(u.calls || 0) : Number(u.total_tokens || 0);
+  const series = labels.map((date) => {
+    const byKey = new Map();
+    const day = dayMap.get(date);
+    (day?.users || []).forEach((u) => {
+      const key = topKeys.has(String(u.user_id)) ? String(u.user_id) : '__other';
+      byKey.set(key, (byKey.get(key) || 0) + metric(u));
+    });
+    return byKey;
+  });
+  const max = Math.max(1, ...series.flatMap((row) => [...row.values()]));
+  const W = 760, H = 286, PL = 58, PR = 14, PT = 18, PB = 38;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const slot = plotW / labels.length;
+  const barW = Math.max(4, Math.min(20, slot * 0.64));
+  const yTicks = 4;
+  const grid = Array.from({ length: yTicks + 1 }, (_, i) => {
+    const value = (max / yTicks) * i;
+    const y = PT + plotH - (value / max) * plotH;
+    return `<g><line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="var(--line)" stroke-width="1"/>
+      <text x="${PL - 8}" y="${y + 4}" text-anchor="end" class="usage-axis">${usageUserMetric === 'calls' ? num(Math.round(value)) : num(value)}</text></g>`;
+  }).join('');
+  const labelEvery = labels.length <= 10 ? 1 : labels.length <= 30 ? 3 : 7;
+  const bars = labels.map((date, i) => {
+    let y = PT + plotH;
+    const x = PL + slot * i + (slot - barW) / 2;
+    const parts = items.map((u) => {
+      const value = series[i].get(u.key) || 0;
+      if (!value) return '';
+      const h = (value / max) * plotH;
+      y -= h;
+      return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}"
+        fill="${colors.get(u.key)}" rx="2"><title>${esc(date)} ${esc(u.name)}：${usageUserMetric === 'calls' ? `${num(value)} 次调用` : `${num(value)} Token`}</title></rect>`;
+    }).join('');
+    const label = i % labelEvery === 0 || i === labels.length - 1
+      ? `<text x="${(x + barW / 2).toFixed(2)}" y="${H - 14}" text-anchor="middle" class="usage-axis">${esc(date.slice(5))}</text>`
+      : '';
+    return `<g>${parts}${label}</g>`;
+  }).join('');
+  const legend = items.filter((u) => series.some((row) => row.get(u.key))).map((u) => `
+    <span class="usage-legend-item"><i style="background:${colors.get(u.key)}"></i>${esc(u.name)}
+      <span class="usage-scope">${num(metric(u))} ${usageUserMetric === 'calls' ? '次' : 'Token'}</span></span>`).join('');
+  return `<div class="usage-chart-wrap usage-user-chart">
+    <svg class="usage-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="用户每日用量统计">
+      <title>各用户每日${usageUserMetric === 'calls' ? '调用次数' : 'Token 消耗'}</title>
       ${grid}${bars}
     </svg>
     <div class="usage-legend">${legend}</div>
@@ -239,7 +321,13 @@ function render(data, taskPage) {
       <td class="num" data-label="总 Token"><strong>${num(u.total_tokens)}</strong></td>
     </tr>`)).join('') || `<tr><td colspan="7" class="usage-empty">暂无每日用户记录</td></tr>`;
   const userTable = `<div class="card">
-    <div class="card-head"><h3>用户每日用量</h3><span class="sub">每个用户的每日调用次数与 Token 总量</span></div>
+    <div class="card-head"><div><h3>用户每日用量</h3><span class="sub">按日堆叠展示每个用户的调用次数与 Token 总量</span></div>
+      <div class="usage-metric-toggle">
+        <button class="btn btn-sm ${usageUserMetric === 'total_tokens' ? 'btn-primary' : ''}" data-act="user-metric" data-metric="total_tokens">Token</button>
+        <button class="btn btn-sm ${usageUserMetric === 'calls' ? 'btn-primary' : ''}" data-act="user-metric" data-metric="calls">调用次数</button>
+      </div>
+    </div>
+    <div class="card-body">${userChartHtml(data)}</div>
     <div class="card-body table-wrap"><table class="data usage-table responsive">
       <thead><tr><th>用户</th><th class="num">活跃天数</th><th class="num">调用</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总 Token</th><th class="num">日均调用</th><th class="num">日均 Token</th></tr></thead>
       <tbody>${userSummaryRows}</tbody></table></div>
@@ -322,6 +410,7 @@ export async function renderUsage() {
     prev: () => { usagePage = Math.max(1, usagePage - 1); load(); },
     next: () => { usagePage += 1; load(); },
     metric: (el) => { usageMetric = el.dataset.metric || 'total_tokens'; load(); },
+    'user-metric': (el) => { usageUserMetric = el.dataset.metric || 'total_tokens'; load(); },
     range: (el) => { usageDays = Number(el.value) || 30; usagePage = 1; load(); },
     user: (el) => { usageUser = el.value || ''; usagePage = 1; usageDirectory = []; renderUsage(); },
   });
