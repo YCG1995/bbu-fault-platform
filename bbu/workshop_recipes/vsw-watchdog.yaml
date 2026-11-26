@@ -1,0 +1,126 @@
+schema: bbu-workshop-recipe/1
+id: vsw-watchdog
+skill_slug: vsw-watchdog
+name: VSW 看门狗复位
+title: VSW 看门狗复位分析
+category: 复位类
+version_scope: "VSWc/d/e 单板；其他单板与版本待补充"
+description: "网元上报“基站处于初始化状态”且附加参数为看门狗复位时，用本配方筛查复位日志、内核异常和 EPLD 寄存器。"
+aliases:
+  - VSW 看门狗复位
+  - VSW看门狗复位
+  - 看门狗
+  - 看门狗复位
+keywords:
+  - 看门狗复位
+  - watchdog
+  - EPLD
+  - MCE
+verified: false
+sample_cases:
+  positive:
+    - case-02-mce
+    - case-03-caterr
+    - case-04-power
+  negative:
+    - case-01-normal
+default_actions:
+  - "按现场作业指导书处理（待补充）"
+trigger:
+  all_terms:
+    - "watch dog underflow"
+  any_terms: []
+rules:
+  - id: E1
+    description: "复位日志记录看门狗复位"
+    source: reset
+    any_of:
+      - "(07)Watch Dog Underflow"
+  - id: E2
+    description: "内核记录 MCE 或 Kernel panic"
+    source: kernel
+    when_any:
+      - "hardware error"
+      - "kernel panic"
+    any_of:
+      - pattern: "mce: [Hardware Error]"
+        when_any:
+          - "hardware error"
+      - pattern: "Kernel panic"
+        when_any:
+          - "kernel panic"
+  - id: E3
+    description: "EPLD 中断状态/事件寄存器非零"
+    source: board
+    when_any:
+      - "0x630"
+      - "0x634"
+    any_of:
+      - pattern: "0x(?:630|634)=0x(?!0+(?:\\s|$))[0-9a-fA-F]+"
+        regex: true
+  - id: E4
+    description: "EPLD 电源 PG 时间寄存器非零"
+    source: board
+    when_any:
+      - "0x664"
+      - "0x674"
+    any_of:
+      - pattern: "0x(?:664|674)=0x(?!0+(?:\\s|$))[0-9a-fA-F]+"
+        regex: true
+root_causes:
+  - id: R1
+    name: "MCE/Kernel panic 导致看门狗复位"
+    all:
+      - E1
+      - E2
+    mechanism: "CPU 机器检查异常或内核 panic 触发主控板看门狗复位。"
+    case_keywords: ["mce", "machine check", "kernel panic", "panic"]
+    confidence: medium
+  - id: R2
+    name: "CPU 中断异常导致看门狗复位"
+    all:
+      - E3
+    excludes:
+      - E2
+    mechanism: "EPLD 中断状态或事件寄存器非零，说明 CPU 上报过中断；该证据可独立判定，不要求案例必须同时包含 Simplelog。"
+    case_keywords: ["caterr", "中断", "cpu"]
+    confidence: medium
+  - id: R3
+    name: "板内电源跌落导致看门狗复位"
+    all:
+      - E4
+    excludes:
+      - E2
+      - E3
+    mechanism: "电源 PG 时间寄存器非零，说明板内电源出现过跌落；该证据可独立判定，不要求案例必须同时包含 Simplelog。"
+    case_keywords: ["vcc", "电源", "跌落", "pg"]
+    confidence: medium
+reasoning:
+  strategy: "先由 Simplelog 确认确实发生看门狗复位，再用 kernel 判断 MCE/panic，最后用 BoardInit 的 EPLD 寄存器区分 CPU 中断与电源跌落；MCE 优先于寄存器异常，中断优先于电源。"
+  hints:
+    - {keyword: "复位日志", rule_ids: ["E1"]}
+    - {keyword: "simplelog", rule_ids: ["E1"]}
+    - {keyword: "watch dog", rule_ids: ["E1"]}
+    - {keyword: "频率", rule_ids: ["E1"]}
+    - {keyword: "内核", rule_ids: ["E2"]}
+    - {keyword: "mce", rule_ids: ["E2"]}
+    - {keyword: "panic", rule_ids: ["E2"]}
+    - {keyword: "boardinit", rule_ids: ["E3", "E4"]}
+    - {keyword: "0x630", rule_ids: ["E3"]}
+    - {keyword: "0x634", rule_ids: ["E3"]}
+    - {keyword: "caterr", rule_ids: ["E3"]}
+    - {keyword: "中断", rule_ids: ["E3"]}
+    - {keyword: "0x664", rule_ids: ["E4"]}
+    - {keyword: "0x674", rule_ids: ["E4"]}
+    - {keyword: "电源", rule_ids: ["E4"]}
+    - {keyword: "寄存器", rule_ids: ["E3", "E4"]}
+  pitfalls:
+    - "只有告警名或单次复位记录，不能直接判定根因；必须先看复位频率和可用日志源。"
+    - "0x630/0x634、0x664/0x674 全 0 表示无对应异常，不能把“寄存器存在”当成“寄存器异常”。"
+    - "caterr 与电源寄存器同时非 0 时，按证据优先级先判 CPU 中断；只有 BoardInit 时也可独立判定，但仍应在报告中提示缺少 Simplelog。"
+    - "MCE/Kernel panic 若与寄存器异常并存，优先由内核直接证据解释复位。"
+  stop_conditions:
+    - "E1+E2 成立：优先判 MCE/Kernel panic，停止再扩根因。"
+    - "E3 成立且 E2 不成立：判 CPU 中断，停止。"
+    - "E4 成立且 E2/E3 均不成立：判电源跌落，停止。"
+    - "所有根因条件不成立：输出 unmatched，不猜测。"

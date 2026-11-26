@@ -1,0 +1,26 @@
+{"id": "neg-clean-01", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：SSD 链路正常、无 I/O 错误，寿命和扇区计数均为正常值。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-life-30", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：Remain Life Percentage 恰好等于 30，按资料不算低于 30，不能判寿命耗尽。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-sector-zero", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：Uncorrectable 与 Reallocated 均为 0，0 是正常值，不能误报扇区介质故障。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-sata-link-down-only", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：只有一个未使用端口的 SATA link down，无 COMRESET/ATA bus error，不能判链路故障。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-no-smart", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：SMART 不支持但没有 I/O、链路或阈值证据，不能仅凭“读不到 SMART”判 SSD 故障。", "root_cause": "NONE", "expected_rules": []}
+{"id": "pos-io-blk-update", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：内核对 sda 直接报 I/O error，链路和 SMART 都正常，判 SSD I/O 故障。", "root_cause": "R1", "expected_rules": ["E1"]}
+{"id": "pos-io-buffer", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：sda 出现 Buffer I/O error，是直接的介质/控制器 I/O 证据。", "root_cause": "R1", "expected_rules": ["E1"]}
+{"id": "pos-io-read-log", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：内核 READ LOG DMA EXT failed，说明不是链路协商问题而是实际读失败。", "root_cause": "R1", "expected_rules": ["E1"]}
+{"id": "pos-io-failed-read", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：SCSI 层 READ FPDMA QUEUED 命令失败，属于直接 I/O 故障。", "root_cause": "R1", "expected_rules": ["E1"]}
+{"id": "pos-io-failed-write", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：写命令失败，仍属于 SSD I/O 故障，不因读写方向不同而改变根因。", "root_cause": "R1", "expected_rules": ["E1"]}
+{"id": "pos-sata-comreset", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：SATA 链路反复 COMRESET 失败，无上层 I/O 错误，判链路异常。", "root_cause": "R2", "expected_rules": ["E2"]}
+{"id": "pos-sata-ata-bus-error", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：ATA bus error 与 SError 明确指向链路层，避免误判为介质坏块。", "root_cause": "R2", "expected_rules": ["E2"]}
+{"id": "pos-sata-softreset", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：softreset 失败并降速，说明链路训练异常，I/O 未报错时仍先判链路。", "root_cause": "R2", "expected_rules": ["E2"]}
+{"id": "pos-life-29", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：Remain Life Percentage=29，低于 30，且无 I/O/链路异常，判寿命耗尽。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-life-1", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：寿命只剩 1%，即使尚未报 I/O 错误也应作为根因。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-life-0", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：寿命为 0，写入能力接近耗尽，优先安排更换。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-sector-uncorrectable", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：不可纠正扇区计数为 8，寿命正常，判扇区介质异常。", "root_cause": "R4", "expected_rules": ["E4"]}
+{"id": "pos-sector-reallocated", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：重分配扇区计数为 16，尚未影响寿命，判扇区介质异常。", "root_cause": "R4", "expected_rules": ["E5"]}
+{"id": "pos-sector-both", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：不可纠正与重分配计数同时非 0，两个扇区规则共同支持介质异常。", "root_cause": "R4", "expected_rules": ["E4", "E5"]}
+{"id": "pos-combined-io-life", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：寿命低且已出现 I/O 错误，按优先级由直接 I/O 故障解释，寿命作为背景。", "root_cause": "R1", "expected_rules": ["E1", "E3"]}
+{"id": "pos-combined-sata-life", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：链路复位失败伴随寿命下降，按资料先判 SATA 链路而非寿命耗尽。", "root_cause": "R2", "expected_rules": ["E2", "E3"]}
+{"id": "pos-combined-life-sector", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：寿命 18、扇区计数也异常，按优先级判寿命耗尽，扇区作为佐证。", "root_cause": "R3", "expected_rules": ["E3", "E4", "E5"]}
+{"id": "pos-combined-io-sector", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：I/O 错误与不可纠正扇区并存，按直接 I/O 故障优先。", "root_cause": "R1", "expected_rules": ["E1", "E4"]}
+{"id": "pos-life-nested", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：深度目录下的 SMART 信息仍要正确解析第三列 raw_value。", "root_cause": "R3", "expected_rules": ["E3"]}
+{"id": "pos-sata-zip", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：zip 采集包中的 SATA COMRESET 仍能命中。", "root_cause": "R2", "expected_rules": ["E2"]}
+{"id": "pos-life-nested-zip", "skill": "bbu-fault-vsw-ssd", "query": "VSW 单板 SSD 故障：双层 zip 中读取 SMART 寿命 5%，验证嵌套解包。", "root_cause": "R3", "expected_rules": ["E3"]}

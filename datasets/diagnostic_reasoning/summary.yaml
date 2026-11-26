@@ -1,0 +1,38 @@
+generated_for: BBU 故障诊断平台
+synthetic: true
+total_cases: 75
+skills:
+  bbu-fault-vsw-watchdog:
+    cases: 25
+    root_counts:
+      NONE: 5
+      R1: 8
+      R2: 6
+      R3: 6
+    kinds:
+      positive: 20
+      negative: 4
+      boundary: 1
+  bbu-fault-vsw-ssd:
+    cases: 26
+    root_counts:
+      NONE: 5
+      R1: 7
+      R2: 5
+      R3: 6
+      R4: 3
+    kinds:
+      positive: 21
+      negative: 2
+      boundary: 3
+  bbu-fault-vsw-usbflash:
+    cases: 24
+    root_counts:
+      NONE: 6
+      R1: 8
+      R2: 7
+      R3: 3
+    kinds:
+      positive: 18
+      negative: 4
+      boundary: 2

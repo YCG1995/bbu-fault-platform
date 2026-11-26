@@ -1,0 +1,3 @@
+# Web 进程只允许启动固定触发器，不得获得任意 root 权限。
+Defaults:bbu !requiretty
+bbu ALL=(root) NOPASSWD: /usr/local/bin/bbu-upgrade-helper-trigger

@@ -1,0 +1,99 @@
+schema: bbu-workshop-recipe/1
+id: vsw-usbflash
+skill_slug: vsw-usbflash
+name: VSW 单板 USB FLASH 故障
+title: VSW 单板 USB FLASH 故障分析
+category: 单板存储类
+version_scope: "VSW 单板；具体版本范围待补充"
+description: "VSW 单板 USB FLASH 出现写保护、I/O 异常或无法获取 SMART 信息时，用本配方筛查 protect_status 和内核/USB 日志。"
+aliases:
+  - USB FLASH 故障
+  - USBFLASH 故障
+  - U盘故障
+keywords:
+  - USB FLASH
+  - USBFLASH
+  - 写保护
+  - protect_status
+verified: false
+sample_cases:
+  positive:
+    - case-03-protect
+    - case-04-io
+    - case-05-smart
+  negative:
+    - case-01-normal
+    - case-02-other-usb
+default_actions:
+  - "按现场作业指导书处理（待补充）"
+trigger:
+  all_terms:
+    - "usb"
+    - "flash"
+    - "protect_status"
+  any_terms: []
+rules:
+  - id: E1
+    description: "USB FLASH 设备断开或块设备 I/O 错误"
+    source: kernel
+    any_of:
+      - "usb 1-1: USB disconnect"
+      - "blk_update_request: critical medium error"
+      - "Buffer I/O error on dev sdb"
+  - id: E2
+    description: "USB FLASH 写保护状态非零"
+    source: health
+    any_of:
+      - pattern: "protect_status\\s*[:=]\\s*(?!0+(?:\\s|$))\\d+"
+        regex: true
+  - id: E3
+    description: "USB FLASH SMART/识别信息异常"
+    source: health
+    any_of:
+      - "this flash not support"
+      - "idVendor = 0"
+      - "Manufacturer:(null)"
+root_causes:
+  - id: R1
+    name: "USB FLASH 写保护"
+    all:
+      - E2
+    mechanism: "protect_status 非零，介质处于写保护状态。"
+    case_keywords: ["写保护", "protect_status", "protect"]
+    confidence: medium
+  - id: R2
+    name: "USB FLASH 器件或 I/O 故障"
+    all:
+      - E1
+    excludes:
+      - E2
+    mechanism: "USB FLASH 断开或块设备出现介质/I/O 错误。"
+    case_keywords: ["i/o", "io error", "disconnect", "断开", "medium error"]
+    confidence: medium
+  - id: R3
+    name: "USB FLASH SMART 信息获取失败"
+    all:
+      - E3
+    excludes:
+      - E2
+      - E1
+    mechanism: "设备识别或 SMART 信息异常，无法取得有效健康状态。"
+    case_keywords: ["smart", "flash not support", "idvendor", "manufacturer"]
+    confidence: medium
+reasoning:
+  strategy: "先看 protect_status 是否非 0，再看内核是否有该 USB 设备的断开/介质 I/O 错误，最后看 SMART/识别信息是否可取；写保护优先于器件 I/O，器件 I/O 优先于 SMART 获取失败。"
+  hints:
+    - {keyword: "写保护", rule_ids: ["E2"]}
+    - {keyword: "protect_status", rule_ids: ["E2"]}
+    - {keyword: "i/o", rule_ids: ["E1"]}
+    - {keyword: "断开", rule_ids: ["E1"]}
+    - {keyword: "smart", rule_ids: ["E3"]}
+  pitfalls:
+    - "protect_status=0 是正常，不能因为字段存在就判写保护。"
+    - "其他 USB 口（如 usb 1-2）的断开不能直接归因到本 USB FLASH，必须对齐设备实例。"
+    - "SMART 不支持不等于器件损坏；需结合是否可读写、是否有 I/O 错误判断。"
+    - "写保护与 I/O 错误同时存在时，先处理写保护，因为它会阻止所有写入。"
+  stop_conditions:
+    - "E2 成立：先判写保护；E1 同时成立时在报告中并列提示。"
+    - "E1 成立且 E2 不成立：判器件或 I/O 故障，停止。"
+    - "E3 成立且 E1/E2 不成立：判 SMART/识别异常，停止。"

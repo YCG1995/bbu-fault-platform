@@ -1,0 +1,29 @@
+rules:
+- id: E1
+  step: S1
+  description: 日志出现时钟失锁告警或 PLL unlock
+  type: text
+  globs:
+  - '**/*.log'
+  - '**/*clock*.txt'
+  - '**/*.txt'
+  encoding: auto
+  format: text
+  any_of:
+  - CLK032
+  - 时钟失锁
+  - PLL unlock
+  - PLL失锁
+  time_extract:
+    pattern: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})
+    group: 1
+    formats:
+    - '%Y-%m-%d %H:%M:%S'
+  min_matches: 1
+  context_lines: 2
+temporal: []
+root_causes:
+- id: R1
+  name: 参考时钟源失锁
+  condition: E1
+  confidence: medium

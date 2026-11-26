@@ -1,0 +1,10 @@
+[Unit]
+Description=BBU FaultScope offline upgrade helper (%i)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=BBU_HELPER_PYTHON=@PYTHON_BIN@
+ExecStart=/opt/bbu-fault-platform/deploy/bbu-upgrade-helper.sh %i
+TimeoutStartSec=1800

@@ -1,0 +1,25 @@
+{"id": "neg-clean-01", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：BBU 重启后运行正常，Simplelog 只有正常启动，内核无 MCE/panic，EPLD 寄存器全 0。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-mce-no-simplelog", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：内核出现 MCE，但 Simplelog 没有看门狗复位记录，不能反推为看门狗根因。", "root_cause": "NONE", "expected_rules": ["E2"]}
+{"id": "neg-panic-no-simplelog", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：只有一次内核 panic，Simplelog 未记录看门狗复位，按资料不判定看门狗故障。", "root_cause": "NONE", "expected_rules": ["E2"]}
+{"id": "neg-clean-uppercase", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：日志字段为大写十六进制且全 0，属于正常边界，不能误报寄存器异常。", "root_cause": "NONE", "expected_rules": []}
+{"id": "neg-clean-site-path", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：站点目录嵌套较深、日志文件名带时间戳，内容仍是干净启动。", "root_cause": "NONE", "expected_rules": []}
+{"id": "pos-mce-bank4", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：Simplelog 明确记录看门狗下电复位，内核同时有 MCE Bank4，优先判 MCE。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-mce-and-panic", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：看门狗复位伴随 MCE 与 Kernel panic，两个直接证据都指向内核异常。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-panic-only", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：看门狗复位后只有 Kernel panic，没有 MCE，仍由内核 panic 解释复位。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-mce-bank0", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：MCE 发生在 Bank0，说明内核直接报告硬件异常，不能因 Bank 不同而漏判。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-caterr-0x634-10", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：无看门狗记录、无 MCE，但 EPLD caterr 寄存器 0x634=0x10，判 CPU 中断异常。", "root_cause": "R2", "expected_rules": ["E3"]}
+{"id": "pos-caterr-0x630", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：0x630 caterr 标志非 0，0x634 为 0，仍属于 CPU 中断异常。", "root_cause": "R2", "expected_rules": ["E3"]}
+{"id": "pos-caterr-float", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：0x634 非 0 的高位错误标志，需按数值判断而不是匹配固定字符串。", "root_cause": "R2", "expected_rules": ["E3"]}
+{"id": "pos-power-0x664-80", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：无看门狗、无 MCE、caterr 为 0，但 EPLD 电源寄存器 0x664=0x80。", "root_cause": "R3", "expected_rules": ["E4"]}
+{"id": "pos-power-0x674", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：电源异常落在 0x674，其他寄存器和内核日志均正常。", "root_cause": "R3", "expected_rules": ["E4"]}
+{"id": "pos-power-large", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：0x664 末位非 0，不能因数值看起来小而漏判电源异常。", "root_cause": "R3", "expected_rules": ["E4"]}
+{"id": "pos-combined-mce-int", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：看门狗复位同时伴随 MCE 和 caterr，按证据优先级先由 MCE 解释。", "root_cause": "R1", "expected_rules": ["E1", "E2", "E3"]}
+{"id": "pos-combined-mce-power", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：Kernel panic 与电源寄存器同时异常，内核直接证据优先于电源寄存器。", "root_cause": "R1", "expected_rules": ["E1", "E2", "E4"]}
+{"id": "pos-combined-int-power", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：无 MCE 时 caterr 与电源标志并存，按资料优先级判 CPU 中断。", "root_cause": "R2", "expected_rules": ["E3", "E4"]}
+{"id": "pos-all-signals", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：四类信号全部出现，最强直接证据仍是 MCE，其他作为佐证。", "root_cause": "R1", "expected_rules": ["E1", "E2", "E3", "E4"]}
+{"id": "pos-caterr-with-simplelog", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：Simplelog 有看门狗复位，但内核无 MCE，真正区分根因的是 EPLD caterr。", "root_cause": "R2", "expected_rules": ["E1", "E3"]}
+{"id": "pos-power-with-simplelog", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：Simplelog 有看门狗复位，内核无 MCE、caterr 为 0，电源异常解释复位。", "root_cause": "R3", "expected_rules": ["E1", "E4"]}
+{"id": "pos-caterr-nested", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：深度目录下的 BoardInit 仍能命中 caterr，不能因路径变化丢证据。", "root_cause": "R2", "expected_rules": ["E3"]}
+{"id": "pos-power-zip", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：采集包为 zip，解压后电源寄存器异常。", "root_cause": "R3", "expected_rules": ["E4"]}
+{"id": "pos-mce-tar", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：采集包为 tar.gz，看门狗复位与 MCE 同时存在。", "root_cause": "R1", "expected_rules": ["E1", "E2"]}
+{"id": "pos-power-nested-zip", "skill": "bbu-fault-vsw-watchdog", "query": "VSW 看门狗复位：外层 zip 内再套一层 zip，验证多层采集包仍能取到电源寄存器。", "root_cause": "R3", "expected_rules": ["E4"]}

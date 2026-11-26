@@ -1,0 +1,84 @@
+skill:
+  name: demo-bbu-clock-loss
+  title: "[示例] 时钟失锁诊断"
+  version: "1.0.0"
+  execution_mode: script
+category: 时钟同步
+fault:
+  name: 时钟失锁
+  aliases: [时钟失锁, 参考时钟异常, 时钟不同步]
+  alarm_codes:
+    - code: CLK032
+      name: 时钟失锁告警
+  domain:
+    device_types: [BBU, ITBBU, SDR]
+    modes: [待补充]
+    boards: [待补充]
+    version_scope: 待补充
+    collection_sources: [device-tar]
+  triggers:
+    - 网管出现 CLK032 时钟失锁告警
+    - 现场反馈基站时间不同步、业务闪断
+  exclusions:
+    - 仅有电源类告警且日志中无任何时钟关键字
+symptoms:
+  observable:
+    - 网管 CLK032 告警
+    - 日志出现 PLL unlock / 时钟失锁
+  description_keywords: [时钟, 失锁, PLL, 参考源, CLK032, 频偏, 不同步]
+  impact: 基站时间/频率同步劣化，可能影响切换与业务
+  time_pattern: 上电、倒换或参考源异常后出现
+  lookalikes:
+    - fault: 电源故障
+      differentiator: 无 CLK032、PLL unlock、时钟失锁等直接时钟证据
+analysis:
+  steps:
+    - id: S1
+      title: 检索时钟失锁直接证据
+      objective: 确认日志中是否存在 CLK032 或 PLL unlock 等直接证据
+      targets:
+        - globs: ["**/*.log", "**/*clock*.txt", "**/*.txt"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E1
+          step: S1
+          description: 日志出现时钟失锁告警或 PLL unlock
+          type: text
+          globs: ["**/*.log", "**/*clock*.txt", "**/*.txt"]
+          any_of: ["CLK032", "时钟失锁", "PLL unlock", "PLL失锁"]
+          min_matches: 1
+          context_lines: 2
+          time_extract:
+            pattern: "(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})"
+            group: 1
+            formats: ["%Y-%m-%d %H:%M:%S"]
+          verified: true
+      decision:
+        on_hit: {conclusion: 命中时钟失锁直接证据, goto: R1}
+        on_miss: {conclusion: 无时钟失锁证据, goto: EXCLUDE}
+root_causes:
+  - id: R1
+    name: 参考时钟源失锁
+    condition: E1
+    mechanism: 参考时钟源（GNSS/上级时钟）失锁后，本地 PLL 无法维持锁定，产生 CLK032 告警与时间不同步。
+    confidence: medium
+    actions:
+      - 检查 GNSS 天线、馈线与卫星可见性，确认锁星数量与 C/N0
+      - 检查上级 SyncE/1588 时钟源与传输链路告警
+      - 查看 clockstatuslog 中的参考源切换与 PLL 状态，定位失锁起点
+      - 恢复参考源后观察 CLK032 是否清除，并复核时间同步偏差
+    prerequisites:
+      - 已获取故障时段完整 clockstatuslog 与网管告警
+    risks: 现场操作前需确认业务影响与变更窗口
+    rollback: 恢复原配置并保留日志，升级时钟专项分析
+    verify:
+      - globs: ["**/*clock*.txt", "**/*.log"]
+        patterns: ["CLK032", "PLL lock"]
+        expect: absent
+        hold_time: "恢复后观察 2h 无 CLK032"
+    escalation: 参考源正常但仍反复失锁时，升级单板时钟硬件分析
+components:
+  unpack: true
+  search: true
+  report: true

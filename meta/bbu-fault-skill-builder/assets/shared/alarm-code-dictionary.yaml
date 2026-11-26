@@ -1,0 +1,446 @@
+# =============================================================================
+# 共享告警码字典（alarm-code-dictionary.yaml）
+#
+# 跨所有 bbu-fault-* 子 Skill 共享的告警码知识。脚手架会把本文件复制到每个
+# 子 Skill 的 assets/ 下；分析报告引用告警时，以本字典解释告警含义与关联故障。
+#
+# 维护规则（重要）：
+#   - 本字典只收录【权威来源确认】的告警码：网管告警手册、公司文档或用户明确确认。
+#   - 新增条目须注明 source（文档名/链接/确认人）与 verified: true。
+#   - 一个告警码可能对应多个根因，related_faults 写子 Skill 名（slug）。
+#   - applicable 字段用于按机型/制式/版本分域：查询时按当前包的设备形态过滤，
+#     避免不同机型同码不同义导致误解释。applicable 为空表示全机型通用。
+#
+# 条目字段说明：
+#   code / codes        主告警码；codes 为同一告警的多个码（手册并列）
+#   reason_codes        原因码 {序号: 含义}（随告警附加参数上报）
+#   extra_params        附加参数含义
+#   detection           检测原理（简述）
+#   detect_cycle        BSP/AMP 检测周期
+#   debounce            BSP/AMP 上报/恢复防抖（秒）
+#   thresholds          数值门限（机读，供 parse_clock/search 规则引用）
+#   masking             原因码屏蔽关系（被屏蔽的原因码不应作为最终结论）
+#   related_alarms      手册明确列出的相关告警码
+#   handling            处理措施摘要（网管侧/上站侧关键动作）
+# =============================================================================
+
+version: "1.0.0"
+updated: "2026-10-21"
+note: "主控时钟告警域已按告警手册收录 12 条；其他域待按权威手册补全"
+
+# 告警码在 CSV 中的列名（不同采集形态一致）
+csv_columns:
+  code: "告警码"
+  name: "告警码名称"
+  severity: "告警级别"
+  occur_time: "发生时间"
+  probable_cause: "告警原因"
+  root_cause_analysis: "根因分析结果"
+  location: "定位信息"
+  object: "告警对象"
+  clear_status: "清除状态"
+  repeat_count: "重复计数"
+
+# 主控时钟相关日志的通用路径
+clk_files: &clk_files
+  - "**/当前告警/fm-active_*.csv"
+  - "**/历史告警/fm-history-recently_*.csv"
+  - "**/BspLog/**/BSP/clockstatuslog.txt"
+  - "**/BspLog/**/BSP/clockocxolog.txt"
+gnss_files: &gnss_files
+  - "**/当前告警/fm-active_*.csv"
+  - "**/BspLog/**/BSP/gnsssvinfo.txt"
+  - "**/BspLog/**/BSP/gnssspecinfo.txt"
+  - "**/BspLog/**/BSP/clockstatuslog.txt"
+p1588_files: &p1588_files
+  - "**/当前告警/fm-active_*.csv"
+  - "**/BspLog/**/BSP/clockstatuslog.txt"
+  - "**/日志文件*/**/C1_softrtc.txt"
+  - "**/BspLog/**/BSP/clockdatalog.txt"
+
+alarm_codes:
+
+  # --------------------------------------------------------------------------
+  - code: "198092217"
+    name: "系统时钟不可用"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    extra_params:
+      "8": "自由运行"
+      "9": "辅助相位控"
+    detection:
+      - "时钟模块初始化 600s 后参考源进入自由运行，立即上报"
+      - "时钟模块初始化 300s 后参考源进入辅助相位控，立即上报"
+      - "时钟状态进入辅助相位控或自由运行，立即上报"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 0, clear: 0}, AMP: {raise: 60, clear: 60}}
+    thresholds:
+      free_run_grace_s: 600
+      aux_phase_grace_s: 300
+    business_impact: "相位同步系统（如 TDD-NR）小区退服"
+    related_files: *clk_files
+    related_alarms: ["198096834", "198096835", "198096836", "198096837", "198096841", "198097004"]
+    handling:
+      nms:
+        - "检查共框标识是否配置（MO 编辑器→设备→机框）"
+        - "未配置共框：检查时钟同步配置是否配置时钟源，按规划配置时钟源；处理相关告警"
+        - "仍不恢复：RANCLI 复位主控单板，等 15 分钟"
+        - "已配置共框：删除本站所有时钟同步配置并激活，等 15 分钟"
+      onsite: ["更换主控单板，等 15 分钟"]
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - codes: ["198096802", "198092215"]
+    code: "198096802"
+    name: "同步丢失"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "控制电压异常"
+    extra_params:
+      "1": "控制电压异常"
+    detection: "当前压控电压小于 0x500 或大于 0xFB00 时上报"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 0, clear: 0}, AMP: {raise: 300, clear: 300, note: "连续75次×4s"}}
+    thresholds:
+      control_voltage_hex_min: "0x500"
+      control_voltage_dec_min: 1280
+      control_voltage_hex_max: "0xFB00"
+      control_voltage_dec_max: 64256
+    business_impact: "宏站主用主控故障则全业务中断且外围单板上报时钟模块故障；备用主控故障不影响业务但无法主备倒换；微站全业务中断"
+    related_files: *clk_files
+    handling:
+      nms: ["按位置信息复位单板，等 15 分钟；不恢复则安排上站"]
+      onsite: ["更换单板，等 15 分钟"]
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096830"
+    name: "时钟源之间的相位差过大"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    extra_params: "主用时钟源、第一个备用时钟源（主/备）"
+    detection: "主用时钟源与第一个备用时钟源相位差超过门限时上报"
+    detect_cycle: {BSP: "1s", AMP: "4s（连续3次异常上报/3次正常恢复）"}
+    debounce: {AMP: {raise: 12, clear: 12}, note: "相位差超门限持续30s上报，告警模块门限12s"}
+    thresholds:
+      phase_diff_persist_s: 30
+      alarm_module_debounce_s: 12
+      amp_consecutive: 3
+    business_impact: "本站第一备用时钟源与邻站主用时钟源相同时，可能与邻站互相干扰，影响业务质量"
+    related_files: *clk_files
+    handling:
+      nms:
+        - "内置GNSS：核对 GNSS 天馈线缆长度与实际一致，激活后等 1h15m"
+        - "RRU GNSS：核对其关联 GNSS 线缆长度"
+        - "1PPS+TOD：核对线缆长度与固定延时补偿"
+        - "1588：核对固定延时补偿"
+      onsite:
+        - "GNSS 类：扫频仪排查周边 GNSS 干扰源并清除"
+        - "SyncE+1588/1588 ATR：检查并处理 1588 服务器时钟问题"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - codes: ["198096831", "198096841"]
+    code: "198096831"
+    name: "1588时钟链路异常"
+    applicable:
+      devices: ["SDR", "ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd", "AAU"]
+      modes: ["LTE TDD", "5G NR"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "1588时钟链路包延时抖动（PDV）过大"
+      "2": "1588时钟服务器时钟质量差"
+      "3": "1588时钟链路协商异常"
+      "4": "1588时钟链路报文接收异常"
+      "5": "1588时钟服务器时间异常"
+    detection:
+      "1": "连续9个周期(180s)收包/协商/时钟质量/服务器时间均正常但时间戳波动大"
+      "2": "连续9个周期(180s)收包与协商正常但收到的 master 时钟等级错误"
+      "3": "连续9个周期(180s)收包正常但 slave 协商异常"
+      "4": "连续9个周期(180s)收包异常"
+      "5": "连续9个周期(180s)收包/协商/时钟质量正常但时钟服务器时间异常"
+    detect_cycle: {BRS: "20s（连续9次上报/6次恢复）", alarm_module: "3s（连续4次）"}
+    debounce: {raise_s: 180, clear_s: 120}
+    masking:
+      "4(报文接收异常)": ["3", "2", "5", "1"]
+      "3(协商异常)": ["2", "5", "1"]
+      "2(时钟质量差)": ["5", "1"]
+      "5(服务器时间异常)": ["1"]
+      note: "屏蔽顺序：收包异常 > 协商异常 > 时钟质量差 > 服务器时间异常 > PDV抖动；被屏蔽原因码不作为最终根因"
+    business_impact: "无其他备用时钟源时，系统时钟随时间偏差增大，影响业务"
+    related_files: *p1588_files
+    handling:
+      "1": "核对 IP 时钟参数（本端端口/IP层/远端地址）与现网规划；检查传输拓扑节点是否满足 1588 组网要求"
+      "2": "检查 Master 端时钟等级是否满足要求，整改 Master"
+      "3": "核对 Master 端配置与负荷；必要时重新规划 Master"
+      "4": "核对 IP 时钟参数与物理端口；检查传输拓扑 VLAN/1588 报文处理方式"
+      "5": "先校准 Master 服务器时间，再检查链路与传输拓扑"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096833"
+    name: "SyncE时钟异常"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "SyncE时钟丢失"
+      "2": "SSM消息丢失"
+      "3": "上级设备千兆PHY主从配置错误"
+      "4": "SyncE时钟降质"
+      "5": "上级设备时钟等级差"
+    detection:
+      "1": "选定端口恢复出的 SyncE 时钟源连续 60s 丢失"
+      "2": "使能 SyncE 与 SSM 后，连续 (60+3)s 收不到 SSM 报文"
+      "3": "link 状态千兆电口连续 (60+3)s PHY 同步以太网主从模式为 master"
+      "4": "上下级基站频偏连续 60s 超过 400ppb"
+      "5": "上级 SSM 质量等级为 G.812 TYPE IV / SETS / 不应用作同步 / 同步质量未知 等且持续超防抖"
+    detect_cycle: {BSP: "1s", AMP: "4s（连续2次故障上报/2次正常恢复）"}
+    debounce:
+      single_synce: {raise: 60, clear: 60, note: "可后台配置，默认60s"}
+      synce_1588: {raise: 180, clear: 120}
+      AMP: {raise: 8, clear: 8}
+    thresholds:
+      degraded_ppb: 400
+      ssm_lost_extra_s: 3
+      phy_master_extra_s: 3
+    business_impact: "频率同步下随时间可能影响业务；相位同步下若 1588 正常则切换到仅 1588 同步，不影响业务"
+    related_files: *p1588_files
+    related_alarms: ["198098252", "198098319", "198098318", "198092292"]
+    handling:
+      "1": "先处理物理连接/光口/光模块/光纤告警；再核对 SyncE 参考源类型；RANCLI 复位主控；上站更换 SyncE 线缆单板"
+      "2": "上级传输设备核查 SSM 发送；复位主控；更换线缆单板"
+      "3": "上级传输设备排障；对应物理口拔网线 >10s 后再接"
+      "4": "上级设备确认时钟锁定；复位主控；更换线缆单板"
+      "5": "查看上一级设备时钟告警并按相关告警处理"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096834"
+    name: "1PPS+TOD时钟源异常"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "1PPS+TOD参考源串口收不到电文信息"
+      "2": "1PPS+TOD参考源秒脉冲状态不可用"
+      "3": "1PPS+TOD参考源1PPS丢失"
+      "17": "1PPS+TOD参考源降质"
+    extra_params: ["上级网元ID", "上级网元硬件单元串号"]
+    detection:
+      "1": "连续 防抖时间+30s 收不到上级 TOD 消息"
+      "2": "上级时钟状态不在 正常/一级钟保持/三级钟保持/二级钟保持 且持续超防抖"
+      "3": "超过防抖时间无法获取上级 PPS 信号"
+      "17": "与上级相位差超过 15us 或频偏超过 100ppb 且持续超防抖"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 180, clear: 120, note: "可后台配置"}, AMP: {raise: 100, clear: 60}}
+    thresholds:
+      degraded_phase_us: 15
+      degraded_ppb: 100
+      serial_lost_extra_s: 30
+      valid_pulse_states: ["正常", "一级钟(原子钟)保持", "三级钟(普通晶振)保持", "二级钟保持"]
+    business_impact: "无其他备用时钟源时系统时钟偏差增大，影响业务"
+    related_files: *clk_files
+    handling:
+      "1": "确认本站是否规划 1PPS+TOD；核对上级输出配置；上站检查线缆、更换线缆、复位/更换单板"
+      "2": "核对上级是否我司基站、是否锁定；确认本站与上级相位同步模式"
+      "3": "上站检查线缆连接、更换线缆、复位/更换单板"
+      "17": "核对线缆长度；上站处理上级设备时钟相位差问题"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096835"
+    name: "GNSS接收机故障"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "接收机通讯失败"
+      "2": "接收机1PPS丢失"
+    detection:
+      "1": "CPU 连续 防抖时间+30s 收不到接收机电文"
+      "2": "接收机连续防抖时间未输出 PPS"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 180, clear: 120, note: "可后台配置"}}
+    business_impact: "无其他备用时钟源时系统时钟偏差增大，影响业务"
+    related_files: *gnss_files
+    handling:
+      nms: ["主控板：RANCLI 复位告警单板，等 15 分钟；不恢复则上站"]
+      onsite:
+        - "AAU 单板：检查 RGPS 连接，将 RGPS 端口连接"
+        - "更换告警单板"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096836"
+    name: "GNSS天馈链路故障"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "天馈开路"
+      "2": "天馈短路"
+    detection:
+      "1": "逻辑检测到天馈开路且持续超防抖"
+      "2": "逻辑检测到天馈短路且持续超防抖"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 180, clear: 120}, AMP: {raise: 100, clear: 60}}
+    business_impact: "无其他备用时钟源时系统时钟偏差增大，影响业务"
+    related_files: *gnss_files
+    related_alarms: ["198096837"]
+    handling:
+      onsite:
+        - "检查功分器是否为隔直功分器（主端口与分路端口阻值 <100Ω）"
+        - "依次检查：天馈线缆连接→天线馈线接头（生锈/进水）→馈线通断（芯对屏蔽层开路∞/短路0）→避雷器→跳线→更换 GNSS 天线"
+        - "最后复位/更换告警单板"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096837"
+    name: "GNSS接收机搜星故障"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "GNSS接收机搜星不足"
+      "2": "GNSS接收机信号不可用"
+      "3": "GNSS接收机信号降质"
+      "4": "GNSS接收机锁星失败"
+    detection:
+      "1": "卫星模块初始 720s 后搜星不足 4 颗，且未进入 3Dfix/timeonlyfix 超防抖"
+      "2": "频偏>50ppb 或相位>20us 或闰秒=0 或 TOD<2018 或经纬度变化>0.01度，持续超防抖"
+      "3": "PPS 跳变>100ppb（与其他参考源近同幅跳变）或与其他参考源相位差都>1.5us，持续超防抖"
+      "4": "可见且载噪比>35dB 的卫星 ≥6 颗，但锁定 <4 颗，持续 120s 以上"
+    detect_cycle: {BSP: "1s", AMP: "4s"}
+    debounce: {BSP: {raise: 180, clear: 120}, AMP: {raise: 12, clear: 12}}
+    thresholds:
+      init_grace_s: 720
+      min_satellites: 4
+      min_lock_satellites: 4
+      visible_strong_satellites: 6
+      strong_cno_db: 35
+      lock_fail_persist_s: 120
+      freq_offset_ppb: 50
+      phase_us: 20
+      leap_sec_zero: 0
+      tod_min_year: 2018
+      pos_change_deg: 0.01
+      jump_ppb: 100
+      phase_diff_us: 1.5
+    business_impact: "无其他备用时钟源时系统时钟偏差增大，影响业务"
+    related_files: *gnss_files
+    handling:
+      "1/4": "检查天线方向遮挡→换位置/清遮挡；扫频仪排查 GNSS 干扰源并清除；换天线；复位/更换单板"
+      "2": "检查是否配置 ≥2 时钟源；诊断时钟相位差>20us；空口频谱干扰分析；闭塞激活源观察；上站核对经纬度、排查干扰"
+      "3": "核对 GNSS 线缆长度；确认是否先前有搜星不足；上站核对经纬度、排查干扰"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198096840"
+    name: "系统时钟处于保持模式"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "次要"
+    reason_codes: {}
+    detection: "参考源异常且无可用备用时钟源，系统时钟进入保持状态"
+    detect_cycle: {BSP: "手册待补充", AMP: "手册待补充"}
+    debounce: {}
+    business_impact: "短时无直接业务影响；长期保持可能导致时钟偏差"
+    related_files: *clk_files
+    related_alarms: ["198096835", "198096836", "198096837", "198096834", "198096841"]
+    handling:
+      nms: ["优先处理各相关告警（GNSS/天馈/搜星/1PPS+TOD/1588）；处理完成后等 15 分钟"]
+    gaps: "手册中检测周期/防抖/单板/业务影响为占位（XXX/xx），需补全"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198097004"
+    name: "单板硬件故障（时钟故障域）"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "电源故障"
+      "2": "时钟故障"
+      "3": "内部总线异常"
+      "4": "处理器故障"
+      "5": "高速网卡异常"
+      "6": "加速器故障"
+      "7": "板内链路异常"
+      "8": "芯片供电异常"
+    extra_params_clock:
+      "2-1": "锁相环失锁"
+      "2-2": "本地时钟丢失"
+      "2-3": "接收机故障"
+      "2-4": "鉴相值获取异常"
+      "2-5": "Serdes时钟丢失"
+      "2-6": "帧同步信号错误"
+    detection:
+      "2-1": "锁相环失锁持续超防抖"
+      "2-2": "本地时钟丢失持续超防抖"
+      "2-3": "接收机串口通讯失败或 1PPS 丢失持续超防抖"
+      "2-4": "鉴相值累计 防抖时间+60s 获取失败"
+      "2-5": "Serdes 时钟丢失持续超防抖"
+      "2-6": "帧同步信号错误持续超防抖"
+    detect_cycle: {BSP: "1s"}
+    debounce: {BSP: {raise: 6, clear: 300}, AMP: {raise: 12, clear: 6}}
+    business_impact: "可能置单板故障态并关业务（以具体原因码为准）"
+    related_files: *clk_files
+    handling:
+      nms: ["复位单板；RANCLI 执行单板硬件检测；不恢复则上站"]
+      onsite: ["插拔单板，再更换单板，各等 15 分钟"]
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true
+
+  # --------------------------------------------------------------------------
+  - code: "198098315"
+    name: "单板输入时钟异常"
+    applicable:
+      devices: ["ITBBU"]
+      boards: ["VSWc0", "VSWc1", "VSWc2", "VSWd"]
+    default_severity: "重要"
+    reason_codes:
+      "1": "输入系统时钟"
+      "2": "输入同步时钟"
+      "3": "对板输入的时钟"
+      "4": "对板输入的数据"
+    detection:
+      "1": "输入系统时钟异常（手册未详述）"
+      "2": "输入同步时钟异常（手册未详述）"
+      "3": "10M 与 serdes 时钟正常时主备互传时钟异常；VSW 不支持主备倒换，当前不上报"
+      "4": "10M 与 serdes 时钟正常时主备互传数据异常；VSW 不支持主备倒换，当前不上报"
+    detect_cycle: {BSP: "3s", AMP: "2s（连续3次，共6s）"}
+    debounce: {BSP: {raise: 0, clear: 0}, AMP: {raise: 6, clear: 6}}
+    business_impact: "可能置单板故障态关业务（以具体原因码为准）"
+    related_files: *clk_files
+    related_alarms: ["198097004"]
+    handling:
+      "1/2": "先处理主控板硬件故障告警；RANCLI 下电复位单板；上站插拔单板（5分钟）"
+      "3/4": "下电复位另一块主控板（主备倒换场景，当前 VSW 不上报）"
+    source: "主控时钟告警手册（用户提供 2026-10-21）"
+    verified: true

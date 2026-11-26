@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBU 故障诊断平台</title>
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" href="/favicon.ico?v=1.14.0" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/assets/logo.svg?v=1.14.0" type="image/svg+xml" sizes="any">
+</head>
+<body>
+<aside class="sidebar" id="sidebar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32"><path d="M4 18h4l3-9 4 16 3-11 3 5h7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+    </div>
+    <div class="brand-text">
+      <strong>BBU FaultScope</strong>
+      <span>智能故障诊断平台</span>
+    </div>
+  </div>
+  <nav id="nav" class="nav"></nav>
+  <div class="sidebar-foot">
+    <div class="worker-pill" id="worker-pill">调度器连接中…</div>
+    <div class="version" id="version-pill"></div>
+  </div>
+</aside>
+<main class="main" id="main">
+  <header class="topbar" id="topbar">
+    <div class="topbar-title">
+      <h1 id="page-title">总览</h1>
+      <p id="page-subtitle"></p>
+    </div>
+    <div class="topbar-actions" id="page-actions"></div>
+    <div class="topbar-user" id="user-menu"></div>
+  </header>
+  <section class="view" id="view"></section>
+</main>
+<div id="toast-stack" class="toast-stack"></div>
+<div id="modal-root"></div>
+<script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>

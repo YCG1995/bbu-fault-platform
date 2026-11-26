@@ -1,0 +1,228 @@
+# =============================================================================
+# fault-profile.yaml — 子 Skill 的唯一事实源（访谈成果 + 机读规则）
+#
+# 本文件由 bbu-fault-skill-builder 按需补齐缺失信息后填写，并用真实案例验证。
+# 脚手架脚本读取本文件，生成：
+#   - references/fault-profile.md（人读）
+#   - assets/evidence-rules.yaml（机读，供 search_evidence.py）
+#   - SKILL.md / 报告模板中的标题与描述
+#
+# 下方以「CloudMAT 拷机相位超差测试失败」为完整示例（来自真实示例日志）。
+# 正式使用时替换为访谈确认的内容；未知项写 "待补充"，不得写"可能/大概"。
+# =============================================================================
+
+skill:
+  name: bbu-fault-cloudmat-phase-offset        # 必须与目录名一致，hyphen-case
+  title: "CloudMAT 拷机相位超差测试失败故障分析"
+  version: "1.0.0"
+  # execution_mode（可选，默认 script）：
+  #   script —— 简单/规则闭合故障，走 run_analysis.py 确定性一键流水线（效率高、可复现）；
+  #   agent  —— 复杂故障，渲染 agent 编排指引（多步推理、可调用多脚本/多 skill、再汇总）。
+  execution_mode: "script"
+
+# category（可选）：故障大类，用于路由按大类聚合、提高模糊描述下的命中率。
+# 粒度需与业务研发确认；不填则不参与大类聚合。
+category: "工装拷机类"
+
+# 组件开关（可选）：unpack/search/report/parse_clock/parse_cloudmat/alarm_dict/common_rules/clk_dict；
+# extra_scripts 为专项脚本列表（纳入受管清单）。字段见 spec §2.8
+# components:
+#   extra_scripts:
+#     - scripts/ocxo_aging_analyzer.py
+
+fault:
+  name: "相位超差测试失败（CloudMAT 拷机）"
+  aliases: ["usPhaseOf5V 频偏超标", "相位超差", "phase offset 拷机失败"]
+  alarm_codes: []          # 工装日志无网管告警；网管类故障形如 {code: "198096831", name: "1588时钟源异常"}
+  domain:
+    device_types: ["CloudMAT"]            # BBU/OSS | SDR | ITBBU | CloudMAT
+    modes: ["IT BBU 返修拷机"]
+    boards: ["VSWc2（槽位以文件名 @槽位 为准）"]
+    version_scope: "TFP=ORTE_IT_BBU_VSWc2_REWK_V100_V20231118（其他 TFP 待补充）"
+    collection_sources: ["cloudmat-text"] # device-tar | sdr-zip | dcm-zip | cloudmat-text
+  triggers:
+    - "CloudMAT CyclingTest（拷机循环）过程中，相位超差测试项判定失败"
+    - "常见于返修工序 VSWc2 单板，失败后平台可能在连续失败后安全终止拷机"
+  exclusions:
+    - "电源功率类测试项失败（1276/1310Sw/1310X86）属于其他测试项，不按本故障处理"
+    - "非拷机场景（现网运行）的时钟相位问题不走本 profile"
+
+symptoms:
+  observable:
+    - "CloudMAT 测试结果为「失败」，测试项「相位超差测试」出现 TestItemResult.Fail"
+    - "失败日志记录「usPhaseOf5V 频偏: <实际值>, 通过标准: 0」"
+  description_keywords: ["相位超差", "频偏", "usPhaseOf5V", "拷机失败", "phase"]
+  impact: "返修单板无法通过拷机，无法流入下一道工序"
+  time_pattern: "在测试项第 0 轮或后续轮次出现；可能伴随单板断链超时自第 203 轮连续失败"
+  lookalikes:
+    - fault: "1276/1310 电源功率测试失败"
+      differentiator: "失败项名称与「通过标准」内容不同：电源类为功率值，本项为 usPhaseOf5V 频偏"
+    - fault: "单板断链超时检测失败"
+      differentiator: "断链项判定值为超时时长（如 3600 秒）且通常自某一轮起连续失败；本项为频偏数值"
+
+analysis:
+  steps:
+    - id: S1
+      title: "确认拷机总体结果"
+      objective: "判断本次 CloudMAT 是否失败、失败时间与时长"
+      targets:
+        - globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E1
+          description: "CloudMAT 总体测试结果为失败"
+          globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+          all_of: ["CloudMAT:测试结果：失败"]
+          any_of: []
+          none_of: []
+          min_matches: 1
+          context_lines: 2
+          time_extract: &ts
+            pattern: "(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})"
+            group: 1
+            formats: ["%Y-%m-%d %H:%M:%S"]
+      decision:
+        on_hit:  {conclusion: "拷机总体失败，进入失败项定位", goto: S2}
+        on_miss: {conclusion: "未发现拷机失败结论，可能为通过或非完整日志", goto: EXCLUDE}
+
+    - id: S2
+      title: "定位失败测试项"
+      objective: "确认失败项清单中是否包含「相位超差测试」"
+      targets:
+        - globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E2
+          description: "相位超差测试单轮结果为 Fail"
+          globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+          all_of: ["相位超差测试", "TestItemResult.Fail"]
+          min_matches: 1
+          context_lines: 1
+          time_extract: *ts
+        - id: E3
+          description: "电源功率类测试项失败（用于排除混同）"
+          globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+          all_of: ["电源功率测试", "TestItemResult.Fail"]
+          min_matches: 1
+          context_lines: 0
+      decision:
+        on_hit:  {conclusion: "存在相位超差测试失败，进入频偏数值取证", goto: S3}
+        on_miss: {conclusion: "失败项中无相位超差测试，本故障不成立，转其他测试项流程", goto: EXCLUDE}
+
+    - id: S3
+      title: "提取频偏实测值"
+      objective: "取得 usPhaseOf5V 频偏实际值与通过标准，形成直接证据"
+      targets:
+        - globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E4
+          description: "频偏实测值超过通过标准 0"
+          globs: ["*.log", "**/*.log"]
+          format: text
+          encoding: auto
+          all_of: ["usPhaseOf5V", "通过标准"]
+          min_matches: 1
+          context_lines: 3
+          time_extract: *ts
+      decision:
+        on_hit:  {conclusion: "频偏超标证据成立，判定根因", goto: R1}
+        on_miss: {conclusion: "未取到频偏判定行，日志可能不完整，需人工核查失败参数表", goto: R2}
+
+# 时序约束：按现场因果顺序排列（先因后果）；search_evidence.py 自动计算
+temporal:
+  - id: T1
+    first: E4
+    second: E2
+    min_gap_minutes: 0
+    max_gap_minutes: 5
+    note: "频偏超标判定行必须先于或同轮于该测试项 Fail 结论"
+  - id: T2
+    first: E2
+    second: E1
+    min_gap_minutes: 0
+    max_gap_minutes: 600
+    note: "测试项 Fail 必须先于 CloudMAT 总体失败结论；间隔可接近整个拷机时长（上限按拷机最长约 10 小时，结合实际修订）"
+
+# 根因：condition 只引用规则 ID（and/or/not/括号），自动算 verdict；字段与约束见 spec §2.5
+root_causes:
+  - id: R1
+    name: "5V 时钟相位频偏超出判定标准（硬件/时钟链路异常）"
+    condition: "E1 and E2 and E4"   # 注意：E3（电源类失败）是同案"伴随项"，共现不排除本故障；E3 命中时在报告中同时提示
+    mechanism: "5V 时钟相位频偏实测值超出判定标准，说明板上 5V/时钟链路未能保持规定相位，因此对应测试项失败。"
+    temporal: [T1, T2]
+    confidence: high
+    actions:
+      - "核对失败轮次的频偏实测值（usPhaseOf5V）与判定标准 0，确认超标幅度"
+      - "复测该单板相位超差测试项，确认是否稳定复现"
+      - "按返修流程检查/更换板上 5V/时钟相关器件（具体更换对象与工艺以现场返修作业指导书为准，待补充）"
+      - "处理后重新跑 CyclingTest，确认该项 Success 且无连带失败项"
+    prerequisites:
+      - "返修工位与 CloudMAT 工装环境正常"
+      - "保留失败日志与失败参数表（含上传 ftp 的 dumpfiles 路径）"
+    risks: "换件/操作以返修作业指导书为准；未定位前重复拷机可能被安全终止并产生无效工时"
+    rollback: "更换件无效时恢复原板，保留所有失败日志，升级硬件分析"
+    verify:
+      - globs: ["*.log"]
+        patterns: ["相位超差测试:第\\d+轮结束，结果：TestItemResult.Success"]
+        expect: present
+        # hold_time 只写"时长/整句判定描述"（如 24h 或 "更换后观察 24h 无失效"）；
+        # 渲染时脚本不再拼接固定"观察"前缀，避免与这里重复。不要只写"观察"。
+        hold_time: "完整拷机周期内无复发（具体周期数按返修规范，待补充）"
+    escalation: "频偏值异常大或换件后仍复现，附失败日志与 ftp dumpfiles 路径升级工艺/硬件团队"
+  - id: R2
+    name: "日志不完整，无法完成频偏取证"
+    condition: "E1 and E2 and not E4"
+    mechanism: "已观察到测试失败，但缺少失败参数表中的频偏实测值，现有日志只能证明采集不完整，不能据此认定硬件故障。"
+    temporal: [T2]                  # T1 依赖 E4，本根因 E4 未命中，不能要求 T1
+    confidence: low
+    actions:
+      - "检查「保存失败参数表」段落与日志采集完整性（是否被截断）"
+      - "从 ftp dumpfiles（搜索「失败日志上传 ftp」）重新获取完整日志后重跑分析"
+    prerequisites: ["具备 ftp 取数权限"]
+    risks: "证据不足时不得直接下硬件结论"
+    rollback: "无"
+    verify:
+      - globs: []
+        patterns: []
+        expect: present
+        hold_time: "重新取得含完整失败参数表的日志"
+    escalation: "无法补全日志时，按现场复现方式重新拷机并完整采集"
+
+# 浅度扫描特征（可选）：只标疑似、不下根因；字段见 spec
+quick_signatures:
+  - id: Q1
+    file_hints: [".log"]
+    any_of: ["TestItemResult.Fail", "相位超差测试"]
+    note: "工装日志出现相位超差测试失败特征"
+  - id: Q2
+    file_hints: [".log"]
+    any_of: ["usPhaseOf5V"]
+    note: "出现 5V 相位频偏字段"
+
+cases:
+  - id: C1
+    type: positive
+    archive: "722385500358_20261017203243_失败_38406@1_1_3_1_.log"
+    description: "IT BBU VSWc2 返修单板拷机失败，相位超差测试第 0 轮失败，usPhaseOf5V 频偏 1346.0，通过标准 0"
+    expected_root_cause: R1
+    expected_evidence: [E1, E2, E4]
+    not_expected_evidence: []       # E3（电源功率失败）在本案同时存在：共现不排除本故障，不能写进 not_expected_evidence
+    notes: "同案另有 1276/1310Sw/1310X86 电源功率、看门狗复位、读写RTC、断链超时等失败项（E3 命中），报告中作为伴随项并列提示"
+  - id: C2
+    type: negative
+    archive: "待补充（仅电源功率项失败、相位超差通过的案例）"
+    description: "现象同为拷机失败，但失败项为电源功率类，应排除本故障"
+    expected_root_cause: NONE
+    expected_evidence: []
+    not_expected_evidence: [E2, E4]
+    notes: "生成正式子 Skill 前必须向用户索取该反例"

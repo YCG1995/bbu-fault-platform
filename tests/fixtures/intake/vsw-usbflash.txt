@@ -1,0 +1,46 @@
+故障名称（必填）：VSW 单板 USBFLASH 故障
+别名 / 现场叫法（选填）：USB FLASH 故障
+一句话描述（必填）：VSW 单板 USB FLASH 写保护、I/O 或 SMART 异常时使用
+设备 / 制式 / 单板 / 版本（选填）：VSW 单板，所有版本
+常见关键词（选填）：USBFLASH；写保护；Buffer I/O error；protect_status
+现场能看到的现象（必填）：USB FLASH 写保护、读写异常或无法获取 SMART 信息
+影响（选填）：版本和配置无法写入 USB FLASH
+出现规律（选填）：偶发
+日志类型 / 来源（设备全量日志 / DCM）：DCM 一键式采集、CloudMAT 工装导出、设备全量日志
+大致路径或文件名（说个大概就行）：
+内核打印：OssLogVsw\kernel_1-1-1-1-HWM_APP.EXE_6\kernel.klog
+BoardInit启动日志：/BspLog/BSP_1-1-1-1-HWM_APP.EXE_0/BSP/BoardInit.log
+BoardHealth日志：/BspLog/BSP_1-1-1-1-HWM_APP.EXE_0/BSP/BoardHealth.log
+关键字段说明（选填）：
+usb 1-1: USB disconnect
+blk_update_request: critical medium error
+Buffer I/O error on dev sdb
+protect_status 非 0 表示写保护
+this flash not support
+idVendor = 0
+Manufacturer:(null)
+判断思路（必填）：先看写保护，再看 USB/块设备 I/O 错误，最后看 SMART 获取是否失败
+可能的原因（按可能性列）：USB FLASH 写保护；USB FLASH 器件/I/O 故障；SMART 获取失败
+每种原因怎么处理：写保护先解除保护；器件故障更换 USB FLASH；SMART 异常检查器件兼容性
+风险 / 注意事项（选填）：操作前备份配置
+怎么确认已恢复（选填）：重新读写并获取 SMART 成功
+案例编号：C1
+案例类型（勾选）：正常（应排除）
+故障现象（一句话）（必填）：正常
+期望结论（必填）：应排除本故障
+案例编号：C2
+案例类型（勾选）：正常（应排除）
+故障现象（一句话）（必填）：usb 1-2 断开，不是 USB FLASH
+期望结论（必填）：应排除本故障
+案例编号：C3
+案例类型（勾选）：故障正例
+故障现象（一句话）（必填）：protect_status: 20102
+期望结论（必填）：是本故障，根因是写保护
+案例编号：C4
+案例类型（勾选）：故障正例
+故障现象（一句话）（必填）：Buffer I/O error on dev sdb4
+期望结论（必填）：是本故障，根因是器件/I/O 故障
+案例编号：C5
+案例类型（勾选）：故障正例
+故障现象（一句话）（必填）：this flash not support
+期望结论（必填）：是本故障，根因是 SMART 获取失败

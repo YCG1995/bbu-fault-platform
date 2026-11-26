@@ -1,0 +1,30 @@
+[Unit]
+Description=BBU FaultScope - BBU fault diagnosis platform
+Documentation=file://@APP_DIR@/docs/部署手册.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@APP_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@PYTHON_BIN@ run.py --host @HOST@ --port @PORT@
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+LimitNOFILE=65535
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@STATE_DIR@
+# 如果使用外部反向代理，建议仅监听 127.0.0.1。
+# 如需把日志同时写入文件，可在 config.json 中调整 data/logs 并加 logrotate。
+
+[Install]
+WantedBy=multi-user.target

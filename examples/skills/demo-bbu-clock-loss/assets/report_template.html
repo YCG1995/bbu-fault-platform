@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>[示例] 时钟失锁诊断报告</title>
+<style>
+  :root {
+    --ink:#1b2530; --muted:#5f6b7a; --line:#e3e8ee; --bg:#eef1f6;
+    --accent:#2456e6; --accent-soft:#eef2ff; --danger:#d83931; --danger-soft:#fdf0ef;
+    --ok:#1a7f37; --ok-soft:#eef7f0; --warn:#b58105; --warn-soft:#fdf6e3;
+    --shadow:0 1px 2px rgba(16,24,40,.06), 0 8px 24px -12px rgba(16,24,40,.14);
+    --radius:12px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; padding:36px 16px; background:
+         radial-gradient(1200px 400px at 20% -10%, rgba(36,86,230,.08), transparent 60%),
+         radial-gradient(900px 380px at 85% 0%, rgba(26,127,55,.06), transparent 55%),
+         var(--bg);
+         color:var(--ink); font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         line-height:1.68; -webkit-font-smoothing:antialiased; }
+  .page { max-width:980px; margin:0 auto; background:#fff; border:1px solid var(--line);
+          border-radius:var(--radius); box-shadow:var(--shadow); padding:44px 52px; }
+  h1 { font-size:27px; margin:0 0 10px; font-weight:700; letter-spacing:.2px; }
+  h1::after { content:""; display:block; width:56px; height:4px; margin-top:14px;
+              border-radius:2px; background:linear-gradient(90deg,var(--accent),#6f9bff); }
+  h2 { font-size:19px; margin:40px 0 14px; padding:10px 14px; border-radius:8px;
+       background:linear-gradient(90deg,var(--accent-soft),transparent 70%);
+       border-left:4px solid var(--accent); font-weight:600; }
+  h3 { font-size:16px; margin:26px 0 10px; padding-bottom:8px; border-bottom:2px solid var(--line);
+       scroll-margin-top:16px; font-weight:600; }
+  h4 { font-size:15px; margin:18px 0 8px; color:var(--accent); font-weight:600; }
+  table { border-collapse:separate; border-spacing:0; width:100%; margin:12px 0 18px;
+          font-size:13.5px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th { background:#f4f7fd; font-weight:600; color:#33415a; }
+  th,td { border-bottom:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  tbody tr:hover td { background:#fafbfe; }
+  code { font-family:"SFMono-Regular",Consolas,"Courier New",monospace; font-size:12.5px;
+         background:#f1f3f6; padding:1.5px 6px; border-radius:5px; word-break:break-all; }
+  pre { background:#16202e; color:#dbe4f0; padding:15px 18px; border-radius:10px;
+        overflow:auto; font-family:"SFMono-Regular",Consolas,"Courier New",monospace; font-size:12.5px;
+        line-height:1.55; box-shadow:inset 0 1px 3px rgba(0,0,0,.3); }
+  .meta { color:var(--muted); font-size:13px; margin:4px 0 8px; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .stats { font-size:15px; margin:10px 0 16px; display:flex; flex-wrap:wrap; gap:10px; }
+  .stats b { font-weight:600; }
+  .stats b.num { font-size:20px; font-weight:700; color:var(--accent); }
+  .stats .pill { background:var(--accent-soft); border:1px solid #d6e0ff; border-radius:999px;
+                 padding:8px 18px; display:inline-block; }
+  .verdict { border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:10px;
+             padding:14px 20px; background:#fafbff; margin:14px 0; box-shadow:var(--shadow); }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600;
+           color:#fff; letter-spacing:.3px; }
+  .badge.high { background:var(--ok); } .badge.medium { background:var(--warn); } .badge.low { background:var(--danger); }
+  .hit { color:var(--ok); font-weight:600; } .miss { color:var(--danger); font-weight:600; }
+  ul,ol { margin:8px 0 8px 24px; } ul li::marker { color:var(--accent); }
+  .note { color:var(--muted); font-size:13px; background:#f8f9fb; border-left:3px solid var(--line);
+          padding:8px 12px; border-radius:6px; }
+  .filepath { font-size:13px; margin:16px 0 6px; color:#33415a; }
+  .filepath code { background:transparent; padding:0; }
+  .warn { background:var(--warn-soft); color:#7a5c00; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .todo { background:var(--warn-soft); color:#7a5c00; padding:1px 6px; border-radius:4px; font-size:12px;
+          font-weight:600; }
+  .toc { font-size:13px; margin:10px 0 24px; padding:12px 16px; background:#f7f9fd;
+         border:1px solid var(--line); border-radius:10px; display:flex; flex-wrap:wrap; gap:6px 18px; }
+  .toc a { color:var(--accent); text-decoration:none; font-weight:500; }
+  .toc a:hover { text-decoration:underline; }
+  @media print {
+    body { background:#fff; padding:0; }
+    .page { border:none; box-shadow:none; padding:0; max-width:none; }
+    pre,table,tr { page-break-inside:avoid; }
+    h2 { break-after:avoid; }
+  }
+  @media (max-width:640px) {
+    body { padding:16px 8px; }
+    .page { padding:26px 18px; border-radius:8px; }
+    th,td { padding:7px 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>[示例] 时钟失锁诊断报告</h1>
+  <p class="meta">生成时间：______ &nbsp;|&nbsp; 数据来源：______ &nbsp;|&nbsp; 分析工具：demo-bbu-clock-loss</p>
+
+  <h2 id="s1">1 结果统计</h2>
+  <p class="stats"><span class="pill"><b>总网元数量</b>：<b class="num">2</b></span> <span class="pill"><b>正常站点数量</b>：<b class="num">1</b></span> <span class="pill"><b>故障站点数量</b>：<b class="num">1</b></span> <span class="pill"><b>疑似</b>：0</span></p>
+  <table>
+    <tr><th>网元名称</th><th>故障根因</th><th>处理建议</th><th>证据</th></tr>
+    <tr>
+      <td><a href="#21-99851_13195742">99851_13195742</a></td>
+      <td>OCXO 曾经失效</td>
+      <td>更换 OCXO</td>
+      <td>sts=9 且 abs(cFCV)&gt;1000</td>
+    </tr>
+  </table>
+  <p class="note">「处理建议」「证据」均为一句话简化版，不含文件路径；网元名称只显示名称、不含路径；点击网元名称跳转至对应详情。</p>
+
+  <h2 id="s2">2 网元详情</h2>
+
+  <h3 id="21-99851_13195742">2.1 99851_13195742</h3>
+
+  <h4>2.1.1 故障根因</h4>
+  <p>用大白话详细说明：故障现象、发生原因、为什么会导致该故障；并给出判定依据（命中了哪些规则、关键条件成立）。</p>
+
+  <h4>2.1.2 处理建议</h4>
+  <ol>
+    <li>有序处理步骤 1</li>
+    <li>有序处理步骤 2</li>
+  </ol>
+  <p class="note">前提条件 / 风险与注意事项 / 回退方案 / 恢复验证 / 升级路径（有则列出）。</p>
+
+  <h4>2.1.3 故障证据</h4>
+  <p class="filepath">文件 1：<code>DCM_xxx_unpacked/99851_13195742/BspLog/BSP_1-1-1-1-HWM_APP.EXE_0.tar_unpacked/BSP/clockstatuslog.txt</code></p>
+  <table>
+    <tr><th>规则</th><th>行号</th><th>时间戳（UTC）</th><th>原文（关键片段）</th></tr>
+    <tr><td>控制超出范围</td><td>11</td><td>2026-09-06 05:41:39</td><td><code>Clk[000]2026-09-06,05:41:39 Ref= 1 sts=1 cFCV=1351.382 …</code></td></tr>
+    <tr><td>频跳</td><td>18</td><td>2026-07-11 16:41:29</td><td><code>Clk[000]… cFCV=70.688 …</code></td></tr>
+  </table>
+  <p class="note">短时间内多条同类记录可省略（脚本自动去重，真实命中数见规则统计）；同一文件证据较多时可用图表替代表格。多个文件依次列出「文件 2、文件 3…」。</p>
+
+  <h2 id="s3">3 故障现象与甄别</h2>
+  <ol>
+    <li>用户描述的现象：</li>
+    <li>日志/告警中观察到的现象：</li>
+    <li>与相似故障的甄别：</li>
+  </ol>
+</div>
+</body>
+</html>

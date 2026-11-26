@@ -1,0 +1,86 @@
+BBU FaultScope 一键部署包说明
+================================
+
+适用环境
+--------
+- Linux x86_64，推荐 Ubuntu 16.04/18.04/20.04（glibc ≥ 2.17）。
+- 不需要预装 Python、pip、Node 或访问外网；包内已带 CPython 3.13 运行时。
+- 默认端口 8080，数据目录 /var/lib/bbu-fault-platform。
+
+一、安装（root）
+----------------
+1. 校验并解压：
+   sha256sum -c bbu-fault-platform-1.20.1-ubuntu1604-offline.tar.gz.sha256
+   tar -xzf bbu-fault-platform-1.20.1-ubuntu1604-offline.tar.gz
+   cd bbu-fault-platform-1.20.1-ubuntu1604-offline
+
+2. 一键安装：
+   sudo bash install.sh
+
+   如 8080 已被占用：
+   sudo bash install.sh --port 8090
+
+   只允许本机反向代理访问：
+   sudo bash install.sh --host 127.0.0.1 --port 8080
+
+3. 安装完成后查看初始密码：
+   sudo cat /var/lib/bbu-fault-platform/data/初始管理员密码.txt
+   浏览器打开 http://<服务器IP>:8080/ ，用户名 admin，首次登录必须改密。
+
+常用参数：
+   --prefix DIR          程序目录（默认 /opt/bbu-fault-platform）
+   --python-prefix DIR   内置 Python 目录（默认 /opt/bbu-python313）
+   --state-dir DIR       数据目录（默认 /var/lib/bbu-fault-platform）
+   --host ADDR           监听地址（默认 0.0.0.0）
+   --port PORT           监听端口（默认 8080）
+   --user NAME           运行账号（默认 bbu）
+   --no-service          仅落盘/初始化，不安装 systemd（非 root 测试用）
+   --no-helper           不安装网页升级助手
+   --force               覆盖已有程序目录（数据保留，仅修复/重装用）
+
+二、服务管理
+------------
+   sudo systemctl status bbu-fault-platform
+   sudo systemctl restart bbu-fault-platform
+   sudo journalctl -u bbu-fault-platform -n 100 --no-pager
+
+程序目录只读，数据目录可写；升级只替换程序，不动数据。
+
+三、后续更新
+------------
+初始版本已安装 root/systemd 升级助手。以后收到更新包：
+1. 登录平台，进入「系统信息 → 离线升级」；
+2. 上传更新包 .tar.gz，填写包内版本；
+3. 预检通过后执行升级，平台自动备份并重启；
+4. 升级异常可在同一页面回滚。
+
+更新包由研发侧生成，命名形如：
+   bbu-fault-platform-1.20.1-offline.tar.gz
+   bbu-fault-platform-1.20.1-offline.tar.gz.sha256
+
+更新包只包含程序代码，不需要再次安装 Python；升级助手会使用
+/opt/bbu-python313/bin/python3.13 执行数据库迁移。
+
+不要用 install.sh 覆盖方式做版本升级；初始包只用于首次部署/修复。
+
+四、升级助手检查
+----------------
+   sudo systemctl status bbu-upgrade-helper@.service
+   sudo cat /etc/bbu-upgrade.json
+   sudo -u bbu sudo -n /usr/local/bin/bbu-upgrade-helper-trigger Uxxxxxxxx
+
+如升级助手未安装成功，网页“系统信息 → 离线升级”会提示不可用；
+可在服务器上重新执行：
+   sudo bash /opt/bbu-fault-platform/deploy/install_upgrade_helper.sh \
+     --prefix /opt/bbu-fault-platform \
+     --state-dir /var/lib/bbu-fault-platform \
+     --python-bin /opt/bbu-python313/bin/python3.13 \
+     --port 8080
+
+五、常见问题
+------------
+- 8080 被占用：安装时加 --port 换端口。
+- 页面 403/500：确认程序目录 root 只读、数据目录属于 bbu 用户。
+- 首次登录不知道密码：查看数据目录/data/初始管理员密码.txt。
+- 解压/校验失败：先 sha256sum -c，确认传输完整。
+- 模型连接失败：公司内网 MaaS 需在办公网/VPN；个人 Key 在个人中心配置。

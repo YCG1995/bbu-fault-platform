@@ -1,0 +1,301 @@
+[
+  {
+    "task_id": "CURATED-bbu-fault-vsw-watchdog-PLAYBOOK",
+    "skill_name": "bbu-fault-vsw-watchdog",
+    "description": "[专家推理剧本] VSW 看门狗复位：先由 Simplelog 确认确实发生看门狗复位，再用 kernel 判断 MCE/panic，最后用 BoardInit 的 EPLD 寄存器区分 CPU 中断与电源跌落；MCE 优先于寄存器异常，中断优先于电源。 竞争假设：MCE/Kernel panic 导致看门狗复位、CPU 中断异常导致看门狗复位、板内电源跌落导致看门狗复位。",
+    "hints": [
+      "bbu-fault-vsw-watchdog",
+      "VSW 看门狗复位"
+    ],
+    "plan": {
+      "summary": "专家排查剧本（仅约束排查路径，不预判根因）：先由 Simplelog 确认确实发生看门狗复位，再用 kernel 判断 MCE/panic，最后用 BoardInit 的 EPLD 寄存器区分 CPU 中断与电源跌落；MCE 优先于寄存器异常，中断优先于电源。",
+      "hypothesis": [
+        "MCE/Kernel panic 导致看门狗复位",
+        "CPU 中断异常导致看门狗复位",
+        "板内电源跌落导致看门狗复位"
+      ],
+      "steps": [
+        {
+          "id": "P1",
+          "title": "首先确认复位日志，看看门狗复位的频率，做记录",
+          "skills": [
+            "bbu-fault-vsw-watchdog"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E1"
+        },
+        {
+          "id": "P2",
+          "title": "确认内核日志，是否匹配到看门狗复位的相关关键字，若匹配到关键字，可能是看门狗复位的根因",
+          "skills": [
+            "bbu-fault-vsw-watchdog"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E2"
+        },
+        {
+          "id": "P3",
+          "title": "确认BoardInit启动日志，相关寄存器是否有异常，若有异常，可能是看门狗复位的根因",
+          "skills": [
+            "bbu-fault-vsw-watchdog"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E3、E4"
+        }
+      ],
+      "source": "curated_reasoning"
+    },
+    "outcome": {
+      "status": "done",
+      "confidence": "reference",
+      "chosen_skill": "bbu-fault-vsw-watchdog",
+      "root_cause": "",
+      "reason": "种子经验只提供竞争假设、鉴别点与停止条件；根因必须由本次任务证据重新判定。",
+      "missing_info": [],
+      "skills": [
+        {
+          "skill": "bbu-fault-vsw-watchdog",
+          "status": "done",
+          "root_cause": "",
+          "score": 5.0,
+          "evidence": []
+        }
+      ],
+      "source": "curated_reasoning",
+      "pitfalls": [
+        "只有告警名或单次复位记录，不能直接判定根因；必须先看复位频率和可用日志源。",
+        "0x630/0x634、0x664/0x674 全 0 表示无对应异常，不能把“寄存器存在”当成“寄存器异常”。",
+        "caterr 与电源寄存器同时非 0 时，按证据优先级先判 CPU 中断；只有 BoardInit 时也可独立判定，但仍应在报告中提示缺少 Simplelog。",
+        "MCE/Kernel panic 若与寄存器异常并存，优先由内核直接证据解释复位。"
+      ],
+      "discriminators": [
+        {
+          "rule_id": "E2",
+          "meaning": "内核记录 MCE 或 Kernel panic",
+          "supports": [
+            "MCE/Kernel panic 导致看门狗复位"
+          ],
+          "excludes": [
+            "CPU 中断异常导致看门狗复位",
+            "板内电源跌落导致看门狗复位"
+          ],
+          "use": "先看 E2；命中时优先验证MCE/Kernel panic 导致看门狗复位，并排除CPU 中断异常导致看门狗复位、板内电源跌落导致看门狗复位"
+        },
+        {
+          "rule_id": "E3",
+          "meaning": "EPLD 中断状态/事件寄存器非零",
+          "supports": [
+            "CPU 中断异常导致看门狗复位"
+          ],
+          "excludes": [
+            "板内电源跌落导致看门狗复位"
+          ],
+          "use": "先看 E3；命中时优先验证CPU 中断异常导致看门狗复位，并排除板内电源跌落导致看门狗复位"
+        }
+      ],
+      "stop_conditions": [
+        "E1+E2 成立：优先判 MCE/Kernel panic，停止再扩根因。",
+        "E3 成立且 E2 不成立：判 CPU 中断，停止。",
+        "E4 成立且 E2/E3 均不成立：判电源跌落，停止。",
+        "所有根因条件不成立：输出 unmatched，不猜测。"
+      ]
+    }
+  },
+  {
+    "task_id": "CURATED-bbu-fault-vsw-ssd-PLAYBOOK",
+    "skill_name": "bbu-fault-vsw-ssd",
+    "description": "[专家推理剧本] VSW单板SSD故障：先找内核里的 I/O 与 SATA 直接错误，再看 BoardInit 的 SMART 退化；直接 I/O/SATA 优先于 SMART，寿命耗尽优先于扇区介质异常。 竞争假设：SSD I/O error、SSD SATA 链路异常、SSD 寿命耗尽、SSD 扇区介质异常。",
+    "hints": [
+      "bbu-fault-vsw-ssd",
+      "VSW单板SSD故障"
+    ],
+    "plan": {
+      "summary": "专家排查剧本（仅约束排查路径，不预判根因）：先找内核里的 I/O 与 SATA 直接错误，再看 BoardInit 的 SMART 退化；直接 I/O/SATA 优先于 SMART，寿命耗尽优先于扇区介质异常。",
+      "hypothesis": [
+        "SSD I/O error",
+        "SSD SATA 链路异常",
+        "SSD 寿命耗尽",
+        "SSD 扇区介质异常"
+      ],
+      "steps": [
+        {
+          "id": "P1",
+          "title": "首先查看内核日志kernel.log里面是否有明显的SSD报错关键字，如果匹配到说明SSD异常",
+          "skills": [
+            "bbu-fault-vsw-ssd"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E1、E2"
+        },
+        {
+          "id": "P2",
+          "title": "查看BoardInit.log里面的SMART信息，关键参数是否有异常，如果异常说明SSD异常",
+          "skills": [
+            "bbu-fault-vsw-ssd"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E3、E4、E5"
+        }
+      ],
+      "source": "curated_reasoning"
+    },
+    "outcome": {
+      "status": "done",
+      "confidence": "reference",
+      "chosen_skill": "bbu-fault-vsw-ssd",
+      "root_cause": "",
+      "reason": "种子经验只提供竞争假设、鉴别点与停止条件；根因必须由本次任务证据重新判定。",
+      "missing_info": [],
+      "skills": [
+        {
+          "skill": "bbu-fault-vsw-ssd",
+          "status": "done",
+          "root_cause": "",
+          "score": 5.0,
+          "evidence": []
+        }
+      ],
+      "source": "curated_reasoning",
+      "pitfalls": [
+        "SATA link down 可能是未使用端口，不能单独当 SSD 故障；要看 COMRESET failed、ATA bus error 等直接错误。",
+        "SMART 的 raw_value 是每行第三个数值，不能把 current 值或序号当阈值。",
+        "Remain Life Percentage 等于 30 不算低于 30；只有小于 30 才判寿命耗尽。",
+        "Uncorrectable/Reallocated 必须大于 0；0 是正常。寿命与扇区同时异常时，优先寿命耗尽。"
+      ],
+      "discriminators": [
+        {
+          "rule_id": "E1",
+          "meaning": "内核记录 SSD 直接 I/O 错误",
+          "supports": [
+            "SSD I/O error"
+          ],
+          "excludes": [
+            "SSD SATA 链路异常",
+            "SSD 寿命耗尽",
+            "SSD 扇区介质异常"
+          ],
+          "use": "先看 E1；命中时优先验证SSD I/O error，并排除SSD SATA 链路异常、SSD 寿命耗尽、SSD 扇区介质异常"
+        },
+        {
+          "rule_id": "E2",
+          "meaning": "内核记录 SSD SATA 链路异常",
+          "supports": [
+            "SSD SATA 链路异常"
+          ],
+          "excludes": [
+            "SSD 寿命耗尽",
+            "SSD 扇区介质异常"
+          ],
+          "use": "先看 E2；命中时优先验证SSD SATA 链路异常，并排除SSD 寿命耗尽、SSD 扇区介质异常"
+        }
+      ],
+      "stop_conditions": [
+        "E1 成立：直接判 SSD I/O error，停止扩根因。",
+        "E2 成立且 E1 不成立：判 SATA 链路异常，停止。",
+        "E3 成立且 E1/E2 不成立：判寿命耗尽，停止。",
+        "E4 或 E5 成立且 E1/E2/E3 不成立：判扇区介质异常，停止。"
+      ]
+    }
+  },
+  {
+    "task_id": "CURATED-bbu-fault-vsw-usbflash-PLAYBOOK",
+    "skill_name": "bbu-fault-vsw-usbflash",
+    "description": "[专家推理剧本] VSW 单板 USBFLASH 故障：先看 protect_status 是否非 0，再看内核是否有该 USB 设备的断开/介质 I/O 错误，最后看 SMART/识别信息是否可取；写保护优先于器件 I/O，器件 I/O 优先于 SMART 获取失败。 竞争假设：USB FLASH 写保护、USB FLASH 器件或 I/O 故障、USB FLASH SMART 信息获取失败。",
+    "hints": [
+      "bbu-fault-vsw-usbflash",
+      "VSW 单板 USBFLASH 故障"
+    ],
+    "plan": {
+      "summary": "专家排查剧本（仅约束排查路径，不预判根因）：先看 protect_status 是否非 0，再看内核是否有该 USB 设备的断开/介质 I/O 错误，最后看 SMART/识别信息是否可取；写保护优先于器件 I/O，器件 I/O 优先于 SMART 获取失败。",
+      "hypothesis": [
+        "USB FLASH 写保护",
+        "USB FLASH 器件或 I/O 故障",
+        "USB FLASH SMART 信息获取失败"
+      ],
+      "steps": [
+        {
+          "id": "P1",
+          "title": "先看写保护",
+          "skills": [
+            "bbu-fault-vsw-usbflash"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E2"
+        },
+        {
+          "id": "P2",
+          "title": "再看 USB/块设备 I/O 错误",
+          "skills": [
+            "bbu-fault-vsw-usbflash"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E1"
+        },
+        {
+          "id": "P3",
+          "title": "最后看 SMART 获取是否失败",
+          "skills": [
+            "bbu-fault-vsw-usbflash"
+          ],
+          "gate": "evidence",
+          "objective": "按专家路径核对规则 E3"
+        }
+      ],
+      "source": "curated_reasoning"
+    },
+    "outcome": {
+      "status": "done",
+      "confidence": "reference",
+      "chosen_skill": "bbu-fault-vsw-usbflash",
+      "root_cause": "",
+      "reason": "种子经验只提供竞争假设、鉴别点与停止条件；根因必须由本次任务证据重新判定。",
+      "missing_info": [],
+      "skills": [
+        {
+          "skill": "bbu-fault-vsw-usbflash",
+          "status": "done",
+          "root_cause": "",
+          "score": 5.0,
+          "evidence": []
+        }
+      ],
+      "source": "curated_reasoning",
+      "pitfalls": [
+        "protect_status=0 是正常，不能因为字段存在就判写保护。",
+        "其他 USB 口（如 usb 1-2）的断开不能直接归因到本 USB FLASH，必须对齐设备实例。",
+        "SMART 不支持不等于器件损坏；需结合是否可读写、是否有 I/O 错误判断。",
+        "写保护与 I/O 错误同时存在时，先处理写保护，因为它会阻止所有写入。"
+      ],
+      "discriminators": [
+        {
+          "rule_id": "E1",
+          "meaning": "USB FLASH 设备断开或块设备 I/O 错误",
+          "supports": [
+            "USB FLASH 器件或 I/O 故障"
+          ],
+          "excludes": [
+            "USB FLASH SMART 信息获取失败"
+          ],
+          "use": "先看 E1；命中时优先验证USB FLASH 器件或 I/O 故障，并排除USB FLASH SMART 信息获取失败"
+        },
+        {
+          "rule_id": "E2",
+          "meaning": "USB FLASH 写保护状态非零",
+          "supports": [
+            "USB FLASH 写保护"
+          ],
+          "excludes": [
+            "USB FLASH 器件或 I/O 故障",
+            "USB FLASH SMART 信息获取失败"
+          ],
+          "use": "先看 E2；命中时优先验证USB FLASH 写保护，并排除USB FLASH 器件或 I/O 故障、USB FLASH SMART 信息获取失败"
+        }
+      ],
+      "stop_conditions": [
+        "E2 成立：先判写保护；E1 同时成立时在报告中并列提示。",
+        "E1 成立且 E2 不成立：判器件或 I/O 故障，停止。",
+        "E3 成立且 E1/E2 不成立：判 SMART/识别异常，停止。"
+      ]
+    }
+  }
+]

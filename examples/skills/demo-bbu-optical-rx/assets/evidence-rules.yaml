@@ -1,0 +1,29 @@
+rules:
+- id: E1
+  step: S1
+  description: 日志出现 RX_LOSS 或收光功率过低
+  type: text
+  globs:
+  - '**/*.log'
+  - '**/*optical*.txt'
+  - '**/*.txt'
+  encoding: auto
+  format: text
+  any_of:
+  - RX_LOSS
+  - 收光功率过低
+  - RX power low
+  - 光功率异常
+  time_extract:
+    pattern: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})
+    group: 1
+    formats:
+    - '%Y-%m-%d %H:%M:%S'
+  min_matches: 1
+  context_lines: 2
+temporal: []
+root_causes:
+- id: R1
+  name: 光模块接收光功率低于门限
+  condition: E1
+  confidence: medium
