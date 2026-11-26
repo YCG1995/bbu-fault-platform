@@ -199,6 +199,59 @@ function render(data, taskPage) {
       <thead><tr><th>日期</th><th class="num">调用</th><th class="num">Token</th><th>模型分布（Token）</th></tr></thead>
       <tbody>${dailyRows}</tbody></table></div></details>`;
 
+  const userDaily = data.user_daily || [];
+  const userSummary = new Map();
+  userDaily.forEach((day) => {
+    (day.users || []).forEach((u) => {
+      const item = userSummary.get(u.user_id) || {
+        user_id: u.user_id, user_name: u.user_name, calls: 0, failed_calls: 0,
+        input_tokens: 0, output_tokens: 0, total_tokens: 0, active_days: 0,
+      };
+      item.user_name = u.user_name || item.user_name;
+      item.calls += Number(u.calls || 0);
+      item.failed_calls += Number(u.failed_calls || 0);
+      item.input_tokens += Number(u.input_tokens || 0);
+      item.output_tokens += Number(u.output_tokens || 0);
+      item.total_tokens += Number(u.total_tokens || 0);
+      item.active_days += 1;
+      userSummary.set(u.user_id, item);
+    });
+  });
+  const userRows = [...userSummary.values()].sort((a, b) =>
+    (b.total_tokens - a.total_tokens) || (b.calls - a.calls) || (a.user_id - b.user_id));
+  const userSummaryRows = userRows.map((u) => `<tr>
+      <td data-label="用户"><strong>${userLabel(u)}</strong><div class="sub">ID ${esc(String(u.user_id))}</div></td>
+      <td class="num" data-label="活跃天数">${num(u.active_days)}</td>
+      <td class="num" data-label="调用"><strong>${num(u.calls)}</strong><div class="sub">失败 ${num(u.failed_calls)}</div></td>
+      <td class="num" data-label="输入 Token">${num(u.input_tokens)}</td>
+      <td class="num" data-label="输出 Token">${num(u.output_tokens)}</td>
+      <td class="num" data-label="总 Token"><strong>${num(u.total_tokens)}</strong></td>
+      <td class="num" data-label="日均调用">${u.active_days ? (u.calls / u.active_days).toFixed(1) : '0'}</td>
+      <td class="num" data-label="日均 Token">${u.active_days ? num(Math.round(u.total_tokens / u.active_days)) : '0'}</td>
+    </tr>`).join('') || `<tr><td colspan="8" class="usage-empty">当前范围没有用户调用</td></tr>`;
+  const userDailyRows = userDaily.slice().reverse().flatMap((day) => (day.users || []).map((u) => `<tr>
+      <td data-label="日期">${esc(day.date)}</td>
+      <td data-label="用户"><strong>${userLabel(u)}</strong><div class="sub">ID ${esc(String(u.user_id))}</div></td>
+      <td class="num" data-label="调用">${num(u.calls)}</td>
+      <td class="num" data-label="失败">${num(u.failed_calls)}</td>
+      <td class="num" data-label="输入 Token">${num(u.input_tokens)}</td>
+      <td class="num" data-label="输出 Token">${num(u.output_tokens)}</td>
+      <td class="num" data-label="总 Token"><strong>${num(u.total_tokens)}</strong></td>
+    </tr>`)).join('') || `<tr><td colspan="7" class="usage-empty">暂无每日用户记录</td></tr>`;
+  const userTable = `<div class="card">
+    <div class="card-head"><h3>用户每日用量</h3><span class="sub">每个用户的每日调用次数与 Token 总量</span></div>
+    <div class="card-body table-wrap"><table class="data usage-table responsive">
+      <thead><tr><th>用户</th><th class="num">活跃天数</th><th class="num">调用</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总 Token</th><th class="num">日均调用</th><th class="num">日均 Token</th></tr></thead>
+      <tbody>${userSummaryRows}</tbody></table></div>
+    <div class="card-body" style="padding-top:0">
+      <details class="usage-subdetails">
+        <summary>展开每日明细（${num(userDaily.length)} 天）</summary>
+        <div class="table-wrap" style="margin-top:10px"><table class="data usage-table responsive">
+          <thead><tr><th>日期</th><th>用户</th><th class="num">调用</th><th class="num">失败</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总 Token</th></tr></thead>
+          <tbody>${userDailyRows}</tbody></table></div>
+      </details>
+    </div></div>`;
+
   const skillRows = (data.skills || []).map((s) => `<tr>
       <td><strong>${esc(s.skill_name)}</strong></td>
       <td class="num">${num(s.executions)}<div class="sub">失败 ${num(s.failed)}</div></td>
@@ -254,7 +307,7 @@ function render(data, taskPage) {
       </div>
       <div class="card-body">${chartHtml(data)}</div>
     </div>
-    <div class="usage-stack">${modelTable}${dailyTable}</div>
+    <div class="usage-stack">${modelTable}${userTable}${dailyTable}</div>
     ${skillsTable}
     ${tasksTable}`;
 }

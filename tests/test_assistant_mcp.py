@@ -84,7 +84,7 @@ class AssistantMCPTests(unittest.TestCase):
         admin_status = self.app.assistant.status(self.admin)
         eng_status = self.app.assistant.status(self.engineer)
         self.assertTrue(admin_status["enabled"])
-        self.assertEqual(admin_status["docs"], 14)
+        self.assertEqual(admin_status["docs"], 15)
         self.assertGreaterEqual(admin_status["tools"], 18)
         self.assertLess(eng_status["tools"], admin_status["tools"])
         self.assertIn("search_docs", eng_status["tool_names"])
@@ -317,7 +317,7 @@ class AssistantMCPTests(unittest.TestCase):
     def test_mcp_resources_and_docs_tools(self) -> None:
         token = self.app.mcp.rotate_token(self.admin, "read")["token"]
         docs = self.app.assistant.kb.list_docs()
-        self.assertEqual(len(docs), 14)
+        self.assertEqual(len(docs), 15)
         result = self.app.mcp.handle_http(_Req("POST", _rpc("resources/list"), token=token))
         resources = json.loads(result[2])["result"]["resources"]
         self.assertGreaterEqual(len(resources), 11)

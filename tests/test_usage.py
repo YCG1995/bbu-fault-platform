@@ -79,11 +79,18 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(len(all_data["directory"]), 2)
         self.assertEqual({u["user_id"] for u in all_data["directory"]},
                          {self.admin_id, self.engineer_id})
+        self.assertEqual(sum(d["calls"] for d in all_data["user_daily"]), 3)
+        self.assertEqual(len(all_data["user_daily"]), 1)
+        self.assertEqual(len(all_data["user_daily"][0]["users"]), 2)
+        for day in all_data["user_daily"]:
+            self.assertEqual(day["calls"], sum(u["calls"] for u in day["users"]))
 
         own = store.overview(days=30, user_id=self.engineer_id, include_directory=True)
         self.assertEqual(own["totals"]["calls"], 1)
         self.assertEqual(own["totals"]["total_tokens"], 10)
         self.assertEqual(own["models"][0]["failed_calls"], 1)
+        self.assertEqual(len(own["user_daily"]), 1)
+        self.assertEqual(own["user_daily"][0]["users"][0]["user_id"], self.engineer_id)
         # 管理员目录不受筛选影响，仍可切换用户。
         self.assertEqual({u["user_id"] for u in own["directory"]}, {self.admin_id, self.engineer_id})
 
@@ -96,6 +103,8 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(today["calls"], 5)
         self.assertEqual(today["total_tokens"], sum((i + 1) * 2 for i in range(5)))
         self.assertEqual(len(today["models"]), 1)
+        self.assertEqual(len(data["user_daily"]), 1)
+        self.assertEqual(data["user_daily"][0]["users"][0]["calls"], 5)
 
     def test_task_rows_uses_event_detail_and_falls_back_for_old_tasks(self):
         from bbu.util import iso_now
@@ -132,11 +141,15 @@ class UsageStoreTests(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(data["scope"]["mode"], "all")
         self.assertEqual(data["totals"]["calls"], 2)
+        self.assertEqual(sum(d["calls"] for d in data["user_daily"]), 2)
+        self.assertEqual(len({u["user_id"] for d in data["user_daily"] for u in d["users"]}), 2)
 
         status, _headers, body = h_usage_overview(
             self.app, _Req({"user_id": str(self.engineer_id)}, token=admin_token))
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["totals"]["calls"], 1)
+        self.assertEqual({u["user_id"] for d in json.loads(body)["user_daily"] for u in d["users"]},
+                         {self.engineer_id})
 
         status, _headers, body = h_usage_overview(self.app, _Req(token=eng_token))
         self.assertEqual(status, 200)

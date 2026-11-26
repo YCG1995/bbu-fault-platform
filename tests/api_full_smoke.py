@@ -703,6 +703,7 @@ def main() -> int:
         _, usage = admin_client.json("GET", "/api/usage/overview?days=7")
         assert "totals" in usage and isinstance(usage["daily"], list)
         assert len(usage["daily"]) == 7 and "directory" in usage
+        assert isinstance(usage["user_daily"], list)
         hit("GET /api/usage/overview")
         _, usage_tasks = admin_client.json("GET", "/api/usage/tasks?days=7&page=1&page_size=10")
         assert usage_tasks["page"] == 1 and isinstance(usage_tasks["items"], list)

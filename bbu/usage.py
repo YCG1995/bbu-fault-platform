@@ -115,6 +115,7 @@ class UsageStore:
         day_models: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         models: dict[str, dict[str, Any]] = {}
         users: dict[str, dict[str, Any]] = {}
+        user_day: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
         task_ids: set[str] = set()
         skill_names: set[str] = set()
         for e in events:
@@ -169,13 +170,22 @@ class UsageStore:
                 m["latency_total"] += _int(e.get("latency_ms"))
                 m["latency_n"] += 1
             if e.get("user_id"):
-                m["users"].add(int(e["user_id"]))
-                u = users.setdefault(str(e["user_id"]), {
-                    "user_id": int(e["user_id"]), "username": "", "calls": 0,
+                uid = int(e["user_id"])
+                m["users"].add(uid)
+                u = users.setdefault(str(uid), {
+                    "user_id": uid, "username": "", "calls": 0,
                     "failed_calls": 0, "total_tokens": 0})
                 u["calls"] += 1
                 u["failed_calls"] += 0 if ok else 1
                 u["total_tokens"] += ttotal
+                ud = user_day[date_key].setdefault(uid, {
+                    "user_id": uid, "user_name": "", "calls": 0, "failed_calls": 0,
+                    "input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                ud["calls"] += 1
+                ud["failed_calls"] += 0 if ok else 1
+                ud["input_tokens"] += tin
+                ud["output_tokens"] += tout
+                ud["total_tokens"] += ttotal
         totals["tasks"] = len(task_ids)
         totals["skills"] = len(skill_names)
         totals["users"] = len(users)
@@ -194,6 +204,25 @@ class UsageStore:
             d["models"] = sorted(day_models[d["date"]].values(),
                                 key=lambda x: (-x["total_tokens"], -x["calls"], x["key"]))
         model_rows = sorted(models.values(), key=lambda x: (-x["total_tokens"], -x["calls"], x["key"]))
+        user_daily: list[dict[str, Any]] = []
+        for date_key in rng["dates"]:
+            day_rows = user_day.get(date_key)
+            if not day_rows:
+                continue
+            payload: list[dict[str, Any]] = []
+            for uid, item in sorted(day_rows.items(),
+                                    key=lambda kv: (-kv[1]["total_tokens"], -kv[1]["calls"], kv[0])):
+                meta = users.get(str(uid), {})
+                item["user_name"] = (meta.get("display_name") or meta.get("username")
+                                     or f"用户 #{uid}")
+                payload.append(item)
+            user_daily.append({
+                "date": date_key,
+                "calls": sum(x["calls"] for x in payload),
+                "failed_calls": sum(x["failed_calls"] for x in payload),
+                "total_tokens": sum(x["total_tokens"] for x in payload),
+                "users": payload,
+            })
         skill_rows = self._skills(rng, None if all_users else user_id, all_users)
         directory: list[dict[str, Any]] = []
         if include_directory:
@@ -213,6 +242,7 @@ class UsageStore:
             "scope": {"mode": "all" if all_users else "self", "user_id": None if all_users else user_id},
             "totals": totals,
             "daily": [daily[d] for d in rng["dates"]],
+            "user_daily": user_daily,
             "models": model_rows,
             "skills": skill_rows,
             "users": sorted(users.values(), key=lambda x: (-x["total_tokens"], x["user_id"])),

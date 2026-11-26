@@ -21,6 +21,15 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.0 用户每日用量
+
+本版本在 1.23.0 用量统计基础上补充“每个用户每天的使用次数和总量”，数据库 schema 保持 21。
+
+- **用户每日聚合**：`GET /api/usage/overview` 新增 `user_daily`，按本地时区日期给出每个用户的调用次数、失败次数、输入/输出/总 Token；普通用户只包含自己，管理员包含全部（指定 `user_id` 时只包含该用户）。
+- **用户汇总**：页面新增“用户每日用量”表，展示每个用户的活跃天数、调用次数、失败、输入/输出/总 Token、日均调用与日均 Token；下方可展开每日明细（日期、用户、调用、Token）。
+- **权限不变**：管理员可切换全部用户 / 指定用户；普通用户只能看到自己的记录，显式查询他人仍返回 403。
+- 验证：单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.0.md`。
+
 ## 1.23.0 用量统计
 
 本版本新增“用量统计”，把模型调用、任务 Token 与技能执行消耗统一落库；数据库 schema 从 20 升到 21。
@@ -250,13 +259,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.23.0-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.0-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.23.0-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.0-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

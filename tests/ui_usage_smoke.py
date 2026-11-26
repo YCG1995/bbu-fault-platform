@@ -126,6 +126,8 @@ def main() -> int:
             page.wait_for_selector(".usage-chart")
             page.wait_for_selector("text=技能消耗")
             page.wait_for_selector("text=任务 Token")
+            page.wait_for_selector("text=用户每日用量")
+            assert page.locator(".usage-subdetails").count() == 1
             page.screenshot(path=str(out / "usage-1440.png"), full_page=True)
             assert page.locator(".usage-legend-item").count() >= 1
             assert page.locator(".usage-kpis .stat").count() == 4
@@ -145,6 +147,9 @@ def main() -> int:
             print("[mobile]", metrics)
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
             assert overflow <= 1, f"390px 横向溢出 {overflow}px"
+            # 截图专用：解除 100% 高度钳制，让 full_page 覆盖完整内容；不改产品样式。
+            page.evaluate("() => { document.documentElement.style.height='auto'; document.body.style.height='auto'; }")
+            page.wait_for_timeout(250)
             page.screenshot(path=str(out / "usage-390.png"), full_page=True)
             assert not errors, f"页面脚本错误: {errors[:3]}"
 
@@ -161,6 +166,7 @@ def main() -> int:
             page2.wait_for_selector(".usage-chart")
             assert page2.locator("select[data-change='user']").count() == 0
             assert page2.locator("text=仅显示我的调用记录").count() == 1
+            page2.wait_for_selector("text=用户每日用量")
             page2.screenshot(path=str(out / "usage-user.png"), full_page=True)
             assert not errors, f"页面脚本错误: {errors[:3]}"
             browser.close()
