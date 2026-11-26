@@ -136,9 +136,6 @@ def _auth(app: "App", req, minimum: str = "engineer", csrf: bool = True,
     req.user = {"id": session["user_id"], "username": session["username"],
                 "display_name": session["display_name"], "role": session["role"],
                 "must_change": session["must_change"]}
-    if session["must_change"] and not allow_password_change:
-        raise HTTPError(403, "请先修改初始密码",
-                        {"code": "password_change_required"})
     if not check_role(req.user, minimum):
         raise HTTPError(403, "权限不足")
     if csrf and req.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -463,6 +460,7 @@ class App:
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/analyze", h_workshop_analyze)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/refine", h_workshop_refine)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/check", h_workshop_check)
+        r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/rules/try", h_workshop_rules_try)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/verify-rules", h_workshop_verify_rules)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/build", h_workshop_build)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/publish", h_workshop_publish)
@@ -716,7 +714,7 @@ def h_global_search(app: App, req):
         f"SELECT id,title,status,created_at FROM tasks WHERE (title LIKE ? OR id LIKE ?){task_where} "
         "ORDER BY created_at DESC LIMIT 6", tuple(task_args))
     cases = []
-    if user["role"] != "reviewer":
+    if True:
         case_where = "" if user["role"] == "admin" else " AND (created_by='' OR created_by=?)"
         case_args: list[Any] = [like, like, like]
         if user["role"] != "admin":
@@ -725,7 +723,7 @@ def h_global_search(app: App, req):
             f"SELECT id,name,title,status,split FROM real_cases WHERE (name LIKE ? OR title LIKE ? OR id LIKE ?){case_where} "
             "ORDER BY updated_at DESC LIMIT 6", tuple(case_args))
     skills = []
-    if user["role"] != "reviewer":
+    if True:
         skills = app.db.all(
             "SELECT name,title,status,version FROM skills WHERE name LIKE ? OR title LIKE ? "
             "ORDER BY name LIMIT 6", (like, like))
@@ -802,10 +800,7 @@ def _draft_public(row: dict) -> dict:
 
 
 def _draft_edit_user(app: App, req) -> dict:
-    user = _auth(app, req)
-    if user["role"] not in ("engineer", "admin"):
-        raise HTTPError(403, "专家账号不能创建诊断草稿")
-    return user
+    return _auth(app, req)
 
 
 def h_task_draft_current(app: App, req):
@@ -886,8 +881,8 @@ def h_task_draft_file(app: App, req, draft_id: str):
         raise HTTPError(400, "请选择要上传的日志包")
     item = uploads[0]
     name = safe_filename(item.filename)
-    if not re.search(r"\.(zip|tar\.gz|tgz)$", name, re.IGNORECASE):
-        raise HTTPError(400, "仅支持 zip / tar.gz / tgz 日志包")
+    if not re.search(r"\.(zip|tar|tar\.gz|tgz|7z|gz|bz2|xz|zst)$", name, re.IGNORECASE):
+        raise HTTPError(400, "仅支持 zip / tar / tar.gz / tgz / 7z / gz / bz2 / xz / zst 日志包")
     if any(f.get("name") == item.filename and f.get("size") == item.size for f in files):
         for other in uploads[1:]:
             try: os.unlink(other.path)
@@ -936,8 +931,6 @@ def h_task_draft_file_delete(app: App, req, draft_id: str, file_id: str):
 
 def h_task_create(app: App, req):
     user = _auth(app, req)
-    if user["role"] not in ("engineer", "admin"):
-        raise HTTPError(403, "专家账号仅处理被分配的复核任务，不能创建诊断任务")
     max_mb = int(app.config.get("max_upload_mb", 2048))
     fields, files = req.parse_multipart(max_mb * 1024 * 1024, max_file_bytes=max_mb * 1024 * 1024)
     description = (fields.get("description") or "").strip()
@@ -950,6 +943,14 @@ def h_task_create(app: App, req):
     title_source = "manual" if supplied_title else "deterministic"
     mode = fields.get("mode") if fields.get("mode") in ("fast", "deep") else "fast"
     include_canary = fields.get("include_canary") in ("1", "true", "on") and user["role"] == "admin"
+    selected_skills = [x.strip() for x in str(fields.get("skill_names") or "").split(",")
+                       if x.strip()][:6]
+    if selected_skills:
+        available = {r["name"] for r in app.db.all(
+            "SELECT name FROM skills WHERE status IN ('ready','degraded')")}
+        missing = [x for x in selected_skills if x not in available]
+        if missing:
+            raise HTTPError(400, "指定技能不存在或不可用：" + "、".join(missing))
     model_override = None
     if fields.get("model_id"):
         try:
@@ -993,7 +994,8 @@ def h_task_create(app: App, req):
         (task_id, user["id"], title, description, title_source, "queued", "queued", 0, mode,
          model_override, json.dumps(inputs, ensure_ascii=False),
          json.dumps({"mode": mode, "model_override": model_override,
-                     "include_canary": include_canary}, ensure_ascii=False), now))
+                     "include_canary": include_canary,
+                     "skill_names": selected_skills}, ensure_ascii=False), now))
     app.worker.submit(task_id)
     if draft_row:
         shutil.rmtree(app.config.data_dir / "draft_uploads" / draft_row["id"], ignore_errors=True)
@@ -1698,6 +1700,9 @@ def h_task_report(app: App, req, task_id: str):
 def h_task_review(app: App, req, task_id: str):
     task = _task_for(app, req, task_id)
     user = _auth(app, req)
+    if user["role"] == "reviewer" and task.get("user_id") == user["id"] \
+            and task.get("reviewer_id") != user["id"]:
+        raise HTTPError(403, "不能复核自己创建的任务")
     payload = req.json()
     service = ReviewService(app.db, app.config.data_dir)
     try:
@@ -2213,11 +2218,53 @@ def h_recovery_observe(app: App, req, run_id: str):
     except ValueError as exc:
         raise HTTPError(404, str(exc)) from exc
     task = _task_for(app, req, run["task_id"])
-    data = req.json()
-    after = data.get("after") if isinstance(data.get("after"), dict) else data
+    user = _auth(app, req)
+    after = None
+    upload = None
+    if "multipart/form-data" in (req.headers.get("Content-Type") or "").lower():
+        max_mb = min(64, int(app.config.get("max_upload_mb", 2048)))
+        fields, files = req.parse_multipart(max_mb * 1024 * 1024,
+                                            max_file_bytes=max_mb * 1024 * 1024)
+        try:
+            payload = json.loads(fields.get("after") or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPError(400, "恢复后回传内容不是合法 JSON") from exc
+        after = payload.get("after") if isinstance(payload.get("after"), dict) else payload
+        upload = files[0] if files else None
+    else:
+        data = req.json()
+        after = data.get("after") if isinstance(data.get("after"), dict) else data
     if not after:
         raise HTTPError(400, "缺少恢复后只读回传内容")
-    user = _auth(app, req)
+    if upload:
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with open(upload.path, "rb") as fh:
+                raw = fh.read(1024 * 1024)
+                digest.update(raw)
+                total = len(raw)
+                while True:
+                    chunk = fh.read(512 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    total += len(chunk)
+        except OSError as exc:
+            raise HTTPError(400, "无法读取回传文件") from exc
+        text = raw.decode("utf-8", errors="replace")
+        evidence = after.get("evidence") if isinstance(after.get("evidence"), list) else []
+        if not evidence:
+            evidence = [{"rule_id": "", "file": upload.filename, "text": "", "hit": True}]
+        first = dict(evidence[0])
+        first["file"] = upload.filename or first.get("file") or "after-evidence.txt"
+        first["sha256"] = digest.hexdigest()
+        first["size"] = total
+        first["uploaded"] = True
+        if not first.get("text"):
+            first["text"] = "\n".join(text.splitlines()[:60])[:4000]
+        evidence[0] = first
+        after["evidence"] = evidence
     try:
         run = recovery_observe(app.db, run_id, after, user["username"])
     except ValueError as exc:
@@ -2778,6 +2825,18 @@ def h_workshop_case(app: App, req, draft_id: str):
         raise HTTPError(400, str(exc)) from exc
     app.db.audit(user["id"], user["username"], "workshop.case", draft_id,
                  {"case": expected["case_id"]}, req.ip)
+    return response_json(result)
+
+
+def h_workshop_rules_try(app: App, req, draft_id: str):
+    user = _auth(app, req)
+    _draft_for(app, req, draft_id)
+    try:
+        result = app.workshop.try_rules(draft_id)
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "workshop.rules_try", draft_id,
+                 {"ok": result.get("ok"), "rules": result.get("rules")}, req.ip)
     return response_json(result)
 
 
@@ -3534,19 +3593,19 @@ def h_mcp_http(app: App, req):
 
 
 def h_mcp_info(app: App, req):
-    user = _admin(app, req, csrf=False)
+    user = _auth(app, req, csrf=False)
     return response_json({"mcp": app.mcp.token_info(user)})
 
 
 def h_mcp_token_create(app: App, req):
-    user = _admin(app, req)
+    user = _auth(app, req)
     data = req.json()
     return response_json({"mcp": app.mcp.rotate_token(user, str(data.get("mode") or "read"))},
                          status=201)
 
 
 def h_mcp_token_delete(app: App, req):
-    user = _admin(app, req)
+    user = _auth(app, req)
     return response_json({"mcp": app.mcp.revoke_token(user)})
 
 
@@ -3885,8 +3944,6 @@ def h_system_restart(app: App, req):
 
 def h_system_info(app: App, req):
     user = _auth(app, req, csrf=False)
-    if user["role"] == "reviewer":
-        raise HTTPError(403, "专家账号不能查看系统配置")
     import platform as _platform
     skills = app.db.all("SELECT status, COUNT(*) AS n FROM skills GROUP BY status")
     return response_json({

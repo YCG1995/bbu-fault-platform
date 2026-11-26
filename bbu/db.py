@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -60,6 +60,16 @@ CREATE TABLE IF NOT EXISTS user_invites (
   revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invites_expiry ON user_invites(expires_at, used_at, revoked_at);
+
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  mode TEXT NOT NULL DEFAULT 'read',
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_tokens_hash ON mcp_tokens(token_hash);
 
 CREATE TABLE IF NOT EXISTS task_drafts (
   id TEXT PRIMARY KEY,

@@ -15,7 +15,7 @@ export async function renderTaskList() {
   const view = mount('任务记录', '所有诊断任务的执行状态与结论',
     `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>`);
   const tabs = state.user?.role === 'reviewer'
-    ? [['', '全部'], ['pending', '待复核'], ['done', '已完成'], ['needs_data', '待补充']]
+    ? [['', '全部'], ['pending', '待我复核'], ...TASK_TABS.slice(1)]
     : TASK_TABS;
   view.innerHTML = `
     <div class="card">
@@ -113,10 +113,20 @@ export async function renderNewTask() {
   const isAdmin = state.user?.role === 'admin';
   let models = [];
   let restored = null;
+  let skills = [];
   try {
     const data = await api('/api/models');
     models = (data.items || []).filter((m) => m.enabled);
   } catch { /* 工程师也能建任务，模型列表失败不阻塞 */ }
+  try {
+    const data = await api('/api/skills');
+    skills = (data.items || []).filter((s) => ['ready', 'degraded'].includes(s.status));
+  } catch { /* 技能列表失败不阻塞 */ }
+  let preselected = '';
+  try {
+    preselected = sessionStorage.getItem('bbu.diagnose_skill') || '';
+    if (preselected) sessionStorage.removeItem('bbu.diagnose_skill');
+  } catch { /* ignore */ }
   try { restored = (await api('/api/task-drafts/current')).draft || null; } catch { restored = null; }
 
   const initFiles = (restored?.files || []).map((f, i) => ({
@@ -135,12 +145,12 @@ export async function renderNewTask() {
               placeholder="例如：今早 8:20 起 BBU 上报 CLK032 时钟告警，PLL 无法锁定，GPS 天线检查无异常；设备为 ITBBU，室外抱杆安装……">${esc(restored?.description || '')}</textarea>
           </div>
           <div class="form-row">
-            <label class="label">日志包 <span class="hint">支持 zip / tar.gz，可多选；单包上限 ${esc(state.publicConfig.max_upload_mb || 512)} MB</span></label>
+            <label class="label">日志包 <span class="hint">支持 zip / tar / tar.gz / 7z / gz / bz2 / xz / zst，可多选；单包上限 ${esc(state.publicConfig.max_upload_mb || 512)} MB</span></label>
             <div class="dropzone" id="dropzone">
               ${icon('upload')}
               <h3>拖拽日志包到这里，或点击选择文件</h3>
               <p>选择后立即在后台校验并上传；刷新页面后已上传文件仍可恢复</p>
-              <input type="file" id="file-input" multiple accept=".zip,.tar.gz,.tgz,application/zip,application/gzip" hidden>
+              <input type="file" id="file-input" multiple accept=".zip,.tar,.tar.gz,.tgz,.7z,.gz,.bz2,.xz,.zst,application/zip,application/gzip" hidden>
             </div>
             <div class="upload-summary" id="upload-summary" hidden></div>
             <div class="file-list" id="file-list"></div>
@@ -161,6 +171,13 @@ export async function renderNewTask() {
               ${models.map((m) => `<option value="${esc(m.id)}" ${String(restored?.model_override || '') === String(m.id) ? 'selected' : ''}>${esc(m.name)} · ${esc(m.model)}（${esc(m.provider)}）</option>`).join('')}
             </select>
           </div>` : `<div class="alert info" style="margin-bottom:16px">${icon('info')}<div>还没有配置模型。平台会用确定性路径完成诊断；到「模型接入」添加 OpenAI 兼容或 Anthropic 服务后可启用 AI 研判。</div></div>`}
+          <div class="form-row">
+            <label class="label" for="f-skills">指定技能 <span class="hint">可选；选中后只执行这些技能，不自动追加其他技能</span></label>
+            <select class="select" id="f-skills" name="skill_names" multiple size="${Math.min(5, Math.max(2, skills.length))}" ${skills.length ? '' : 'disabled'}>
+              ${skills.map((s) => `<option value="${esc(s.name)}" ${preselected === s.name ? 'selected' : ''}>${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
+            </select>
+            <div class="help">${skills.length ? '按住 Ctrl / Command 可多选；不选则由 AI 规划自动扩选。' : '当前没有 ready / degraded 状态的技能。'}</div>
+          </div>
           ${isAdmin ? `<label class="check"><input type="checkbox" name="include_canary" value="1" ${restored?.include_canary ? 'checked' : ''}> 包含灰度技能（只在对照验证时勾选，普通任务默认只用稳定版）</label>` : ''}
           <div class="between" style="margin-top:18px">
             <span class="small muted" id="submit-hint">提交后自动进入队列，可在任务详情实时查看进度</span>
@@ -370,7 +387,7 @@ export async function renderNewTask() {
     const max = (state.publicConfig.max_upload_mb || 512) * 1024 * 1024;
     for (const f of list) {
       if (files.length >= 20) { toast('单个草稿最多 20 个日志包', 'warn'); break; }
-      if (!/\.(zip|tar\.gz|tgz)$/i.test(f.name)) { toast(`${f.name} 不是支持的压缩格式`, 'warn'); continue; }
+      if (!/\.(zip|tar|tar\.gz|tgz|7z|gz|bz2|xz|zst)$/i.test(f.name)) { toast(`${f.name} 不是支持的压缩格式`, 'warn'); continue; }
       if (f.size > max) { toast(`${f.name} 超过单包上限`, 'warn'); continue; }
       if (!f.size) { toast(`${f.name} 是空文件`, 'warn'); continue; }
       if (files.some((x) => x.name === f.name && x.size === f.size)) continue;
@@ -449,6 +466,8 @@ export async function renderNewTask() {
       fd.append('draft_id', draftId);
       const modelId = form.elements.model_id?.value;
       if (modelId) fd.append('model_id', modelId);
+      const selectedSkills = [...(form.elements.skill_names?.selectedOptions || [])].map((o) => o.value);
+      if (selectedSkills.length) fd.append('skill_names', selectedSkills.join(','));
       if (form.elements.include_canary?.checked) fd.append('include_canary', '1');
       const data = await api('/api/tasks', { method: 'POST', body: fd });
       dirty = false;

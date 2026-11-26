@@ -226,7 +226,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=$PY_BIN $PREFIX/run.py --host $HOST --port $PORT
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=true
+# 不启用 NoNewPrivileges：网页升级需要受限 sudo 启动 root helper
 PrivateTmp=true
 TimeoutStopSec=30
 

@@ -163,7 +163,7 @@ class ToolRegistry:
             if source == "mcp":
                 if spec.mcp == "never":
                     continue
-                if spec.risk != "read" and token_mode != "admin":
+                if spec.risk != "read" and token_mode not in ("admin", "write"):
                     continue
             items.append(spec)
         return sorted(items, key=lambda s: (s.scope != "admin", s.risk != "read", s.name))
@@ -210,7 +210,7 @@ class ToolRegistry:
             if spec.mcp == "never":
                 raise ToolError("该工具不允许通过 MCP 调用", 403)
             if spec.risk != "read":
-                if ctx.token_mode != "admin":
+                if ctx.token_mode not in ("admin", "write"):
                     raise ToolError("当前 MCP Token 为只读模式，不能执行写操作", 403)
                 if mcp_confirm is not True:
                     raise ToolError("MCP 写操作需要在参数中传 confirm=true")

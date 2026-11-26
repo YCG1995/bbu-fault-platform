@@ -3,4 +3,22 @@
 set -euo pipefail
 JOB="${1:-}"
 [[ "$JOB" =~ ^U[A-Za-z0-9_-]{6,40}$ ]] || { echo "任务 ID 非法" >&2; exit 2; }
-exec /usr/bin/systemctl start "bbu-upgrade-helper@${JOB}.service"
+
+# 不同发行版的 systemctl 可能在 /usr/bin 或 /bin；不能写死路径。
+SYSTEMCTL="$(command -v systemctl 2>/dev/null || true)"
+if [[ -z "$SYSTEMCTL" ]]; then
+  for candidate in /usr/bin/systemctl /bin/systemctl /usr/sbin/systemctl /sbin/systemctl; do
+    if [[ -x "$candidate" ]]; then
+      SYSTEMCTL="$candidate"
+      break
+    fi
+  done
+fi
+[[ -n "$SYSTEMCTL" && -x "$SYSTEMCTL" ]] || {
+  echo "找不到 systemctl，无法启动升级助手" >&2
+  exit 1
+}
+
+# 不能阻塞等待 oneshot：助手会停止/重启当前 Web 服务，同步 start 会把
+# 正在处理 apply 请求的 Web 进程一起卡死，页面就会显示连接中断/未知错误。
+exec "$SYSTEMCTL" --no-block start "bbu-upgrade-helper@${JOB}.service"

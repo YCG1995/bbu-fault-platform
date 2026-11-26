@@ -16,10 +16,32 @@
 - **历史经验与自动沉淀**：每次终态任务把计划、证据缺口、技能表现和最终结论写入经验库，相似任务可被 planner 检索参考；成功任务在后台生成「自学习」工坊草稿，必须由管理员在工坊确认后发布，不会自动上线。随包 `knowledge/reasoning_playbooks.json` 还提供三份专家排查剧本作为种子经验，明确标记为合成数据。
 - **动态 DAG + 并行扇出**：`受理 → 盘点 → AI 规划 → 按计划执行（波次内并行）→ 可选一次补规划 → 仲裁 → 报告`；计划是线性波次，不设计循环。默认 4 个子 Skill 同时执行，任务级队列默认 4 并发。
 - **有界 AI，拒绝无限循环**：LLM 只用于规划 1 次、补规划最多 1 次、冲突仲裁最多 1 次、报告研判 1 次；任务级 Budget 强制限制调用次数、Token 与墙钟，任一超限立即回退确定性结果。计划里的重复技能、目录外技能、超并行上限都会被确定性裁剪。
-- **本地账号与 RBAC**：SQLite 元数据、scrypt 口令、HttpOnly/SameSite=Strict Cookie、CSRF 校验、强制首改密、IP+账号双维度登录限流、改密/重置/停用即撤销会话、admin/engineer 两级权限、全量审计日志。
-- **平台助手与 MCP Server**：所有登录用户可使用右下角悬浮助手查平台文档、自己的通知/任务事件/外部 IM；管理员额外拥有系统状态、备份/空间、升级/回滚、用户/模型/通知配置等受控运维能力。同一工具层通过 `POST /mcp` 暴露为 MCP Server，使用本机 HTTP + Bearer Token，默认只接受 loopback。
+- **本地账号与 RBAC**：SQLite 元数据、scrypt 口令、HttpOnly/SameSite=Strict Cookie、CSRF 校验、首次登录直接进入工作台、IP+账号双维度登录限流、改密/重置/停用即撤销会话、admin/reviewer/engineer 三级权限、全量审计日志。
+- **平台助手与 MCP Server**：所有登录用户可使用右下角悬浮助手查平台文档、自己的通知/任务事件/外部 IM；管理员额外拥有系统状态、备份/空间、升级/回滚、用户/模型/通知配置等受控运维能力。同一工具层通过 `POST /mcp` 暴露为 MCP Server，每个账号使用独立 Bearer Token，默认只接受 loopback。
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
+
+## 1.21.0 管理与诊断体验 / 工坊重构 / 证据增强
+
+本版本按四阶段计划完成管理与诊断体验、工坊重构与证据增强；数据库 schema 从 17 升到 18，新增按用户隔离的 `mcp_tokens` 表。
+
+- **M1 阻断修复**：enum 运行参数保存、弹窗拖选误关闭、规则确认状态、错误定位、步骤/门禁一致性、AI 建议去重。
+- **M2 管理与诊断**：系统概览与个人 MCP Token 对全员开放；专家拥有完整诊断/技能库/工坊入口，复核仅限被分配任务；首次登录直接进入工作台；新建诊断可指定技能且只执行所选技能；证据链长路径折叠；技能库可直接发起诊断。
+- **M3 工坊重构**：步骤更名与状态统一、移除领域配方入口、规则标签与原始表达式、多文件/文件夹案例、后台任务详情、案例术语统一。
+- **M4 证据增强**：恢复验证真实文件上传并记录 SHA256；工坊规则可用现有日志试跑；归档新增 xz / zst / 7z。
+- **知识库**：沿用 1.20.3 的 BM25F、意图路由与多轮改写，不引入向量方案；评测入口 `python3 tools/eval_kb_retrieval.py`。
+- 详见 `docs/版本说明-1.21.0.md`。
+
+## 1.20.2 升级助手 NoNewPrivileges 修复
+
+本补丁修复 systemd 部署下网页离线升级必然失败的问题；1.20.1 的助手/MCP 接口和 schema 不变。
+
+- **根因**：主服务单元原先生成 `NoNewPrivileges=true`，内核会忽略 `sudo` 的 setuid 位，`bbu` 用户无法通过受限 sudo 启动 root 升级助手，页面报 `sudo: 有效用户 ID 不是 0`。
+- **修复**：新安装单元不再写 NNP；已有安装升级时自动备份旧单元并移除该行；`deploy/fix_upgrade_helper.sh --fix-nnp` 可用于不换包的现场修复。
+- **systemctl 路径**：升级助手触发器不再写死 `/usr/bin/systemctl`，兼容 `/bin/systemctl`；升级脚本会同步刷新触发器。
+- **异步启动**：触发器使用 `systemctl --no-block start`，升级助手停服时不会再切断网页的 apply 请求；页面改为轮询任务状态。
+- **边界**：sudoers 仍只允许固定触发器，服务仍启用 `ProtectSystem=strict`；若 sudo 所在挂载确实 `nosuid` 或容器禁止 setuid，则只能改挂载或手工升级。
+- 详见 `docs/版本说明-1.20.2.md`。
 
 ## 1.20.1 真实模型助手评测修复
 
@@ -206,13 +228,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.20.1-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.21.0-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.20.1-offline.tar.gz
+tar -xzf bbu-fault-platform-1.21.0-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

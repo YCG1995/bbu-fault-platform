@@ -19,12 +19,12 @@ const NAV = [
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
+  { href: '#/system', label: '系统信息', icon: 'info' },
 ];
 const ADMIN_NAV = [
   { href: '#/models', label: '模型接入', icon: 'cpu' },
   { href: '#/users', label: '用户管理', icon: 'users' },
   { href: '#/audit', label: '审计日志', icon: 'shield' },
-  { href: '#/system', label: '系统信息', icon: 'info' },
 ];
 
 let loginRoot = null;
@@ -123,13 +123,9 @@ function renderShell() {
   if (loginRoot) { loginRoot.remove(); loginRoot = null; }
   const admin = state.user?.role === 'admin';
   const reviewer = state.user?.role === 'reviewer';
-  const baseNav = reviewer
-    ? [{ href: '#/dashboard', label: '工作台', icon: 'dashboard' },
-       { href: '#/tasks', label: '复核任务', icon: 'shield' },
-       { href: '#/cases', label: '真实案例', icon: 'inbox' }]
-    : NAV;
+  const baseNav = NAV;
   const nav = document.getElementById('nav');
-  nav.innerHTML = `<div class="nav-section">${reviewer ? '专家复核' : '诊断'}</div>
+  nav.innerHTML = `<div class="nav-section">${reviewer ? '诊断与复核' : '诊断'}</div>
     ${baseNav.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}
     ${admin ? `<div class="nav-section">管理</div>
     ${ADMIN_NAV.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}` : ''}`;
@@ -458,10 +454,6 @@ function renderLogin(message = '') {
       state.user = data.user;
       state.csrf = data.csrf;
       state.sessionExpires = data.expires_at;
-      if (data.user.must_change) {
-        showPasswordSetup(password);
-        return;
-      }
       scheduleSessionWarning();
       toast(`欢迎回来，${data.user.display_name || data.user.username}`, 'ok');
       renderShell();
@@ -712,10 +704,6 @@ function openReauth(message = '登录已过期，请重新登录') {
       reauthOpen = false;
       m.close();
       rememberUsername(username, true);
-      if (data.user.must_change) {
-        showPasswordSetup(password);
-        return;
-      }
       scheduleSessionWarning();
       renderShell();
       toast('已恢复登录，页面内容保留', 'ok');
@@ -778,20 +766,18 @@ function route() {
   updateNav();
   if (path === '#/dashboard' || path === '#/') return renderDashboard();
   if (path === '#/tasks') return renderTaskList();
-  if (path === '#/tasks/new') return state.user.role === 'reviewer' ? denied() : renderNewTask();
+  if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();
   const caseMatch = path.match(/^#\/cases\/([^/]+)$/);
   if (caseMatch) return renderCaseDetail(decodeURIComponent(caseMatch[1]));
   const taskMatch = path.match(/^#\/tasks\/([^/]+)$/);
   if (taskMatch) return renderTaskDetail(decodeURIComponent(taskMatch[1]));
-  if (state.user.role === 'reviewer' && ['#/skills', '#/workshop', '#/models', '#/users',
-      '#/audit', '#/system'].includes(path)) return denied();
   if (path === '#/skills') return renderSkills();
   if (path === '#/workshop') return renderWorkshop();
   if (path === '#/models') return state.user.role === 'admin' ? renderModels() : denied();
   if (path === '#/users') return state.user.role === 'admin' ? renderUsers() : denied();
   if (path === '#/audit') return state.user.role === 'admin' ? renderAudit() : denied();
-  if (path === '#/system') return state.user.role === 'admin' ? renderSystem() : denied();
+  if (path === '#/system') return renderSystem();
   location.hash = '#/dashboard';
 }
 
@@ -824,11 +810,6 @@ async function boot() {
     state.user = data.user;
     state.csrf = data.csrf;
     state.sessionExpires = data.session_expires;
-    if (data.user.must_change) {
-      // 会话仍在，但必须改密；提示重新登录以完成改密流程
-      renderLogin('请先登录并修改初始密码');
-      return;
-    }
     scheduleSessionWarning();
     renderShell();
     route();

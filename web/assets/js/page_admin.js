@@ -532,12 +532,15 @@ export async function renderSystem() {
   try { info = await api('/api/system/info'); }
   catch (err) { view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
   const config = info.config || {};
+  const isAdmin = state.user?.role === 'admin';
   let updates = null;
-  try { updates = await api('/api/system/updates'); }
-  catch (err) { updates = { error: err.message, items: [] }; }
   let migrations = null;
-  try { migrations = await api('/api/system/migrations'); }
-  catch (err) { migrations = { error: err.message, items: [] }; }
+  if (isAdmin) {
+    try { updates = await api('/api/system/updates'); }
+    catch (err) { updates = { error: err.message, items: [] }; }
+    try { migrations = await api('/api/system/migrations'); }
+    catch (err) { migrations = { error: err.message, items: [] }; }
+  }
   let mcp = null;
   try { mcp = await api('/api/mcp/info'); }
   catch (err) { mcp = { error: err.message }; }
@@ -1153,7 +1156,10 @@ async function renderRuntimeConfigPanel(panel) {
       values[input.dataset.runtimeKey] = input.dataset.runtimeType === 'bool'
         ? Boolean(input.checked)
         : input.dataset.runtimeType === 'float'
-          ? Number(input.value) : Number.parseInt(input.value, 10);
+          ? Number(input.value)
+          : input.dataset.runtimeType === 'int'
+            ? Number.parseInt(input.value, 10)
+            : input.value;
     });
     return values;
   };
@@ -1454,9 +1460,9 @@ async function openMCPTokenModal(panel, current) {
     <div class="field"><label>访问模式</label>
       <select id="mcp-token-mode">
         <option value="read" ${mode === 'read' ? 'selected' : ''}>read · 只读（推荐）</option>
-        <option value="admin" ${mode === 'admin' ? 'selected' : ''}>admin · 允许执行白名单写工具</option>
+        <option value="write" ${mode === 'write' ? 'selected' : ''}>write · 允许执行当前账号可用的白名单写工具</option>
       </select>
-      <div class="hint">read 仅暴露查询类工具；admin 还允许删除备份、释放任务空间、修改通知偏好等低风险写操作，升级/回滚、用户和模型变更永不通过 MCP 执行。</div>
+      <div class="hint">read 仅暴露当前账号可用的查询类工具；write 还允许当前账号权限内的删除备份、释放任务空间、修改通知偏好等低风险写操作。升级/回滚、用户和模型变更永不通过 MCP 执行。</div>
     </div>
     <div class="field"><label>客户端连接地址</label>
       <input readonly value="${esc(mcpEndpoint())}"></div>`,
@@ -1543,7 +1549,7 @@ function renderMCPPanel(panel, payload) {
     </div>
     <div class="card" style="margin-bottom:14px"><div class="card-head"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div>
       <div class="card-body">
-        <div class="alert info">${icon('info')}<div>推荐使用 <strong>read</strong> 模式。将以下配置加入支持 HTTP MCP 的客户端；Token 需先在上方生成。</div></div>
+        <div class="alert info">${icon('info')}<div>推荐使用 <strong>read</strong> 模式；Token 绑定当前账号，只能看到当前账号权限内的工具与数据。将以下配置加入支持 HTTP MCP 的客户端。</div></div>
         <textarea readonly rows="10" class="mono" id="mcp-config-example">{
   "mcpServers": {
     "bbu-faultscope": {
@@ -1574,7 +1580,10 @@ function renderMCPPanel(panel, payload) {
 }
 
 function renderSystemView(view, info, config, updates, migrations, mcp) {
-  const tabs = [['overview', '概览'], ['runtime', '运行参数'], ['storage', '任务空间'], ['backups', '备份'], ['migration', '迁移'], ['update', '升级'], ['mcp', 'MCP / 助手']];
+  const isAdmin = state.user?.role === 'admin';
+  const tabs = isAdmin
+    ? [['overview', '概览'], ['runtime', '运行参数'], ['storage', '任务空间'], ['backups', '备份'], ['migration', '迁移'], ['update', '升级'], ['mcp', 'MCP / 助手']]
+    : [['overview', '概览'], ['mcp', 'MCP / 助手']];
   view.innerHTML = `
     <div class="system-tabs-bar"><div class="tabs system-tabs" role="tablist">
       ${tabs.map(([key, label], index) => `<button class="${index === 0 ? 'active' : ''}" role="tab"

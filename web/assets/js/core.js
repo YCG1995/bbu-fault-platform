@@ -304,8 +304,19 @@ export function modal({ title, body = '', footer = '', wide = false, onClose = n
     const preferred = mask.querySelector('[autofocus]') || focusables()[0];
     if (preferred) { try { preferred.focus(); } catch { /* ignore */ } }
   });
+  // 只把“按下和抬起都在遮罩本身”视为关闭。输入框内拖选文字后在窗口外
+  // 释放鼠标时，click 目标可能变成遮罩，不能因此销毁正在填写的表单。
+  let backdropPressed = false;
+  mask.addEventListener('pointerdown', (e) => {
+    backdropPressed = e.target === mask;
+  });
+  mask.addEventListener('pointerup', (e) => {
+    const shouldClose = backdropPressed && e.target === mask;
+    backdropPressed = false;
+    if (shouldClose) close();
+  });
   mask.addEventListener('click', (e) => {
-    if (e.target === mask || e.target.closest('[data-act="close-modal"]')) close();
+    if (e.target.closest('[data-act="close-modal"]')) close();
   });
   return { mask, body: bodyEl, foot: footEl, close };
 }

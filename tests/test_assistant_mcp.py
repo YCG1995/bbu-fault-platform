@@ -84,7 +84,7 @@ class AssistantMCPTests(unittest.TestCase):
         admin_status = self.app.assistant.status(self.admin)
         eng_status = self.app.assistant.status(self.engineer)
         self.assertTrue(admin_status["enabled"])
-        self.assertEqual(admin_status["docs"], 11)
+        self.assertEqual(admin_status["docs"], 12)
         self.assertGreaterEqual(admin_status["tools"], 18)
         self.assertLess(eng_status["tools"], admin_status["tools"])
         self.assertIn("search_docs", eng_status["tool_names"])
@@ -184,9 +184,9 @@ class AssistantMCPTests(unittest.TestCase):
         info = self.app.mcp.rotate_token(self.admin, "read")
         token = info["token"]
         self.assertTrue(token.startswith("bbu_mcp_"))
-        raw = self.app.db.setting("mcp_token_v1")
-        self.assertNotIn(token, raw)
-        self.assertIn(hashlib.sha256(token.encode()).hexdigest(), raw)
+        record = self.app.db.one("SELECT * FROM mcp_tokens WHERE user_id=?", (self.admin["id"],))
+        self.assertNotIn(token, record["token_hash"])
+        self.assertEqual(record["token_hash"], hashlib.sha256(token.encode()).hexdigest())
         self.assertEqual(self.app.mcp.token_info(self.admin)["mode"], "read")
 
         with self.assertRaises(HTTPError) as caught:
@@ -243,19 +243,25 @@ class AssistantMCPTests(unittest.TestCase):
         self.assertFalse(payload["result"].get("isError"))
         self.assertTrue(payload["result"]["content"])
 
-        # 非管理员即使生成 admin Token，也会在鉴权时降级为 read。
-        eng_token = self.app.mcp.rotate_token(self.engineer, "admin")["token"]
+        # 非管理员不能获得 admin 专属工具；write 只开放其角色可用的写工具。
+        eng_token = self.app.mcp.rotate_token(self.engineer, "write")["token"]
         ctx = self.app.mcp.authenticate(_Req("POST", token=eng_token))
-        self.assertEqual(ctx.token_mode, "read")
+        self.assertEqual(ctx.user["id"], self.engineer["id"])
+        self.assertEqual(ctx.user["username"], self.engineer["username"])
+        self.assertEqual(ctx.token_mode, "write")
+        used = self.app.db.one("SELECT last_used_at FROM mcp_tokens WHERE user_id=?",
+                               (self.engineer["id"],))
+        self.assertTrue(used["last_used_at"])
         result = self.app.mcp.handle_http(_Req("POST", _rpc("tools/list"), token=eng_token))
         names = [tool["name"] for tool in json.loads(result[2])["result"]["tools"]]
         self.assertNotIn("delete_backup", names)
         self.assertNotIn("list_users", names)
+        self.assertIn("release_task_storage", names)
 
     def test_mcp_resources_and_docs_tools(self) -> None:
         token = self.app.mcp.rotate_token(self.admin, "read")["token"]
         docs = self.app.assistant.kb.list_docs()
-        self.assertEqual(len(docs), 11)
+        self.assertEqual(len(docs), 12)
         result = self.app.mcp.handle_http(_Req("POST", _rpc("resources/list"), token=token))
         resources = json.loads(result[2])["result"]["resources"]
         self.assertGreaterEqual(len(resources), 11)

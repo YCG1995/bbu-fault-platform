@@ -40,10 +40,10 @@ function checklistCard(stats) {
     items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
       text: '上传日志包，验证上传、规划和报告闭环。', link: '#/tasks/new', action: '新建诊断' });
   } else if (role === 'reviewer') {
-    items.push({ done: (stats.tasks_total || 0) > 0, label: '接收复核任务',
-      text: '管理员在任务详情分配专家后，这里会出现待办。', link: '#/tasks', action: '查看任务' });
+    items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
+      text: '专家也可以上传日志诊断；被管理员分配的任务另外出现在待复核。', link: '#/tasks/new', action: '新建诊断' });
     items.push({ done: (stats.pending_reviews || 0) === 0, label: '处理待复核',
-      text: '确认、改判或驳回；提交后会写入审计。', link: '#/tasks', action: '去复核' });
+      text: '确认、改判或驳回；不能复核自己创建的任务。', link: '#/tasks', action: '去复核' });
   } else {
     items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
       text: '上传现场日志包，平台会自动盘点并调度技能。', link: '#/tasks/new', action: '新建诊断' });
@@ -62,9 +62,8 @@ function checklistCard(stats) {
 }
 
 export async function renderDashboard() {
-  const canCreate = state.user?.role !== 'reviewer';
-  const view = mount('总览', canCreate ? '平台运行状态与最近的诊断任务' : '被分配任务与复核进度',
-    canCreate ? `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>` : '');
+  const view = mount('总览', '平台运行状态、最近的诊断任务与复核进度',
+    `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>`);
   view.innerHTML = `<div class="skeleton" style="height:120px;margin-bottom:16px"></div>`;
   let stats;
   try {

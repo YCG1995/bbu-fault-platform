@@ -287,6 +287,7 @@ class TaskPipeline:
                     entry["rule_score"] = round(scores.get(s.name, 0), 1)
                     catalog.append(entry)
                 options = _json_load(task.get("options_json"), {})
+                selected = [str(x) for x in (options.get("skill_names") or [])]
                 experiences = self.experiences.search(
                     task["description"] or match_text, inventory.get("detected_hints") or [],
                     all_skills[0].name if all_skills else "", limit=3,
@@ -294,8 +295,33 @@ class TaskPipeline:
                     device_type=str(options.get("device_type") or ""),
                     software_version=str(options.get("software_version") or ""),
                     exclude_task=str(task.get("id") or ""), with_counterexamples=True)
-                plan, plan_meta = self._plan(task, inventory, catalog, experiences, scores,
-                                             budget, models_used)
+                if selected:
+                    scores = {name: max(float(scores.get(name, 0)), 60.0) for name in selected}
+                    selected_set = set(selected)
+                    ordered = [s for s in all_skills if s.name in selected_set]
+                    missing = [name for name in selected if name not in {s.name for s in ordered}]
+                    if missing:
+                        fallback = deterministic_plan([{"skill": n, "score": 60.0}
+                                                       for n in selected if n not in missing],
+                                                      self.config, task.get("mode") or "fast")
+                        fallback["summary"] = "用户指定技能不可用：" + "、".join(missing)
+                        fallback["in_scope"] = False
+                        plan = fallback
+                        plan_meta = {"llm_used": False, "notes": fallback["summary"], "model": ""}
+                    else:
+                        det_selected = [{"skill": s.name, "score": scores[s.name]}
+                                        for s in ordered]
+                        plan = deterministic_plan(det_selected, self.config,
+                                                  task.get("mode") or "fast")
+                        plan["source"] = "user_selected"
+                        plan["summary"] = f"按指定技能执行：{'、'.join(selected)}"
+                        plan["selected_skills"] = selected
+                        plan_meta = {"llm_used": False,
+                                     "notes": ["用户指定技能，跳过 AI 扩选与补规划"],
+                                     "model": ""}
+                else:
+                    plan, plan_meta = self._plan(task, inventory, catalog, experiences, scores,
+                                                 budget, models_used)
                 plan["experience_refs"] = [
                     {"task_id": e.get("task_id"), "root_cause": e.get("root_cause"),
                      "skill": e.get("skill"), "match_score": e.get("match_score")}

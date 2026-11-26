@@ -242,6 +242,7 @@ async function openSkillDrawer(name, onChanged) {
       </div>
     </div>
     <div class="drawer-foot">
+      <button class="btn btn-primary" data-act="diagnose-skill">${icon('play')}用此技能诊断</button>
       <a class="btn" href="/api/skills/${encodeURIComponent(data.name)}/export">${icon('download')}导出 zip</a>
       ${isAdmin ? `<button class="btn ${data.status === 'disabled' ? 'btn-primary' : 'btn-danger'}" data-act="toggle">
         ${data.status === 'disabled' ? '启用' : '停用'}</button>` : ''}
@@ -252,6 +253,12 @@ async function openSkillDrawer(name, onChanged) {
   const close = () => drawer.remove();
   drawer.addEventListener('click', async (e) => {
     if (e.target === drawer || e.target.closest('[data-act="close"]')) close();
+    if (e.target.closest('[data-act="diagnose-skill"]')) {
+      try { sessionStorage.setItem('bbu.diagnose_skill', data.name); } catch { /* ignore */ }
+      close();
+      location.hash = '#/tasks/new';
+      return;
+    }
     const toggle = e.target.closest('[data-act="toggle"]');
     if (toggle) {
       const disabled = data.status === 'disabled';

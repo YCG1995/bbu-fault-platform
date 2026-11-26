@@ -151,6 +151,7 @@ class WorkshopDraftAdminTests(unittest.TestCase):
             "data_dir": str(self.tmp / "data"),
             "skills_dir": str(self.tmp / "skills"),
             "cases_dir": str(self.tmp / "cases"),
+            "meta_skill_dir": str(Path(__file__).resolve().parents[1] / "meta" / "bbu-fault-skill-builder"),
         })
         self.cfg.ensure_dirs()
         self.db = Database(self.cfg.db_path)
@@ -172,6 +173,23 @@ class WorkshopDraftAdminTests(unittest.TestCase):
         draft_dir = self.cfg.data_dir / "workshop" / "W1" / "extracted"
         draft_dir.mkdir(parents=True)
         (draft_dir / "a.log").write_text("x", encoding="utf-8")
+
+    def test_rule_trial_run_uses_extracted_logs(self):
+        self._draft()
+        profile = (
+            "skill:\n  name: bbu-fault-test\n  title: 测试\n"
+            "analysis:\n  steps:\n    - id: S1\n      rules:\n"
+            "        - id: E1\n          description: PLL 失锁\n          type: text\n"
+            "          globs: ['**/*.log']\n          any_of: ['CLK032 PLL unlocked']\n"
+            "          min_matches: 1\n"
+        )
+        self.db.execute("UPDATE workshop_drafts SET profile_yaml=? WHERE id='W1'", (profile,))
+        (self.cfg.data_dir / "workshop" / "W1" / "extracted" / "a.log").write_text(
+            "2026-01-01 CLK032 PLL unlocked\n", encoding="utf-8")
+        result = self.service.try_rules("W1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["rules"], 1)
+        self.assertEqual(result["hits"][0]["id"], "E1")
 
     def test_source_change_resets_downstream_results(self):
         self._draft()

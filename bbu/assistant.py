@@ -32,6 +32,27 @@ def _clip(text: Any, limit: int = DOC_EXCERPT_CHARS) -> str:
     return value if len(value) <= limit else value[:limit].rstrip() + '…'
 
 
+_FOLLOWUP_MARKERS = ("它", "这个", "那个", "上述", "前面", "刚才", "那", "呢", "还")
+
+
+def _retrieval_query(history: list[dict[str, str]], question: str) -> str:
+    """把“那回滚呢”这类追问补成独立检索问题；无历史时保持原问题。"""
+    q = str(question or "").strip()
+    if not q:
+        return q
+    if len(q) > 28 and not any(marker in q for marker in _FOLLOWUP_MARKERS):
+        return q
+    previous = ""
+    for item in reversed(history[:-1]):
+        if item.get("role") == "user":
+            previous = str(item.get("content") or "").strip()
+            if previous:
+                break
+    if not previous or previous == q:
+        return q
+    return f"{previous} {q}"[:240]
+
+
 class AssistantError(Exception):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -95,7 +116,7 @@ class AssistantService:
             else:
                 raise NoModelError("没有可用模型")
         except (NoModelError, AIError, BudgetExceeded) as exc:
-            response = self._fallback(user, ctx, question, str(exc))
+            response = self._fallback(user, ctx, history, question, str(exc))
         except Exception as exc:  # noqa: BLE001 - 助手不能把堆栈暴露给用户
             self.app.db.audit(user["id"], user["username"], "assistant.chat", "assistant",
                               {"query": question[:200], "error": str(exc)[:300]}, ip)
@@ -273,6 +294,8 @@ class AssistantService:
                       "\"arguments\":{...}}],\"clarification\":\"需要追问时写\"}。",
                       "如果问题需要查平台数据，优先调用工具；如果只是概念解释，可直接回答。"
                       "如果用户要求执行写操作，调用对应工具即可，系统会转成确认卡片。",
+                      "检索文档时，若当前问题是追问（如“那回滚呢”），先结合对话历史把它改写成"
+                      "独立问题，再调用 search_docs；不要把代词原样当作 query。",
                       "不要调用未列出的工具；arguments 必须严格符合工具参数 Schema。"
                       "枚举字段只能使用 enum 列出的值；整数必须在 minimum/maximum 范围内；"
                       "required 字段必须提供。没有把握时宁可少传可选参数，不要猜枚举。"])
@@ -313,9 +336,10 @@ class AssistantService:
         return self._format_results(results)
 
     # ---------------------------------------------------------------- 降级
-    def _fallback(self, user: dict[str, Any], ctx: ToolContext, question: str,
+    def _fallback(self, user: dict[str, Any], ctx: ToolContext,
+                  history: list[dict[str, str]], question: str,
                   reason: str = "") -> dict[str, Any]:
-        docs = self.kb.search(question, 5)
+        docs = self.kb.search(_retrieval_query(history, question), 5)
         tool_results: list[dict[str, Any]] = []
         q_lower = question.lower()
         scopes: list[str] = []

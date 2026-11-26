@@ -275,7 +275,8 @@ async function openAssignReviewer(task, onDone) {
 function recoveryPanel(task) {
   if (task.status !== 'done') return '';
   const runs = task.recovery_runs || [];
-  const canReview = ['admin', 'reviewer'].includes(state.user?.role);
+  const canReview = state.user?.role === 'admin'
+    || (state.user?.role === 'reviewer' && task.reviewer_id === state.user?.id);
   const statusLabel = { pending: '待回传', observed: '已回传', reviewed: '已复核', rejected: '已驳回' };
   return `<div class="card" style="margin-top:16px">
     <div class="card-head"><h2>恢复验证</h2><span class="sub">只读回传，不在设备上执行命令</span></div>
@@ -456,6 +457,11 @@ function skillCards(task) {
   }).join('')}</div>`;
 }
 
+function pathBasename(value) {
+  const text = String(value || '').replace(/\\/g, '/');
+  return text.split('/').filter(Boolean).pop() || text;
+}
+
 function evidenceTable(task) {
   const candidates = task.result?.arbitration?.candidates || [];
   const rows = [];
@@ -474,8 +480,9 @@ function evidenceTable(task) {
     ${rows.slice(0, 30).map((r) => `<tr>
       <td><span class="cite">E${r.n}</span></td>
       <td><span class="mono">${esc(r.rule_id || '—')}</span><div class="tiny muted">${esc(r.skill)}</div></td>
-      <td class="mono tiny">${esc(r.file || '—')}${r.line_no ? `:${r.line_no}` : ''}</td>
-      <td class="small">${esc((r.text || '').slice(0, 180))}${(r.text || '').length > 180 ? '…' : ''}</td>
+      <td class="mono tiny evidence-path"><details><summary>${esc(pathBasename(r.file) || '—')}${r.line_no ? `:${r.line_no}` : ''}</summary>
+        <div class="evidence-full-path">${esc(r.file || '—')}</div></details></td>
+      <td class="small evidence-text">${esc((r.text || '').slice(0, 120))}${(r.text || '').length > 120 ? '…' : ''}</td>
     </tr>`).join('')}</tbody></table></div>`;
 }
 
@@ -562,7 +569,8 @@ function renderBody(task, activeTab = 'overview') {
     ${supplementPanel(task)}
     ${planPanel(task)}
     ${recoveryPanel(task)}
-    ${reviewPanel(task)}
+    ${['admin', 'reviewer'].includes(state.user?.role)
+      && (state.user?.role === 'admin' || task.reviewer_id === state.user?.id) ? reviewPanel(task) : ''}
   </section>
 
   <section class="detail-panel ${activeTab === 'evidence' ? '' : 'hide'}" data-detail-panel="evidence">
@@ -706,7 +714,8 @@ export async function renderTaskDetail(taskId) {
             <div class="form-row"><label class="label">恢复后根因（留空=已恢复）</label>
               <input class="input" name="root_cause_name" placeholder="例如：SSD寿命耗尽"></div>
             <div class="form-row"><label class="label">独立证据文件</label>
-              <input class="input" name="file" placeholder="例如：after-smart.log" required></div>
+              <input type="file" name="file" required>
+              <div class="help">上传恢复后实际采集的日志/文本文件；平台会记录文件名、大小与 SHA256，并抽取前 60 行作为证据摘要。</div></div>
             <div class="form-row"><label class="label">证据规则 ID</label>
               <input class="input" name="rule_id" placeholder="例如：E1"></div>
             <div class="form-row"><label class="label">证据摘要</label>
@@ -716,17 +725,22 @@ export async function renderTaskDetail(taskId) {
             <button class="btn btn-primary" id="recovery-submit">提交回传</button>`,
         });
         form.foot.querySelector('#recovery-submit').addEventListener('click', async () => {
-          const f = new FormData(form.body.querySelector('#recovery-form'));
-          const file = String(f.get('file') || '').trim();
-          if (!file) { toast('请填写独立证据文件', 'warn'); return; }
+          const formEl = form.body.querySelector('#recovery-form');
+          const f = new FormData(formEl);
+          const file = f.get('file');
+          if (!file || !file.name) { toast('请选择独立证据文件', 'warn'); return; }
+          f.delete('file');
+          const rootCause = String(f.get('root_cause_name') || '').trim();
+          f.set('after', JSON.stringify({
+            verdict: { status: rootCause ? 'matched' : 'recovered', root_cause_name: rootCause },
+            evidence: [{ rule_id: String(f.get('rule_id') || '').trim(), file: file.name,
+              text: String(f.get('text') || '').trim(), hit: true }],
+          }));
+          f.append('file', file, file.name);
           setBusy(btn, true, '回传中…');
           try {
             await api(`/api/recovery-runs/${encodeURIComponent(runId)}/observe`, {
-              method: 'POST', body: { after: {
-                verdict: { status: 'matched', root_cause_name: String(f.get('root_cause_name') || '').trim() },
-                evidence: [{ rule_id: String(f.get('rule_id') || '').trim(), file,
-                  text: String(f.get('text') || '').trim(), hit: true }],
-              } },
+              method: 'POST', body: f,
             });
             form.close(); toast('已回传，系统完成前后对照', 'ok');
             task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(task.id)}/recovery-runs`)).runs;

@@ -1,7 +1,7 @@
 """MCP Server：本机 HTTP + Bearer Token，标准 JSON-RPC 2.0。
 
-默认只监听本机请求（除非 config.mcp_allow_remote=true）；Token 绑定创建它的
-管理员账号，分为 read（只读）与 admin（可执行允许的写工具）两种模式。
+默认只监听本机请求（除非 config.mcp_allow_remote=true）；每个账号拥有独立
+Token，分为 read（只读）与 write（可执行该账号获准的写工具）两种模式。
 """
 from __future__ import annotations
 
@@ -40,36 +40,27 @@ class MCPService:
         self.registry = assistant.registry
 
     # ---------------------------------------------------------------- Token
-    def _record(self) -> dict[str, Any] | None:
-        raw = self.app.db.setting(TOKEN_KEY)
-        if not raw:
+    def _record(self, user_id: int | None = None) -> dict[str, Any] | None:
+        if user_id is None:
             return None
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        return data if isinstance(data, dict) and data.get("hash") else None
+        row = self.app.db.one("SELECT * FROM mcp_tokens WHERE user_id=?", (int(user_id),))
+        return dict(row) if row else None
 
     @staticmethod
     def _hash(token: str) -> str:
         return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
-    def token_info(self, user: dict[str, Any] | None = None) -> dict[str, Any]:
-        record = self._record()
+    def token_info(self, user: dict[str, Any]) -> dict[str, Any]:
+        record = self._record(user.get("id"))
         mode = (record or {}).get("mode") or ""
-        user_row = None
-        if record:
-            user_row = self.app.db.one("SELECT * FROM users WHERE id=?",
-                                       (int(record.get("user_id") or 0),))
         tools = self.registry.public_tools(
-            user or {"id": 0, "role": "admin"}, source="mcp",
-            token_mode=mode or "read") if (user or {}).get("role") == "admin" else []
+            user, source="mcp", token_mode=mode or "read") if record else []
         return {
             "configured": bool(record),
             "mode": mode,
             "created_at": (record or {}).get("created_at"),
-            "last_used_at": self.app.db.setting(TOKEN_LAST_USED_KEY) if record else None,
-            "username": (user_row or {}).get("username") or (record or {}).get("username") or "",
+            "last_used_at": (record or {}).get("last_used_at"),
+            "username": user.get("username") or "",
             "endpoint": "/mcp",
             "local_only": not bool(self.app.config.get("mcp_allow_remote", False)),
             "transport": "HTTP JSON-RPC（POST /mcp）",
@@ -82,24 +73,32 @@ class MCPService:
 
     def rotate_token(self, actor: dict[str, Any], mode: str = "read") -> dict[str, Any]:
         mode = str(mode or "read").strip()
-        if mode not in ("read", "admin"):
-            raise HTTPError(400, "Token 模式只能是 read 或 admin")
+        if mode == "admin":
+            mode = "write"
+        if mode not in ("read", "write"):
+            raise HTTPError(400, "Token 模式只能是 read 或 write")
+        if mode == "write" and actor.get("role") not in ("admin", "reviewer", "engineer"):
+            mode = "read"
         token = "bbu_mcp_" + secrets.token_urlsafe(36)
-        record = {"hash": self._hash(token), "mode": mode,
-                  "user_id": actor["id"], "username": actor["username"],
-                  "created_at": iso_now()}
-        self.app.db.set_setting(TOKEN_KEY, json.dumps(record, ensure_ascii=False))
-        self.app.db.execute("DELETE FROM settings WHERE key=?", (TOKEN_LAST_USED_KEY,))
+        now = iso_now()
+        self.app.db.execute(
+            "INSERT INTO mcp_tokens(user_id,token_hash,mode,created_at,last_used_at) "
+            "VALUES(?,?,?,?,NULL) ON CONFLICT(user_id) DO UPDATE SET "
+            "token_hash=excluded.token_hash, mode=excluded.mode, created_at=excluded.created_at, "
+            "last_used_at=NULL",
+            (actor["id"], self._hash(token), mode, now))
+        # 旧全局 Token 不再参与鉴权，创建个人 Token 时清理遗留键。
+        self.app.db.execute("DELETE FROM settings WHERE key IN (?,?)", (TOKEN_KEY, TOKEN_LAST_USED_KEY))
         self.app.db.audit(actor["id"], actor["username"], "mcp.token.create", "mcp",
-                          {"mode": mode}, "")
+                          {"mode": mode, "scope": "user"}, "")
         return {**self.token_info(actor), "token": token}
 
     def revoke_token(self, actor: dict[str, Any]) -> dict[str, Any]:
-        existed = bool(self._record())
+        existed = bool(self._record(actor.get("id")))
         if existed:
-            self.app.db.execute("DELETE FROM settings WHERE key=?", (TOKEN_KEY,))
-            self.app.db.execute("DELETE FROM settings WHERE key=?", (TOKEN_LAST_USED_KEY,))
-            self.app.db.audit(actor["id"], actor["username"], "mcp.token.revoke", "mcp", {})
+            self.app.db.execute("DELETE FROM mcp_tokens WHERE user_id=?", (actor["id"],))
+            self.app.db.audit(actor["id"], actor["username"], "mcp.token.revoke", "mcp",
+                              {"scope": "user"})
         return {**self.token_info(actor), "revoked": existed}
 
     # ---------------------------------------------------------------- 鉴权
@@ -120,26 +119,34 @@ class MCPService:
     def authenticate(self, req: Any) -> ToolContext:
         if not self._local_request(req):
             raise HTTPError(403, "MCP 仅允许本机访问；如确需内网访问请配置 mcp_allow_remote")
-        record = self._record()
-        if not record:
-            raise HTTPError(401, "MCP Token 尚未配置", {"code": "mcp_token_missing"})
         token = self._bearer(req)
-        if not token or not hmac.compare_digest(self._hash(token), str(record["hash"])):
+        if not token:
+            raise HTTPError(401, "MCP Token 尚未配置", {"code": "mcp_token_missing"})
+        digest = self._hash(token)
+        rows = self.app.db.all(
+            "SELECT t.user_id AS token_user_id, t.token_hash, t.mode, t.created_at, "
+            "t.last_used_at, u.id, u.username, u.display_name, u.role, u.active, u.status "
+            "FROM mcp_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=?", (digest,))
+        record = None
+        for item in rows:
+            if hmac.compare_digest(str(item.get("token_hash") or ""), digest):
+                record = dict(item)
+                break
+        if not record:
             raise HTTPError(401, "MCP Token 无效")
-        row = self.app.db.one("SELECT * FROM users WHERE id=?",
-                              (int(record.get("user_id") or 0),))
-        if not row or not row.get("active") or str(row.get("status") or "") not in ("active", ""):
+        row = record
+        if not row.get("active") or str(row.get("status") or "") not in ("active", ""):
             raise HTTPError(401, "MCP Token 绑定的账号已停用")
         user = {"id": row["id"], "username": row["username"],
                 "display_name": row.get("display_name") or row["username"],
                 "role": row["role"]}
         mode = str(record.get("mode") or "read")
-        if mode == "admin" and user["role"] != "admin":
-            mode = "read"
-        # 最近使用时间单独存键，避免为了更新时间而重写 Token 记录，
-        # 防止与轮换并发时把旧 Token 哈希写回来。
+        if mode == "admin":
+            mode = "write" if user["role"] == "admin" else "read"
+        # 每用户单独更新最近使用时间，不在读取时重写 Token 哈希。
         try:
-            self.app.db.set_setting(TOKEN_LAST_USED_KEY, iso_now())
+            self.app.db.execute("UPDATE mcp_tokens SET last_used_at=? WHERE user_id=?",
+                                (iso_now(), user["id"]))
         except Exception:
             pass
         return ToolContext(user=user, ip=str(req.ip or ""), source="mcp", token_mode=mode)

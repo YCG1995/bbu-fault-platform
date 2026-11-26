@@ -340,6 +340,18 @@ def _request_base(app, job_id: str, action: str) -> dict[str, Any]:
     }
 
 
+def _launch_failure_detail(detail: str) -> str:
+    """Attach a NoNewPrivileges hint for both English and Chinese sudo errors."""
+    lowered = detail.lower()
+    compact = "".join(detail.split()).lower()
+    if ("effective uid is not 0" in lowered
+            or "no new privileges" in lowered
+            or "有效用户id不是0" in compact):
+        detail += ("；请检查主服务 systemd 单元 NoNewPrivileges 是否为 true，"
+                   "并在服务器 root 控制台运行 deploy/fix_upgrade_helper.sh --diagnose")
+    return detail
+
+
 def _launch(app, job_id: str, request: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
     _write_json(_job_dir(app, job_id) / "request.json", request)
     status = _phase(status, "queued", "已提交给 root 助手，等待执行", 10, error="")
@@ -347,7 +359,8 @@ def _launch(app, job_id: str, request: dict[str, Any], status: dict[str, Any]) -
     try:
         result = subprocess.run(_helper_command(app, job_id), capture_output=True, text=True, timeout=20)
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "未知错误").strip()[-500:]
+            detail = _launch_failure_detail(
+                (result.stderr or result.stdout or "未知错误").strip()[-500:])
             status = _phase(status, "failed", "无法启动 root 升级助手", 100,
                             error=f"助手启动失败：{detail}")
             _save_status(app, job_id, status)

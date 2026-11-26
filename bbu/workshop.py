@@ -696,6 +696,69 @@ class WorkshopService:
         return data
 
     # ---------- 校验与构建 ----------
+    def try_rules(self, draft_id: str) -> dict[str, Any]:
+        """用当前 profile 的规则对已解压日志做一次只读试跑。"""
+        row = self.get(draft_id)
+        draft_dir = self.config.data_dir / "workshop" / draft_id
+        extracted = draft_dir / "extracted"
+        if not extracted.exists() or not any(extracted.rglob("*")):
+            return {"ok": False, "error": "还没有可试跑的日志，请先在资料输入上传日志包并完成解析"}
+        try:
+            profile = yaml.safe_load(row.get("profile_yaml") or "") or {}
+        except yaml.YAMLError as exc:
+            return {"ok": False, "error": f"profile 不是合法 YAML: {exc}"}
+        rules = []
+        for step in (profile.get("analysis") or {}).get("steps") or []:
+            for rule in (step or {}).get("rules") or []:
+                item = {k: rule.get(k) for k in (
+                    "id", "description", "type", "globs", "all_of", "any_of", "none_of",
+                    "min_matches", "context_lines", "case_sensitive", "value_pattern",
+                    "threshold", "abs_threshold", "sustained_count", "window_minutes",
+                    "trend", "associate_by") if rule.get(k) not in (None, "", [])}
+                item.setdefault("type", "text")
+                item.setdefault("case_sensitive", False)
+                item.setdefault("min_matches", 1)
+                item.setdefault("context_lines", 2)
+                item["step"] = step.get("id")
+                rules.append(item)
+        if not rules:
+            return {"ok": False, "error": "当前 profile 没有可执行规则"}
+        rules_path = draft_dir / "try-rules.yaml"
+        write_text(rules_path, yaml.safe_dump({"rules": rules}, allow_unicode=True, sort_keys=False))
+        out_json = draft_dir / "try-evidence.json"
+        script = self.meta / "scripts" / "search_evidence.py"
+        if not script.exists():
+            return {"ok": False, "error": "元 Skill 缺少 search_evidence.py"}
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script), str(extracted), "--rules", str(rules_path),
+                 "--json", str(out_json)], cwd=str(self.meta), env=env_with_vendor(),
+                capture_output=True, text=True, timeout=180)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if proc.returncode != 0:
+            return {"ok": False, "error": ((proc.stderr or proc.stdout or "未知错误")[-1200:])}
+        try:
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "error": f"试跑结果无法解析: {exc}"}
+        raw_results = data.get("results") or []
+        hits = []
+        for r in raw_results:
+            if not r.get("hit"):
+                continue
+            evidence = r.get("evidence") or []
+            hits.append({
+                "id": r.get("rule_id") or r.get("id"),
+                "match_count": r.get("match_count") or 0,
+                "files": [e.get("file") for e in evidence if e.get("file")][:5],
+                "excerpts": [(e.get("text") or e.get("line") or "") for e in evidence][:5],
+            })
+        missed = [r.get("rule_id") or r.get("id") for r in raw_results if not r.get("hit")]
+        return {"ok": True, "rules": len(rules), "hits": hits, "missed": missed,
+                "root_causes": data.get("root_causes") or [],
+                "excerpt": (proc.stdout or "")[:5000]}
+
     def check(self, profile_yaml: str) -> dict[str, Any]:
         draft_dir = self.config.data_dir / "workshop" / "_check"
         draft_dir.mkdir(parents=True, exist_ok=True)
@@ -761,11 +824,52 @@ class WorkshopService:
         if not changed:
             raise ValueError("没有需要标记的未验证规则")
         new_yaml = yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False)
-        self.update_draft(draft_id, {"profile_yaml": new_yaml})
         check = self.check(new_yaml)
-        self.db.execute("UPDATE workshop_drafts SET check_json=?, updated_at=? WHERE id=?",
-                        (json.dumps(check, ensure_ascii=False), iso_now(), draft_id))
-        return {"ok": True, "changed": changed, "profile_yaml": new_yaml, "check": check}
+
+        # 规则确认必须同时更新草稿的“当前状态”，否则页面仍会从旧分析快照
+        # 读取 verified=false 和历史质量错误，出现“已确认但仍待确认”的矛盾。
+        analysis = dict(row.get("analysis") or {})
+        intake = dict(analysis.get("intake") or {})
+        for rule in intake.get("evidence_rules") or []:
+            rid = str((rule or {}).get("id") or "")
+            if rid in changed:
+                rule["verified"] = True
+        for suggestion in (analysis.get("rule_candidates") or {}).get("rule_suggestions") or []:
+            rule = (suggestion or {}).get("rule") or {}
+            rid = str(rule.get("id") or "")
+            if rid in changed:
+                rule["verified"] = True
+        quality = dict(analysis.get("quality") or {})
+        errors = list(quality.get("errors") or [])
+        kept_errors, resolved = [], []
+        for item in errors:
+            field = str((item or {}).get("field") or "")
+            if any(re.search(rf"(^|[^A-Za-z0-9_]){re.escape(rid)}($|[^A-Za-z0-9_])", field)
+                   for rid in changed):
+                resolved.append({**(item or {}), "resolved_by": "rule_confirmed"})
+            else:
+                kept_errors.append(item)
+        quality["errors"] = kept_errors
+        quality["resolved"] = list(quality.get("resolved") or []) + resolved
+        quality["ok"] = not kept_errors
+        if isinstance(quality.get("counts"), dict):
+            counts = dict(quality["counts"])
+            counts["errors"] = len(kept_errors)
+            quality["counts"] = counts
+        analysis["intake"] = intake
+        analysis["quality"] = quality
+        check["quality"] = quality
+        blocking = any(q.get("blocking") for q in quality.get("questions") or [])
+        status = "generated" if check.get("ok") and quality.get("ok") and not blocking else "needs_confirmation"
+        last_error = "" if check.get("ok") else "；".join(check.get("errors") or ["profile 校验未通过"])
+        self.db.execute(
+            "UPDATE workshop_drafts SET profile_yaml=?, analysis_json=?, check_json=?, status=?, "
+            "last_error=?, updated_at=? WHERE id=?",
+            (new_yaml, json.dumps(analysis, ensure_ascii=False, default=str),
+             json.dumps(check, ensure_ascii=False), status, last_error, iso_now(), draft_id))
+        self._invalidate_build(draft_id)
+        return {"ok": True, "changed": changed, "profile_yaml": new_yaml, "check": check,
+                "analysis": analysis, "status": status}
 
     def _extract_errors(self, output: str) -> list[str]:
         lines = []
@@ -1046,7 +1150,7 @@ class WorkshopService:
             "kind": kind,
             "device": str(expected.get("device") or ""),
             "tags": expected.get("tags") or [],
-            "input": {"archive": archive_path},
+            "input": {"archive": "input" if len(files) > 1 else archive_path},
             "pipeline": ["unpack", "search"],
         })
         if expected.get("unpacked_dir"):
@@ -1128,8 +1232,9 @@ class WorkshopService:
                     expected = {}
             input_dir = path / "input"
             if input_dir.exists():
-                for f in sorted(p for p in input_dir.iterdir() if p.is_file()):
-                    files.append({"name": f.name, "size": f.stat().st_size})
+                for f in sorted(p for p in input_dir.rglob("*") if p.is_file()):
+                    files.append({"name": f.relative_to(input_dir).as_posix(),
+                                  "size": f.stat().st_size})
             out.append({**item, "expected": expected, "files": files,
                         "total_bytes": sum(f["size"] for f in files)})
         return out

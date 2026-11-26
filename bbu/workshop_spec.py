@@ -810,11 +810,11 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             issue(warnings, root["id"], f"根因“{root['name']}”缺少故障机理")
     kinds = {case.get("kind") for case in spec.get("cases") or []}
     if "positive" not in kinds:
-        issue(warnings, "cases", "文本中没有可识别的故障正例")
-        questions.append({"field": "cases", "question": "请补充至少一个故障正例，并写明期望根因和关键证据。", "blocking": False})
+        issue(warnings, "cases", "文本中没有可识别的故障案例")
+        questions.append({"field": "cases", "question": "请补充至少一个故障案例，并写明期望根因和关键证据。", "blocking": False})
     if "negative" not in kinds:
-        issue(warnings, "cases", "文本中没有可识别的正常/反例")
-        questions.append({"field": "cases", "question": "请补充一个正常或易混淆反例，防止规则误命中。", "blocking": False})
+        issue(warnings, "cases", "文本中没有可识别的正常案例")
+        questions.append({"field": "cases", "question": "请补充一个正常案例或易混淆案例，防止规则误命中。", "blocking": False})
     for item in spec.get("questions") or []:
         if isinstance(item, dict) and _one_line(item.get("question")):
             questions.append({"field": _one_line(item.get("field")) or "general",
