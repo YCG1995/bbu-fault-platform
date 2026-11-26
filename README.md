@@ -21,6 +21,16 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.5 MCP 客户端配置布局
+
+本版本优化“系统信息 → MCP / 助手”的客户端配置；数据库 schema 保持 21，MCP 接口与 Token 流程不变。
+
+- **左右分区**：左侧展示 read 模式说明、三步接入步骤和 Token 提示，右侧展示完整 JSON 配置。
+- **代码面板**：textarea 改为带标题栏的代码块，复制按钮移到右上角，超长行自动换行。
+- **复制行为**：复制完整配置 JSON 与 `<YOUR_TOKEN>` 占位，页面实体编码不会带入剪贴板。
+- **移动端**：≤900px 说明与代码上下排列，390px 无横向溢出。
+- 验证：MCP UI 冒烟通过；单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.5.md`。
+
 ## 1.24.4 迁移页覆盖恢复布局
 
 本版本优化“系统信息 → 迁移”页面的覆盖恢复和迁移记录区域；数据库 schema 保持 21。
@@ -298,13 +308,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.4-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.5-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.4-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.5-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

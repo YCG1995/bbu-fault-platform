@@ -1616,10 +1616,23 @@ function renderMCPPanel(panel, payload) {
         <div class="tiny muted" style="margin-top:8px">Token 仅保存 SHA-256 哈希；轮换后旧 Token 立即失效。账号停用后 Token 同步失效。</div>
       </div></div>
     </div>
-    <div class="card" style="margin-bottom:14px"><div class="card-head"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div>
+    <div class="card mcp-client-card" style="margin-bottom:14px">
+      <div class="card-head"><div class="mcp-client-heading"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div></div>
       <div class="card-body">
-        <div class="alert info">${icon('info')}<div>推荐使用 <strong>read</strong> 模式；Token 绑定当前账号，只能看到当前账号权限内的工具与数据。将以下配置加入支持 HTTP MCP 的客户端。</div></div>
-        <textarea readonly rows="10" class="mono" id="mcp-config-example">{
+        <div class="mcp-client-layout">
+          <div class="mcp-client-notes">
+            <div class="mcp-config-note">${icon('info')}<div>推荐使用 <strong>read</strong> 模式；Token 绑定当前账号，只能看到当前账号权限内的工具与数据。</div></div>
+            <ol class="mcp-steps">
+              <li><span>1</span><div><strong>复制配置</strong><p>右侧 JSON 已填入当前 MCP 端点，复制后替换 Bearer 占位 Token。</p></div></li>
+              <li><span>2</span><div><strong>写入客户端</strong><p>粘贴到 Claude Desktop / Cursor 的 <code>mcpServers</code> 配置中。</p></div></li>
+              <li><span>3</span><div><strong>重启并验证</strong><p>重新打开客户端，确认工具列表出现 <code>bbu-faultscope</code>。</p></div></li>
+            </ol>
+            <div class="mcp-token-tip">${icon('key')}<span>Token 绑定当前账号；轮换后旧 Token 立即失效，需要同步更新客户端。</span></div>
+          </div>
+          <div class="mcp-code-panel">
+            <div class="mcp-code-head"><div class="mcp-code-title">${icon('file')} mcp.json <span class="badge">JSON</span></div>
+              <button class="btn btn-sm" id="mcp-copy-config">${icon('copy')}复制 JSON</button></div>
+            <pre class="mcp-code-block"><code id="mcp-config-example">{
   "mcpServers": {
     "bbu-faultscope": {
       "type": "http",
@@ -1627,9 +1640,11 @@ function renderMCPPanel(panel, payload) {
       "headers": { "Authorization": "Bearer &lt;YOUR_TOKEN&gt;" }
     }
   }
-}</textarea>
-        <div style="margin-top:8px"><button class="btn btn-sm" id="mcp-copy-config">${icon('copy')}复制配置模板</button></div>
-      </div></div>
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="card"><div class="card-head"><h2>当前模式工具</h2><span class="sub">${info.mode || 'read'} 模式</span></div>
       <div class="card-body"><div class="assistant-suggestions">${names.length ? names.map((n) => `<span class="badge" style="font-family:var(--mono)">${esc(n)}</span>`).join('') : '<span class="muted">暂无</span>'}</div>
         <div class="tiny muted" style="margin-top:8px">升级/回滚、用户与模型变更不通过 MCP 暴露；写工具仍要求 <code>confirm=true</code>。</div>
@@ -1645,7 +1660,7 @@ function renderMCPPanel(panel, payload) {
   });
   const cfg = panel.querySelector('#mcp-config-example');
   panel.querySelector('#mcp-copy-config').addEventListener('click', (e) => copyText(
-    cfg.value.replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
+    cfg.textContent.trim().replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
 }
 
 function renderSystemView(view, info, config, updates, migrations, mcp) {

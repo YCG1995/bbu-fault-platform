@@ -30,7 +30,8 @@ DOC_FILES: tuple[tuple[str, str, str], ...] = (
     ("windows", "docs/Windows运行说明.md", "Windows 启动、服务与升级入口"),
     ("upgrade-sudo", "docs/升级助手sudo故障修复.md", "sudo setuid/nosuid 与升级助手修复"),
     ("workshop", "docs/技能工坊AI生成优化建议.md", "技能工坊生成、评审与配方"),
-    ("release-1.24.4", "docs/版本说明-1.24.4.md", "当前版本迁移页布局：覆盖恢复分区、自定义迁移包选择与记录空态"),
+    ("release-1.24.5", "docs/版本说明-1.24.5.md", "当前版本 MCP 客户端配置：说明/代码分区、复制 JSON 与移动端布局"),
+    ("release-1.24.4", "docs/版本说明-1.24.4.md", "1.24.4 迁移页布局：覆盖恢复分区、自定义迁移包选择与记录空态"),
     ("release-1.24.3", "docs/版本说明-1.24.3.md", "1.24.3 任务空间布局：右侧工具栏、平铺概览、空态与移动卡片"),
     ("release-1.24.2", "docs/版本说明-1.24.2.md", "1.24.2 技能工坊空态布局：全宽起始卡与五步流程"),
     ("release-1.24.1", "docs/版本说明-1.24.1.md", "1.24.1 用户每日用量图表：按日堆叠用户与指标切换"),
@@ -46,7 +47,7 @@ DOC_PRIORITY = {
     "user-guide": 3.5, "deploy-guide": 2.0, "oneclick-deploy": 2.0,
     "upgrade-rollback": 2.5, "upgrade-sudo": 1.5, "architecture": 1.5,
     "windows": 1.5, "workshop": 1.5, "diagnostic-data": 1.0,
-    "readme": 0.5, "release-1.24.4": 0.3, "release-1.24.3": 0.3, "release-1.24.2": 0.3, "release-1.24.1": 0.3, "release-1.24.0": 0.2,
+    "readme": 0.5, "release-1.24.5": 0.3, "release-1.24.4": 0.3, "release-1.24.3": 0.3, "release-1.24.2": 0.3, "release-1.24.1": 0.3, "release-1.24.0": 0.2,
     "release-1.20.3": 0.2, "release-1.20.2": 0.2,
 }
 
@@ -159,6 +160,11 @@ _QUERY_RULES: tuple[_IntentRule, ...] = (
         re.compile(r"no\s*new\s*privileges.*(?:修复|解决)|"
                    r"(?:修复|解决).*no\s*new\s*privileges"),
         "upgrade-sudo", 14.0, ("4. root 一键修复",),
+    ),
+    _IntentRule(
+        "1.24.5 MCP 客户端配置布局",
+        re.compile(r"1\.24\.5|mcp.*(?:客户端|配置|布局)|客户端配置.*(?:布局|优化)"),
+        "release-1.24.5", 12.0,
     ),
     _IntentRule(
         "1.24.4 迁移页布局",
