@@ -13,6 +13,7 @@ from typing import Any
 
 from .db import Database
 from .evaluation import RealCaseStore
+from .case_matrix import record_candidate
 from .util import iso_now, new_id
 
 DECISIONS = {"confirm", "correct", "reject"}
@@ -132,7 +133,7 @@ class ReviewService:
                  json.dumps(evidence[:50], ensure_ascii=False, default=str),
                  "candidate", real_case_id, now, now))
         self._apply_experience(task["id"], review_id, decision, original_root,
-                               corrected_root, now)
+                               corrected_root, now, original_skill)
         if real_case_id and promote:
             self.db.execute("UPDATE task_reviews SET promoted_at=COALESCE(promoted_at,?) WHERE id=?",
                             (now, review_id))
@@ -145,11 +146,18 @@ class ReviewService:
         return review
 
     def _apply_experience(self, task_id: str, review_id: str, decision: str,
-                          original_root: str, corrected_root: str, now: str) -> None:
+                          original_root: str, corrected_root: str, now: str,
+                          original_skill: str = "") -> None:
         trust = "deprecated" if decision == "reject" else "verified"
         row = self.db.one("SELECT id FROM plan_experiences WHERE task_id=?", (task_id,))
         if not row:
             return
+        if decision in ("correct", "reject"):
+            record_candidate(
+                self.db, task_id=task_id, skill_name=original_skill,
+                root_cause=corrected_root, old_root=original_root,
+                decision=decision, note=f"review:{review_id}",
+                payload={"review_id": review_id})
         if decision == "reject":
             self.db.execute(
                 "UPDATE plan_experiences SET trust_level='deprecated',review_id=?,"

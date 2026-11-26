@@ -71,11 +71,15 @@ def main() -> int:
     p_list.add_argument("--status", default="all")
     p_list.add_argument("--json", action="store_true")
 
-    p_eval = sub.add_parser("evaluate", help="运行确定性评测")
+    p_eval = sub.add_parser("evaluate", help="运行评测；默认确定性，可显式让模型参与")
     p_eval.add_argument("--split", default="test")
     p_eval.add_argument("--limit", type=int, default=0)
     p_eval.add_argument("--case", action="append", default=[])
     p_eval.add_argument("--name", default="")
+    p_eval.add_argument("--llm-mode", choices=("off", "planner", "report", "full"),
+                        default="off", help="off=确定性；planner=规划；report=报告；full=规划+报告")
+    p_eval.add_argument("--model-id", type=int, default=None,
+                        help="固定使用 model_configs.id；不填则由角色选择")
 
     p_export = sub.add_parser("export", help="导出案例清单（不含日志本体）")
     p_export.add_argument("--output", default="datasets/real_cases/cases.jsonl")
@@ -119,8 +123,13 @@ def main() -> int:
                       f"{row['dataset_sha256'][:12]} {row['title'][:40]}")
     elif args.command == "evaluate":
         service = EvaluationService(db, config, case_store=store)
-        result = service.evaluate(split=args.split, limit=args.limit,
-                                  case_ids=args.case or None, name=args.name)
+        try:
+            result = service.evaluate(split=args.split, limit=args.limit,
+                                      case_ids=args.case or None, name=args.name,
+                                      llm_mode=args.llm_mode, model_config_id=args.model_id)
+        except ValueError as exc:
+            print(f"评测失败: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
         print(f"\n评测报告: {result['report']}")
         return 0 if result["summary"].get("errors", 0) == 0 else 1

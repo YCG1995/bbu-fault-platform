@@ -60,8 +60,8 @@ deploy\windows\set_pip_mirror.bat
 
 ```ini
 [global]
-index-url = https://pypi.example.com/simple
-trusted-host = pypi.example.com
+index-url = https://artifactory.example.com/artifactory/api/pypi/public-pypi-virtual/simple
+trusted-host = artifactory.example.com
 timeout = 60
 retries = 3
 ```
@@ -147,7 +147,7 @@ Windows 下「系统信息 → 离线升级」默认不可用，页面会提示�
 | 启动报端口占用 | `python run.py --port 8090` |
 | 无法写数据库 | 换到可写目录，不要放 Program Files |
 | 中文乱码 | 设置 `PYTHONUTF8=1` 后重启命令行 |
-| pip 源证书错误 | 确认已配置 `trusted-host = pypi.example.com`，并在企业内网/VPN |
+| pip 源证书错误 | 确认已配置 `trusted-host = artifactory.example.com`，并在办公网/VPN |
 | 需要后台服务 | 可用 NSSM 等工具把 `python run.py` 注册为服务；平台不自带 Windows 服务安装器 |
 | 切换工作目录后页面提示等待重启 | 这是 Windows 的正常流程；停止 `python run.py` 后重新启动，`pending_maintenance.json` 会在启动前自动应用 |
 | 重启后任务显示「重启导致迁移任务中断」 | 检查 `pending_maintenance.json` 是否还在；应用失败会保留旧目录并把任务标为失败，修复目标目录权限后重新提交 |

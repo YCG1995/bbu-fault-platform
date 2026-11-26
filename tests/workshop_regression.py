@@ -78,6 +78,11 @@ def main():
             spec = parse_source((ROOT / "tests" / "fixtures" / "intake" / fixture).read_text(encoding="utf-8"))
             skill = derive_skill_name(spec)
             profile = compile_profile(spec, skill)
+            # 配方/通用规则默认 verified=false；回归 harness 模拟“专家人工确认规则”，
+            # 否则 scaffold 会因根因引用未验证规则而拒绝构建。
+            for step in (profile.get("analysis") or {}).get("steps") or []:
+                for rule in (step or {}).get("rules") or []:
+                    rule["verified"] = True
             profile_path = work / f"{skill}.yaml"
             profile_path.write_text(yaml.safe_dump(profile, allow_unicode=True, sort_keys=False), encoding="utf-8")
             for item in cases_for(fixture, skill):

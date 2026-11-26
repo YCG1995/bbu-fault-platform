@@ -65,13 +65,16 @@ class TaskWorker:
                     (iso_now(), f"队列容量 {self.max_queue} 已满，任务未能恢复，请稍后重试", task_id))
             return False
 
-    def submit(self, task_id: str) -> None:
+    def submit(self, task_id: str, fail_on_full: bool = True) -> bool:
         self.db.execute("UPDATE tasks SET status='queued', stage='queued', progress=0 WHERE id=?",
                         (task_id,))
         if not self._enqueue(task_id):
-            self.db.execute(
-                "UPDATE tasks SET status='failed', stage='done', finished_at=?, error=? WHERE id=?",
-                (iso_now(), f"队列容量 {self.max_queue} 已满，请稍后重试", task_id))
+            if fail_on_full:
+                self.db.execute(
+                    "UPDATE tasks SET status='failed', stage='done', finished_at=?, error=? WHERE id=?",
+                    (iso_now(), f"队列容量 {self.max_queue} 已满，请稍后重试", task_id))
+            return False
+        return True
 
     def cancel(self, task_id: str) -> bool:
         with self._lock:

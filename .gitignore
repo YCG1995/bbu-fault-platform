@@ -1,18 +1,28 @@
 # 运行数据与敏感文件，绝不入库
-data/
-cases/
-skills/
-backups/
-build/
-updates/
-dist/
+/data/
+/cases/
+/skills/
+/backups/
+/build/
+/updates/
+/dist/
+/evaluations/runs/
+/evaluations/real-runs/
+/evaluations/artifacts/
+/evaluations/recordings/
+/evaluations/reports/
+/testlab/
 config.json
-*.db
+config.json.bak
+master.key
 *.key
 *.pem
+*.db
 .env
 .env.*
 *.log
+!/tests/fixtures/**/*.log
+初始管理员密码.txt
 
 # Python 与测试缓存
 __pycache__/

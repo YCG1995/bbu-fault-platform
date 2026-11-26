@@ -70,7 +70,7 @@ def main() -> int:
 
         invite = admin.json("POST", "/api/users/invites", {
             "username": "ui_r3_reviewer", "display_name": "R3 复核专家",
-            "role": "reviewer", "team": "无线", "hours": 24}, expected=201)[1]
+            "role": "reviewer", "hours": 24}, expected=201)[1]
         reviewer = Client(host, port)
         reviewer.json("POST", "/api/auth/activate", {
             "code": invite["code"], "password": "Reviewer!2026x"}, expected=201)
@@ -125,11 +125,13 @@ def main() -> int:
 
             # 新建任务：草稿自动保存 + 文件上传 + 提交
             page.goto(f"{base}/#/tasks/new", wait_until="networkidle")
-            page.fill("#f-title", "R3 UI 草稿任务")
-            page.fill("#f-desc", "R3 浏览器验收：CLK032 时钟失锁，验证草稿自动保存与文件上传。")
+            # 标题已改为盘点后自动生成，页面不再提供 #f-title；测试改为断言描述草稿。
+            sentinel = "R3 浏览器验收：CLK032 时钟失锁，验证草稿自动保存与文件上传。"
+            page.fill("#f-desc", sentinel)
             page.wait_for_timeout(1200)
             draft = admin.json("GET", "/api/task-drafts/current")[1]["draft"]
-            assert draft and draft["title"] == "R3 UI 草稿任务", draft
+            assert draft and draft["description"] == sentinel, draft
+            assert draft.get("title") in ("", None), draft
             page.set_input_files("#file-input", str(ROOT / "tests/fixtures/logs/clock-demo.zip"))
             page.wait_for_selector("text=已上传", timeout=30000)
             assert page.locator("#upload-summary").is_visible()
@@ -137,14 +139,20 @@ def main() -> int:
             page.click("#submit-btn")
             page.wait_for_function("() => location.hash.startsWith('#/tasks/T')", timeout=30000)
             ui_task_id = page.evaluate("() => location.hash.split('/').pop()")
-            wait_task(admin, ui_task_id)
+            ui_task = wait_task(admin, ui_task_id)
+            # 标题由盘点结果自动生成（可能是 collectinfo 相关故障诊断），不再是描述首行。
+            assert ui_task["title"] and ui_task["title_source"] == "deterministic", ui_task
+            assert ui_task["description"] == sentinel, ui_task
             assert admin.json("GET", "/api/task-drafts/current")[1]["draft"] is None
 
             # 阶段时间线与结论理由
             page.goto(f"{base}/#/tasks/{task_id}", wait_until="networkidle")
-            page.wait_for_selector("text=阶段时间线")
-            assert page.locator("text=下一步").count() >= 1
+            # 完成态默认打开“诊断报告”；结论在“诊断概览”，时间线在“运行详情”。
+            page.click('[data-detail-tab="overview"]')
             page.wait_for_selector("text=为什么得出这个结论")
+            assert page.locator("text=下一步").count() >= 1
+            page.click('[data-detail-tab="runtime"]')
+            page.wait_for_selector("text=阶段时间线")
             page.screenshot(path="/tmp/r3-task-detail.png", full_page=True)
 
             # 375px：无整页横向滚动，宽表格转卡片
@@ -182,6 +190,8 @@ def main() -> int:
             rp.click("button[data-status='pending']")
             rp.wait_for_selector(f"text={task_id}")
             rp.goto(f"{base}/#/tasks/{task_id}", wait_until="networkidle")
+            # 完成态默认在报告分区；复核按钮在诊断概览。
+            rp.click('[data-detail-tab="overview"]')
             rp.wait_for_selector("text=专家复核")
             rp.click("button[data-decision='confirm']")
             rp.wait_for_selector("#review-form")

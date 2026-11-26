@@ -353,7 +353,10 @@ class Handler(BaseHTTPRequestHandler):
             rel += "index.html"
         path = (web_dir / rel).resolve()
         if not within_directory(web_dir, path) or not path.is_file():
-            # SPA 回退
+            # 只有前端路由才回退 index.html；缺失的静态资源必须返回 404，
+            # 否则 /favicon.ico、/assets/*.js 会拿到 HTML，浏览器继续使用旧图标。
+            if rel.startswith("assets/") or Path(rel).suffix or rel == "favicon.ico":
+                raise HTTPError(404, "静态资源不存在")
             path = web_dir / "index.html"
             if not path.is_file():
                 raise HTTPError(404, "前端资源不存在")

@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
 from . import __version__
+from .db import SCHEMA_VERSION
 from .migration_crypto import MigrationCryptoError, decrypt_file, encrypt_file, file_sha256
 from .util import iso_now, new_id, within_directory
 
@@ -448,8 +449,9 @@ def rewrite_database(db_path: Path, old_workdir: Path, target: str,
                     sql = f'UPDATE "{table}" SET ' + ", ".join(f'"{k}"=?' for k in changes) + " WHERE rowid=?"
                     conn.execute(sql, (*changes.values(), row[0]))
         if "settings" in tables:
-            conn.execute("INSERT INTO settings(key,value) VALUES('schema_version','10') "
-                         "ON CONFLICT(key) DO UPDATE SET value='10'")
+            conn.execute("INSERT INTO settings(key,value) VALUES('schema_version',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (str(SCHEMA_VERSION),))
             conn.execute("INSERT INTO settings(key,value) VALUES('migration_inputs_excluded','1') "
                          "ON CONFLICT(key) DO UPDATE SET value='1'")
             conn.execute("INSERT INTO settings(key,value) VALUES('migration_notice',?) "
@@ -513,7 +515,7 @@ def build_workspace(source_config: Any, destination: Path, target: str,
         "format_version": FORMAT_VERSION,
         "layout_version": LAYOUT_VERSION,
         "app_version": __version__,
-        "schema_version": 10,
+        "schema_version": SCHEMA_VERSION,
         "created_at": iso_now(),
         "workdir_token": WORKDIR_TOKEN,
         "files": files,

@@ -12,8 +12,9 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/${NAME}"
 tar -C "$ROOT_DIR" \
   --exclude='./data' --exclude='./skills' --exclude='./cases' \
+  --exclude='./evaluations' --exclude='./testlab' \
   --exclude='./updates' --exclude='./backups' \
-  --exclude='./dist' --exclude='./build' --exclude='./config.json' \
+  --exclude='./dist' --exclude='./build' --exclude='./config.json*' \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='./.git' --exclude='./.pytest_cache' \
   -cf - . | tar -C "$STAGE/${NAME}" -xf -
 mkdir -p "$DIST_DIR"

@@ -4,7 +4,7 @@ import {
   providerName, roleLabel, setBusy, state, statusBadge, toast,
 } from './core.js';
 
-const ROLE_LABELS = { default: '默认', planner: '规划', router: '路由', arbiter: '仲裁', writer: '报告', workshop: '工坊' };
+const ROLE_LABELS = { default: '默认', planner: '规划', router: '路由', arbiter: '仲裁', writer: '报告', workshop: '工坊', assistant: '助手' };
 
 // ---------------------------- 模型接入 ----------------------------
 export async function renderModels() {
@@ -45,7 +45,7 @@ export async function renderModels() {
           <button class="btn btn-primary" data-act="new-model">${icon('plus')}添加模型</button></div>`}
     </div></div>
     <div class="card" style="margin-top:14px"><div class="card-body small muted">
-      <strong>角色路由：</strong>default 兜底；planner 负责生成动态波次计划（一次规划 + 最多一次补规划）；router 可作为老部署的规划回退；arbiter 只在结论冲突时调用一次；writer 负责报告综合研判；workshop 只做技能起草。
+      <strong>角色路由：</strong>default 兜底；planner 负责生成动态波次计划（一次规划 + 最多一次补规划）；router 可作为老部署的规划回退；arbiter 只在结论冲突时调用一次；writer 负责报告综合研判；workshop 只做技能起草；assistant 负责悬浮助手的工具规划与结果总结，未配置时回退 default。
       同一角色多个配置时按优先级数字从小到大尝试，失败会自动回退。
     </div></div>`;
 
@@ -83,7 +83,7 @@ export async function renderModels() {
 
 function openModelModal(model, onDone) {
   const maasBase = state.publicConfig?.personal_model_base_url || 'https://maas.example.com/v1';
-  const maasModel = state.publicConfig?.personal_model_default || 'deepseek-v4-flash';
+  const maasModel = state.publicConfig?.personal_model_default || 'gpt-4o-mini';
   const maasModels = state.publicConfig?.personal_model_models || [maasModel];
   const m = modal({
     title: model ? '编辑模型配置' : '添加模型配置',
@@ -216,10 +216,10 @@ export async function renderUsers() {
     <div class="card"><div class="card-body">
       <div class="toolbar">
         <div class="search">${icon('search')}<input class="input" id="user-search" placeholder="用户名 / 领域" value="${esc(userQuery.q)}"></div>
-        <select class="select" id="user-role" style="width:150px">
+        <select class="select" id="user-role" aria-label="按角色筛选用户" style="width:150px">
           <option value="">全部角色</option>${USER_ROLES.map(([v, t]) => `<option value="${v}" ${userQuery.role === v ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
-        <select class="select" id="user-status" style="width:130px">
+        <select class="select" id="user-status" aria-label="按状态筛选用户" style="width:130px">
           <option value="">全部状态</option>${USER_STATUS.map(([v, t]) => `<option value="${v}" ${userQuery.status === v ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
         <button class="btn" data-act="search">筛选</button>
@@ -229,10 +229,10 @@ export async function renderUsers() {
       </div>
     </div></div>
     <div class="card" style="margin-top:12px"><div class="card-body tight table-wrap">
-      <table class="data responsive"><thead><tr><th style="width:32px"><input type="checkbox" id="user-check-all"></th>
+      <table class="data responsive"><thead><tr><th style="width:32px"><input type="checkbox" id="user-check-all" aria-label="全选用户"></th>
         <th>用户</th><th>角色</th><th>状态</th><th>领域</th><th>最近登录</th><th>到期</th><th>操作</th></tr></thead>
       <tbody>${users.length ? users.map((u) => `<tr>
-        <td data-label="选择"><input type="checkbox" class="user-check" value="${u.id}"></td>
+        <td data-label="选择"><input type="checkbox" class="user-check" aria-label="选择用户" value="${u.id}"></td>
         <td data-label="用户"><div style="font-weight:600">${esc(u.display_name || u.username)}</div><div class="mono tiny muted">${esc(u.username)}</div></td>
         <td data-label="角色">${userRoleTag(u.role)}</td>
         <td data-label="状态">${statusBadge(u.status, { active: '启用', invited: '待激活', disabled: '停用', expired: '已到期' }[u.status] || u.status)}${u.must_change ? ' <span class="badge warn"><i class="dot"></i>待改密</span>' : ''}</td>
@@ -295,8 +295,6 @@ function openInviteModal(onDone) {
         <div class="form-row"><label class="label">显示名</label><input class="input" name="display_name" placeholder="张三"></div>
         <div class="form-row"><label class="label">角色</label><select class="select" name="role">${USER_ROLES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></div>
         <div class="form-row"><label class="label">有效期</label><select class="select" name="hours"><option value="24">24 小时</option><option value="72">3 天</option><option value="168">7 天</option></select></div>
-        <div class="form-row"><label class="label">班组</label><input class="input" name="team" placeholder="可选"></div>
-        <div class="form-row"><label class="label">站点</label><input class="input" name="site" placeholder="可选"></div>
       </div>
     </form>`,
     footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="create">生成激活码</button>`,
@@ -473,12 +471,12 @@ export async function renderAudit() {
   view.innerHTML = `
     <div class="card"><div class="card-body">
       <div class="toolbar">
-        <input class="input" type="date" id="audit-start" value="${esc(auditFilter.start)}" style="width:150px">
-        <input class="input" type="date" id="audit-end" value="${esc(auditFilter.end)}" style="width:150px">
+        <input class="input" type="date" id="audit-start" aria-label="审计开始日期" value="${esc(auditFilter.start)}" style="width:150px">
+        <input class="input" type="date" id="audit-end" aria-label="审计结束日期" value="${esc(auditFilter.end)}" style="width:150px">
         <input class="input" id="audit-user" placeholder="用户" value="${esc(auditFilter.username)}" style="width:130px">
         <input class="input" id="audit-action" placeholder="动作，如 auth.login" value="${esc(auditFilter.action)}" style="width:180px">
         <input class="input" id="audit-target" placeholder="对象" value="${esc(auditFilter.target)}" style="width:150px">
-        <select class="select" id="audit-result" style="width:120px"><option value="">全部结果</option><option value="ok" ${auditFilter.result === 'ok' ? 'selected' : ''}>成功</option><option value="failed" ${auditFilter.result === 'failed' ? 'selected' : ''}>失败/拒绝</option></select>
+        <select class="select" id="audit-result" aria-label="按结果筛选审计" style="width:120px"><option value="">全部结果</option><option value="ok" ${auditFilter.result === 'ok' ? 'selected' : ''}>成功</option><option value="failed" ${auditFilter.result === 'failed' ? 'selected' : ''}>失败/拒绝</option></select>
         <button class="btn" data-act="search">筛选</button>
         <button class="btn btn-ghost" data-act="reset">重置</button>
         <button class="btn" data-act="export">${icon('download')}导出 CSV</button>
@@ -540,7 +538,10 @@ export async function renderSystem() {
   let migrations = null;
   try { migrations = await api('/api/system/migrations'); }
   catch (err) { migrations = { error: err.message, items: [] }; }
-  return renderSystemView(view, info, config, updates, migrations);
+  let mcp = null;
+  try { mcp = await api('/api/mcp/info'); }
+  catch (err) { mcp = { error: err.message }; }
+  return renderSystemView(view, info, config, updates, migrations, mcp);
 }
 
 
@@ -1091,13 +1092,30 @@ let storagePollTimer = null;
 
 function runtimeFieldHtml(item) {
   const disabled = item.env_override ? 'disabled' : '';
+  const effect = item.restart_required === false ? '保存后立即生效' : '重启后生效';
+  if (item.type === 'bool') {
+    return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
+        ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
+      <label class="check"><input type="checkbox" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
+        data-runtime-type="bool" ${item.value ? 'checked' : ''} ${disabled}> 开启</label>
+      <div class="help">默认 ${item.value ? '开启' : '关闭'} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+  }
+  if (item.type === 'enum') {
+    const options = (item.choices || []).map((value) =>
+      `<option value="${esc(value)}" ${String(item.value) === String(value) ? 'selected' : ''}>${esc(value)}</option>`).join('');
+    return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
+        ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
+      <select class="input" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
+        data-runtime-type="enum" ${disabled}>${options}</select>
+      <div class="help">默认 ${esc(item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+  }
   const step = item.type === 'float' ? '0.1' : '1';
   return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
       ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
     <input class="input mono" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
       data-runtime-type="${esc(item.type)}" type="number" step="${step}"
       min="${item.min ?? ''}" max="${item.max ?? ''}" value="${esc(item.value)}" ${disabled}>
-    <div class="help">默认 ${esc(item.default)} · 重启后生效${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+    <div class="help">默认 ${esc(item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
 }
 
 async function renderRuntimeConfigPanel(panel) {
@@ -1117,7 +1135,7 @@ async function renderRuntimeConfigPanel(panel) {
   }
   panel.innerHTML = `<div class="card" id="runtime-card">
     <div class="card-head"><div><h2>并发、预算与容量参数</h2>
-      <span class="sub">仅管理员可修改；保存写入 config.json，重启后重新装配生效</span></div>
+      <span class="sub">仅管理员可修改；保存写入 config.json，容量与并发参数重启后重新装配生效</span></div>
       <div class="inline"><button class="btn" id="rt-save">${icon('save')}保存配置</button>
         <button class="btn btn-primary" id="rt-save-restart">${icon('refresh')}保存并重启</button></div></div>
     <div class="card-body">
@@ -1132,8 +1150,10 @@ async function renderRuntimeConfigPanel(panel) {
     const values = {};
     panel.querySelectorAll('[data-runtime-key]').forEach((input) => {
       if (input.disabled) return;
-      values[input.dataset.runtimeKey] = input.dataset.runtimeType === 'float'
-        ? Number(input.value) : Number.parseInt(input.value, 10);
+      values[input.dataset.runtimeKey] = input.dataset.runtimeType === 'bool'
+        ? Boolean(input.checked)
+        : input.dataset.runtimeType === 'float'
+          ? Number(input.value) : Number.parseInt(input.value, 10);
     });
     return values;
   };
@@ -1141,8 +1161,11 @@ async function renderRuntimeConfigPanel(panel) {
     setBusy(btn, true, '保存中…');
     try {
       const res = await api('/api/system/runtime-config', { method: 'PUT', body: { values: collect() } });
-      toast('配置已保存，重启后生效', 'ok');
-      panel.querySelector('#restart-status').innerHTML = `<div class="alert warn">${icon('alert')}<div>已保存 ${(res.saved || []).length} 项；当前进程仍使用旧配置，请执行“重启服务”。</div></div>`;
+      toast('配置已保存', 'ok');
+      const needsRestart = (res.saved || []).some((x) => x.restart_required);
+      panel.querySelector('#restart-status').innerHTML = needsRestart
+        ? `<div class="alert warn">${icon('alert')}<div>已保存 ${(res.saved || []).length} 项；容量/并发参数需执行“重启服务”后生效，账号开关已即时生效。</div></div>`
+        : `<div class="alert info">${icon('check')}<div>已保存 ${(res.saved || []).length} 项，账号与注册开关已即时生效，无需重启。</div></div>`;
       return true;
     } catch (err) { toast(err.message, 'error', 6000); return false; }
     finally { setBusy(btn, false); }
@@ -1199,10 +1222,77 @@ async function restartWebService(panel) {
 
 // ---------------------------- 任务空间统计与释放 ----------------------------
 const INPUT_STATE_LABELS = {
-  available: '原始输入可用', reasing: '释放中', releasing: '释放中',
+  available: '原始输入可用', releasing: '释放中',
   released: '原始输入已释放', release_interrupted: '释放中断，可重试',
   excluded_by_migration: '未随迁移导出',
 };
+const RELEASE_MODE_LABELS = {
+  raw_inputs: '原始输入', extracted: '解压文件', both: '原始输入 + 解压文件',
+};
+
+const BACKUP_KIND_LABELS = { upgrade: '升级快照', import: '迁移恢复前备份', manual: '手工/其它备份' };
+
+async function renderBackupPanel(panel) {
+  if (!panel) return;
+  let data;
+  try { data = await api('/api/backups'); }
+  catch (err) {
+    panel.innerHTML = `<div class="card"><div class="card-head"><h2>历史备份</h2></div>
+      <div class="card-body"><div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div></div></div>`;
+    return;
+  }
+  const items = data.items || [];
+  const summary = data.summary || {};
+  const rows = items.map((item, index) => {
+    const version = item.old_version || item.new_version
+      ? `${esc(item.old_version || '?')} → ${esc(item.new_version || '?')}` : '—';
+    const refs = (item.referenced_by || []).length
+      ? `<div class="tiny muted">升级记录 ${esc((item.referenced_by || []).join('、'))}</div>` : '';
+    return `<tr>
+      <td><div style="font-weight:600;word-break:break-all">${esc(item.name)}</div>
+        <div class="mono tiny muted">${esc(item.path)}</div>${refs}</div></td>
+      <td><span class="chip">${esc(BACKUP_KIND_LABELS[item.kind] || item.kind || '其它')}</span>
+        <div class="tiny muted">${version}${item.has_state_backup ? '' : ' · 不含状态快照'}</div></td>
+      <td class="mono nowrap">${fmtDate(item.created_at)}</td>
+      <td class="mono">${fmtSize(item.size_bytes)}</td>
+      <td class="mono">${Number(item.file_count || 0).toLocaleString()} 个文件</td>
+      <td><button class="btn btn-sm btn-danger" data-backup-delete="${esc(item.name)}" ${item.in_use ? 'disabled title="正在被升级任务使用"' : ''}>${icon('trash')}删除</button>
+        ${item.in_use ? '<div class="tiny warn">升级任务使用中</div>' : ''}</td>
+    </tr>`;
+  }).join('');
+  panel.innerHTML = `<div class="card">
+    <div class="card-head"><div><h2>历史备份</h2>
+      <span class="sub">显示 STATE_DIR/backups 下的升级快照、迁移恢复前备份和手工备份；删除不可恢复</span></div>
+      <button class="btn" id="backup-refresh">${icon('refresh')}重新扫描</button></div>
+    <div class="card-body">
+      <div class="alert info">${icon('shield')}<div>备份根目录：<span class="mono">${esc(data.root)}</span>。
+        正在被升级任务引用的备份不能删除；普通历史快照可删除以释放空间。</div></div>
+      <div class="grid grid-3" style="margin:12px 0">
+        <div class="card stat"><div class="stat-icon info">${icon('layers')}</div><div><div class="stat-val">${Number(summary.count || 0)}</div><div class="stat-label">备份记录</div></div></div>
+        <div class="card stat"><div class="stat-icon warn">${icon('database')}</div><div><div class="stat-val">${fmtSize(summary.total_bytes)}</div><div class="stat-label">占用空间</div></div></div>
+        <div class="card stat"><div class="stat-icon ok">${icon('check')}</div><div><div class="stat-val">${Number(summary.deletable_count || 0)}</div><div class="stat-label">可删除</div></div></div>
+      </div>
+      <div class="table-wrap"><table class="data responsive"><thead><tr>
+        <th>备份名称</th><th>类型 / 版本</th><th>创建时间</th><th>大小</th><th>文件数</th><th>操作</th>
+      </tr></thead><tbody>${rows || '<tr><td colspan="6"><div class="empty">暂无历史备份</div></td></tr>'}</tbody></table></div>
+    </div></div>`;
+
+  panel.querySelector('#backup-refresh').addEventListener('click', () => renderBackupPanel(panel));
+  panel.querySelectorAll('[data-backup-delete]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.backupDelete;
+      const item = items.find((x) => x.name === name);
+      const warning = item?.referenced_by?.length
+        ? '该备份被历史升级记录引用，删除后对应回滚入口将失效。'
+        : '删除后不可恢复。';
+      if (!await confirmDialog(`删除备份「${name}」？${warning}`, { title: '删除备份', okText: '确认删除', danger: true })) return;
+      try {
+        await api(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        toast('备份已删除', 'ok'); renderBackupPanel(panel);
+      } catch (err) { toast(err.message, 'error', 6000); }
+    });
+  });
+}
 
 async function renderStoragePanel(panel) {
   if (!panel) return;
@@ -1219,33 +1309,50 @@ async function renderStoragePanel(panel) {
   const disk = summary.disk || {};
   const rows = items.map((item) => `<tr>
     <td><input type="checkbox" class="storage-check" data-task="${esc(item.id)}"
-      ${item.can_release ? '' : 'disabled'}></td>
+      ${(item.can_release || item.can_release_extracted) ? '' : 'disabled'}></td>
     <td><div style="font-weight:600">${esc(item.title || item.id)}</div>
       <div class="mono tiny muted">${esc(item.id)} · ${fmtDate(item.created_at)}</div></td>
-    <td>${statusBadge(item.status)}<div class="tiny ${item.can_release ? 'muted' : ''}">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
-    <td class="mono">${fmtSize(item.raw_input_bytes)}</td>
-    <td class="mono">${fmtSize(item.artifact_bytes)}</td>
+    <td>${statusBadge(item.status)}<div class="tiny muted">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
+    <td class="mono">${fmtSize(item.raw_input_bytes)}
+      ${item.shared_input_paths ? `<div class="tiny"><span class="badge warn">${item.shared_input_paths} 个共享</span></div>` : ''}</td>
+    <td class="mono ${item.extracted_bytes ? '' : 'muted'}">${fmtSize(item.extracted_bytes)}
+      ${item.extracted_dirs ? `<div class="tiny muted">${item.extracted_dirs} 个目录</div>` : ''}</td>
+    <td class="mono muted">${fmtSize(item.retained_bytes)}</td>
     <td class="mono">${fmtSize(item.total_bytes)}</td>
-    <td>${item.shared_input_paths ? `<span class="badge warn">${item.shared_input_paths} 个共享</span>` : '<span class="muted">—</span>'}</td>
-    <td>${item.can_release ? `<button class="btn btn-sm btn-danger" data-release="${esc(item.id)}">${icon('trash')}释放原始输入</button>` : '—'}</td>
+    <td><div class="inline" style="gap:4px;flex-wrap:wrap">
+      ${item.can_release_extracted ? `<button class="btn btn-sm" data-release="${esc(item.id)}" data-release-mode="extracted">${icon('trash')}释放解压</button>` : ''}
+      ${item.can_release ? `<button class="btn btn-sm btn-danger" data-release="${esc(item.id)}" data-release-mode="raw_inputs">${icon('trash')}释放原始</button>` : ''}
+      ${(!item.can_release && !item.can_release_extracted) ? '<span class="muted">—</span>' : ''}
+    </div></td>
   </tr>`).join('');
   panel.innerHTML = `<div class="card">
     <div class="card-head"><div><h2>任务空间统计与释放</h2>
-      <span class="sub">只删除原始上传日志；报告、证据、案例和数据库记录始终保留</span></div>
-      <div class="inline"><button class="btn btn-danger" id="storage-release-selected">${icon('trash')}释放选中任务的原始输入</button>
-        <button class="btn" id="storage-refresh">${icon('refresh')}重新统计</button></div></div>
+      <span class="sub">可单独释放解压文件；报告、证据、案例和数据库记录始终保留</span></div>
+      <div class="inline" style="flex-wrap:wrap">
+        <select class="select" id="storage-release-mode" style="max-width:180px" title="批量释放内容">
+          <option value="extracted" selected>解压文件（推荐）</option>
+          <option value="raw_inputs">原始输入</option>
+          <option value="both">原始输入 + 解压文件</option>
+        </select>
+        <button class="btn btn-danger" id="storage-release-selected">${icon('trash')}释放选中</button>
+        <button class="btn" id="storage-refresh">${icon('refresh')}重新统计</button>
+      </div></div>
     <div class="card-body">
       <div class="grid grid-4" style="margin-bottom:14px">
         <div class="card stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
-        <div class="card stat"><div class="stat-icon info">${icon('folder')}</div><div><div class="stat-val">${fmtSize(summary.artifact_bytes)}</div><div class="stat-label">任务中间产物</div></div></div>
-        <div class="card stat"><div class="stat-icon ok">${icon('database')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">可立即释放</div></div></div>
-        <div class="card stat"><div class="stat-icon warn">${icon('hard-drive')}</div><div><div class="stat-val">${fmtSize(disk.free_bytes)}</div><div class="stat-label">磁盘剩余</div></div></div>
+        <div class="card stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
+        <div class="card stat"><div class="stat-icon ok">${icon('shield')}</div><div><div class="stat-val">${fmtSize(summary.retained_bytes)}</div><div class="stat-label">报告/证据等保留</div></div></div>
+        <div class="card stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">当前可释放</div></div></div>
       </div>
-      <div class="alert info">${icon('shield')}<div>重跑任务与原任务共享同一批输入文件。共享文件只有最后一个引用任务释放时才会删除；释放后该任务不能再重跑，但历史报告和证据仍可查看。</div></div>
+      <div class="alert info">${icon('shield')}<div>
+        <strong>解压文件</strong>只删除任务目录中的 <span class="mono">skills/*/unpacked</span>，报告、证据和案例不受影响；重跑会从原始日志重新解压。
+        <br><strong>原始输入</strong>会删除上传日志；共享文件只有最后一个引用任务释放时才删除。释放原始输入后该任务不能再重跑。
+        <br><span class="tiny muted">磁盘剩余：${fmtSize(disk.free_bytes)}</span>
+      </div></div>
       <div id="storage-status" class="small muted" style="margin:8px 0"></div>
       <div class="table-wrap"><table class="data"><thead><tr>
         <th><input type="checkbox" id="storage-check-all" aria-label="全选可释放任务"></th>
-        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>中间产物</th><th>合计</th><th>共享引用</th><th>操作</th>
+        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>解压文件</th><th>其它产物</th><th>合计</th><th>操作</th>
       </tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty">暂无任务</div></td></tr>'}</tbody></table></div>
     </div></div>`;
 
@@ -1256,33 +1363,42 @@ async function renderStoragePanel(panel) {
   panel.querySelector('#storage-refresh').addEventListener('click', () => renderStoragePanel(panel));
   panel.querySelector('#storage-release-selected').addEventListener('click', () => {
     const ids = [...panel.querySelectorAll('.storage-check:checked')].map((c) => c.dataset.task);
-    releaseTasks(panel, ids);
+    releaseTasks(panel, ids, panel.querySelector('#storage-release-mode').value);
   });
   panel.querySelectorAll('[data-release]').forEach((btn) => {
-    btn.addEventListener('click', () => releaseTasks(panel, [btn.dataset.release]));
+    btn.addEventListener('click', () => releaseTasks(panel, [btn.dataset.release], btn.dataset.releaseMode));
   });
   const activeJobs = items.map((x) => x.last_storage_job).filter((j) => j && ['queued', 'running'].includes(j.status));
   if (activeJobs.length) pollStorageJobs(panel, activeJobs.map((j) => j.id));
 }
 
-async function releaseTasks(panel, ids) {
-  if (!ids.length) { toast('请先选择可释放原始输入的任务', 'warn'); return; }
-  const items = [];
-  const ok = await confirmDialog(`将释放 ${ids.length} 个任务的原始上传日志。释放后不能重跑，历史报告仍保留；与其它任务共享的文件会保留到最后一个引用释放。确定继续？`,
-    { title: '释放原始输入', okText: '确认释放', danger: true });
+async function releaseTasks(panel, ids, mode = 'extracted') {
+  if (!ids.length) { toast('请先选择可释放的任务', 'warn'); return; }
+  const modeLabel = RELEASE_MODE_LABELS[mode] || '解压文件';
+  const detail = mode === 'raw_inputs'
+    ? '释放后不能重跑，历史报告和证据仍保留；共享文件会保留到最后一个引用释放。'
+    : mode === 'both'
+      ? '将同时删除解压文件和原始上传日志；报告和证据保留，但释放原始输入后不能重跑。'
+      : '只删除中间产物中的解压文件；报告、证据和案例保留，重跑会重新解压。';
+  const ok = await confirmDialog(`将释放 ${ids.length} 个任务的${modeLabel}。${detail} 确定继续？`,
+    { title: `释放${modeLabel}`, okText: '确认释放', danger: mode !== 'extracted' });
   if (!ok) return;
   const status = panel.querySelector('#storage-status');
-  status.textContent = '正在提交后台释放任务…';
+  if (status) status.textContent = `正在提交${modeLabel}释放任务…`;
+  const jobs = [];
   for (const id of ids) {
     try {
-      const res = await api(`/api/tasks/${encodeURIComponent(id)}/release`, { method: 'POST' });
-      items.push(res.job.id);
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/release`, {
+        method: 'POST', body: { mode },
+      });
+      jobs.push(res.job.id);
     } catch (err) {
       toast(`${id}: ${err.message}`, 'error', 6000);
     }
   }
-  if (items.length) pollStorageJobs(panel, items);
+  if (jobs.length) pollStorageJobs(panel, jobs);
 }
+
 
 function pollStorageJobs(panel, jobIds) {
   if (storagePollTimer) clearInterval(storagePollTimer);
@@ -1309,56 +1425,249 @@ function pollStorageJobs(panel, jobIds) {
 }
 
 
-function renderSystemView(view, info, config, updates, migrations) {
+function mcpEndpoint() {
+  return `${location.origin}/mcp`;
+}
+
+function copyText(text, btn) {
+  const done = () => { toast('已复制', 'ok'); if (btn) setBusy(btn, false); };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallback());
+  } else fallback();
+  function fallback() {
+    const box = document.createElement('textarea');
+    box.value = text; box.style.position = 'fixed'; box.style.opacity = '0';
+    document.body.appendChild(box); box.select();
+    try { document.execCommand('copy'); done(); }
+    catch { toast('复制失败，请手动选择文本', 'error'); if (btn) setBusy(btn, false); }
+    box.remove();
+  }
+}
+
+async function openMCPTokenModal(panel, current) {
+  const mode = current?.mode || 'read';
+  const m = modal({
+    title: '生成 MCP Token',
+    body: `<div class="alert warn">${icon('alert')}<div>
+      Token 只在生成时显示一次，平台只保存 SHA-256 哈希。生成新 Token 会立即使旧 Token 失效。
+    </div></div>
+    <div class="field"><label>访问模式</label>
+      <select id="mcp-token-mode">
+        <option value="read" ${mode === 'read' ? 'selected' : ''}>read · 只读（推荐）</option>
+        <option value="admin" ${mode === 'admin' ? 'selected' : ''}>admin · 允许执行白名单写工具</option>
+      </select>
+      <div class="hint">read 仅暴露查询类工具；admin 还允许删除备份、释放任务空间、修改通知偏好等低风险写操作，升级/回滚、用户和模型变更永不通过 MCP 执行。</div>
+    </div>
+    <div class="field"><label>客户端连接地址</label>
+      <input readonly value="${esc(mcpEndpoint())}"></div>`,
+    footer: `<button class="btn btn-ghost" data-act="close-modal">取消</button>
+      <button class="btn btn-primary" data-create-token>${icon('key')}生成 Token</button>`,
+    wide: true,
+  });
+  const btn = m.foot.querySelector('[data-create-token]');
+  btn.addEventListener('click', async () => {
+    const selected = m.body.querySelector('#mcp-token-mode').value;
+    setBusy(btn, true, '生成中');
+    try {
+      const res = await api('/api/mcp/token', { method: 'POST', body: { mode: selected } });
+      const info = res.mcp || {};
+      const token = info.token || '';
+      const cfg = `{
+  "mcpServers": {
+    "bbu-faultscope": {
+      "type": "http",
+      "url": "${mcpEndpoint()}",
+      "headers": { "Authorization": "Bearer ${token}" }
+    }
+  }
+}`;
+      m.body.innerHTML = `<div class="alert ok">${icon('check')}<div>Token 已生成（${esc(info.mode)} 模式）。请立即复制，关闭后无法再次查看。</div></div>
+        <div class="field"><label>Token</label>
+          <textarea id="mcp-new-token" readonly rows="3" class="mono">${esc(token)}</textarea>
+          <div style="margin-top:6px"><button class="btn btn-sm" data-copy-token>${icon('copy')}复制 Token</button></div>
+        </div>
+        <div class="field"><label>客户端配置示例</label>
+          <textarea id="mcp-client-config" readonly rows="8" class="mono">${esc(cfg)}</textarea>
+          <div style="margin-top:6px"><button class="btn btn-sm" data-copy-config>${icon('copy')}复制配置</button></div>
+        </div>
+        <div class="alert info">${icon('info')}<div>MCP 默认只接受本机 loopback 请求；外部 AI 客户端请与平台运行在同一台机器。需要内网访问时由管理员显式开启 <code>mcp_allow_remote</code>。</div></div>`;
+      btn.remove();
+      m.foot.innerHTML = `<button class="btn btn-primary" data-act="close-modal">完成</button>`;
+      m.body.querySelector('[data-copy-token]').addEventListener('click', (e) => copyText(token, e.currentTarget));
+      m.body.querySelector('[data-copy-config]').addEventListener('click', (e) => copyText(cfg, e.currentTarget));
+      m.mask.addEventListener('click', (event) => {
+        if (event.target.closest('[data-act="close-modal"]')) {
+          setTimeout(() => renderMCPPanel(panel), 40);
+        }
+      });
+    } catch (err) {
+      toast(err.message, 'error');
+      setBusy(btn, false);
+    }
+  });
+}
+
+function renderMCPPanel(panel, payload) {
+  const info = payload?.mcp || payload || {};
+  if (payload?.error) {
+    panel.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(payload.error)}</div></div>`;
+    return;
+  }
+  const token = info.configured ? `<span class="badge ok">已配置</span>` : `<span class="badge warn">未生成</span>`;
+  const names = info.tool_names || [];
+  panel.innerHTML = `
+    <div class="grid grid-2" style="margin-bottom:14px">
+      <div class="card"><div class="card-head"><h2>MCP Server</h2>${token}</div><div class="card-body">
+        <div class="kv">
+          <div class="k">端点</div><div class="v mono">${esc(info.endpoint || '/mcp')}</div>
+          <div class="k">传输</div><div class="v">${esc(info.transport || 'HTTP JSON-RPC')}</div>
+          <div class="k">访问范围</div><div class="v">${info.local_only ? '仅本机 loopback' : '允许内网（已显式开启）'}</div>
+          <div class="k">协议版本</div><div class="v mono small">${esc((info.protocol_versions || []).join(' / '))}</div>
+          <div class="k">当前模式可见工具</div><div class="v">${info.tools ?? 0} 个</div>
+          <div class="k">文档资源</div><div class="v">${info.resources ?? 0} 份</div>
+        </div>
+      </div></div>
+      <div class="card"><div class="card-head"><h2>访问 Token</h2></div><div class="card-body">
+        ${info.configured ? `<div class="kv">
+          <div class="k">模式</div><div class="v">${esc(info.mode || '—')}</div>
+          <div class="k">绑定账号</div><div class="v">${esc(info.username || '—')}</div>
+          <div class="k">创建时间</div><div class="v">${esc(fmtDate(info.created_at))}</div>
+          <div class="k">最近使用</div><div class="v">${info.last_used_at ? esc(fmtDate(info.last_used_at)) : '尚未使用'}</div>
+        </div>` : `<div class="alert warn">${icon('alert')}<div>${esc(info.hint || '尚未生成 MCP Token，外部 AI 客户端暂时无法连接。')}</div></div>`}
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="mcp-generate">${icon('key')}${info.configured ? '轮换 Token' : '生成 Token'}</button>
+          ${info.configured ? `<button class="btn btn-danger" id="mcp-revoke">${icon('trash')}撤销 Token</button>` : ''}
+        </div>
+        <div class="tiny muted" style="margin-top:8px">Token 仅保存 SHA-256 哈希；轮换后旧 Token 立即失效。账号停用后 Token 同步失效。</div>
+      </div></div>
+    </div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div>
+      <div class="card-body">
+        <div class="alert info">${icon('info')}<div>推荐使用 <strong>read</strong> 模式。将以下配置加入支持 HTTP MCP 的客户端；Token 需先在上方生成。</div></div>
+        <textarea readonly rows="10" class="mono" id="mcp-config-example">{
+  "mcpServers": {
+    "bbu-faultscope": {
+      "type": "http",
+      "url": "${mcpEndpoint()}",
+      "headers": { "Authorization": "Bearer &lt;YOUR_TOKEN&gt;" }
+    }
+  }
+}</textarea>
+        <div style="margin-top:8px"><button class="btn btn-sm" id="mcp-copy-config">${icon('copy')}复制配置模板</button></div>
+      </div></div>
+    <div class="card"><div class="card-head"><h2>当前模式工具</h2><span class="sub">${info.mode || 'read'} 模式</span></div>
+      <div class="card-body"><div class="assistant-suggestions">${names.length ? names.map((n) => `<span class="badge" style="font-family:var(--mono)">${esc(n)}</span>`).join('') : '<span class="muted">暂无</span>'}</div>
+        <div class="tiny muted" style="margin-top:8px">升级/回滚、用户与模型变更不通过 MCP 暴露；写工具仍要求 <code>confirm=true</code>。</div>
+      </div></div>`;
+  panel.querySelector('#mcp-generate').addEventListener('click', () => openMCPTokenModal(panel, info));
+  panel.querySelector('#mcp-revoke')?.addEventListener('click', async () => {
+    if (!await confirmDialog('撤销后所有外部 MCP 客户端立即断开，确定继续？', { danger: true, title: '撤销 MCP Token' })) return;
+    try {
+      await api('/api/mcp/token', { method: 'DELETE' });
+      toast('Token 已撤销', 'ok');
+      renderMCPPanel(panel);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  const cfg = panel.querySelector('#mcp-config-example');
+  panel.querySelector('#mcp-copy-config').addEventListener('click', (e) => copyText(
+    cfg.value.replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
+}
+
+function renderSystemView(view, info, config, updates, migrations, mcp) {
+  const tabs = [['overview', '概览'], ['runtime', '运行参数'], ['storage', '任务空间'], ['backups', '备份'], ['migration', '迁移'], ['update', '升级'], ['mcp', 'MCP / 助手']];
   view.innerHTML = `
-    <div class="grid grid-4" style="margin-bottom:16px">
-      <div class="card stat"><div class="stat-icon">${icon('info')}</div><div><div class="stat-val">v${esc(info.version)}</div><div class="stat-label">平台版本</div></div></div>
-      <div class="card stat"><div class="stat-icon info">${icon('cpu')}</div><div><div class="stat-val">${esc(info.python)}</div><div class="stat-label">Python</div></div></div>
-      <div class="card stat"><div class="stat-icon ok">${icon('clock')}</div><div><div class="stat-val">${fmtDur(info.uptime_sec)}</div><div class="stat-label">已运行</div></div></div>
-      <div class="card stat"><div class="stat-icon warn">${icon('activity')}</div><div><div class="stat-val">${info.workers?.running || 0} / ${info.workers?.max_workers || '-'}</div><div class="stat-label">运行 / 并发上限</div></div></div>
-    </div>
-    <div class="grid grid-2">
-      <div class="card"><div class="card-head"><h2>运行环境</h2></div><div class="card-body">
-        <div class="kv">
-          <div class="k">平台</div><div class="v">${esc(info.platform)}</div>
-          <div class="k">品牌</div><div class="v">${esc(info.brand || '—')}</div>
-          <div class="k">数据目录</div><div class="v mono">${esc(info.paths?.data)}</div>
-          <div class="k">技能目录</div><div class="v mono">${esc(info.paths?.skills)}</div>
-          <div class="k">案例目录</div><div class="v mono">${esc(info.paths?.cases)}</div>
-          <div class="k">元 Skill</div><div class="v mono">${esc(info.paths?.meta_skill)}</div>
-          <div class="k">示例技能</div><div class="v">${info.demo_installed ? '已安装（可在技能库停用）' : '未安装'}</div>
-        </div>
+    <div class="system-tabs-bar"><div class="tabs system-tabs" role="tablist">
+      ${tabs.map(([key, label], index) => `<button class="${index === 0 ? 'active' : ''}" role="tab"
+        aria-selected="${index === 0 ? 'true' : 'false'}" data-system-tab="${key}">${label}</button>`).join('')}
+    </div></div>
+    <div class="system-panel" data-system-panel="overview">
+      <div class="grid grid-4" style="margin-bottom:16px">
+        <div class="card stat"><div class="stat-icon">${icon('info')}</div><div><div class="stat-val">v${esc(info.version)}</div><div class="stat-label">平台版本</div></div></div>
+        <div class="card stat"><div class="stat-icon info">${icon('cpu')}</div><div><div class="stat-val">${esc(info.python)}</div><div class="stat-label">Python</div></div></div>
+        <div class="card stat"><div class="stat-icon ok">${icon('clock')}</div><div><div class="stat-val">${fmtDur(info.uptime_sec)}</div><div class="stat-label">已运行</div></div></div>
+        <div class="card stat"><div class="stat-icon warn">${icon('activity')}</div><div><div class="stat-val">${info.workers?.running || 0} / ${info.workers?.max_workers || '-'}</div><div class="stat-label">运行 / 并发上限</div></div></div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card"><div class="card-head"><h2>运行环境</h2></div><div class="card-body">
+          <div class="kv">
+            <div class="k">平台</div><div class="v">${esc(info.platform)}</div>
+            <div class="k">品牌</div><div class="v">${esc(info.brand || '—')}</div>
+            <div class="k">数据目录</div><div class="v mono">${esc(info.paths?.data)}</div>
+            <div class="k">技能目录</div><div class="v mono">${esc(info.paths?.skills)}</div>
+            <div class="k">案例目录</div><div class="v mono">${esc(info.paths?.cases)}</div>
+            <div class="k">元 Skill</div><div class="v mono">${esc(info.paths?.meta_skill)}</div>
+            <div class="k">示例技能</div><div class="v">${info.demo_installed ? '已安装（可在技能库停用）' : '未安装'}</div>
+          </div>
+        </div></div>
+        <div class="card"><div class="card-head"><h2>并发与预算</h2></div><div class="card-body">
+          <div class="kv">
+            <div class="k">任务并发</div><div class="v">${info.workers?.max_workers ?? '—'} 个任务</div>
+            <div class="k">技能扇出</div><div class="v">单任务最多 ${config.max_skill_parallel ?? info.workers?.max_skill_parallel ?? '—'} 个技能并行</div>
+            <div class="k">LLM 调用上限</div><div class="v">每任务 ${config.max_llm_calls ?? '—'} 次</div>
+            <div class="k">Token 上限</div><div class="v">${(config.max_total_tokens || 0).toLocaleString()}</div>
+            <div class="k">任务超时</div><div class="v">${config.task_timeout_sec ?? '—'} 秒</div>
+            <div class="k">技能超时</div><div class="v">${config.skill_timeout_sec ?? '—'} 秒</div>
+            <div class="k">上传上限</div><div class="v">${config.max_upload_mb ?? '—'} MB</div>
+          </div>
+          <div class="alert info" style="margin-top:12px">${icon('info')}<div>预算由任务级 Budget 强制执行，模型调用次数/Token/墙钟任一超限即停止 AI 路径并回退确定性结果，不会无限循环。</div></div>
+        </div></div>
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-head"><h2>公开配置</h2><span class="sub">只读视图（密钥不在此列）</span></div>
+        <div class="card-body tight table-wrap"><table class="data"><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
+          ${Object.entries(config).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td>
+            <td class="mono small">${esc(typeof v === 'object' ? JSON.stringify(v) : String(v))}</td></tr>`).join('')}
+        </tbody></table></div></div>
+      <div class="card" style="margin-top:16px"><div class="card-body small muted">
+        <strong>离线部署：</strong>平台后端仅使用 Python 3.12 标准库，PyYAML 已 vendor 到 vendor/yaml；前端为免构建原生 JS，不依赖 npm/CDN。
+        数据、技能、案例与密钥均保存在本机 data 目录。
       </div></div>
-      <div class="card"><div class="card-head"><h2>并发与预算</h2></div><div class="card-body">
-        <div class="kv">
-          <div class="k">任务并发</div><div class="v">${info.workers?.max_workers ?? '—'} 个任务</div>
-          <div class="k">技能扇出</div><div class="v">单任务最多 ${config.max_skill_parallel ?? info.workers?.max_skill_parallel ?? '—'} 个技能并行</div>
-          <div class="k">LLM 调用上限</div><div class="v">每任务 ${config.max_llm_calls ?? '—'} 次</div>
-          <div class="k">Token 上限</div><div class="v">${(config.max_total_tokens || 0).toLocaleString()}</div>
-          <div class="k">任务超时</div><div class="v">${config.task_timeout_sec ?? '—'} 秒</div>
-          <div class="k">技能超时</div><div class="v">${config.skill_timeout_sec ?? '—'} 秒</div>
-          <div class="k">上传上限</div><div class="v">${config.max_upload_mb ?? '—'} MB</div>
-        </div>
-        <div class="alert info" style="margin-top:12px">${icon('info')}<div>预算由任务级 Budget 强制执行，模型调用次数/Token/墙钟任一超限即停止 AI 路径并回退确定性结果，不会无限循环。</div></div>
-      </div></div>
     </div>
-    <div id="runtime-config-panel" style="margin-top:16px"><div class="card"><div class="card-body">${icon('refresh')} 运行配置加载中…</div></div></div>
-    <div id="storage-panel" style="margin-top:16px"><div class="card"><div class="card-body">${icon('refresh')} 任务空间加载中…</div></div></div>
-    <div id="migration-panel"></div>
-    <div id="update-panel" style="margin-top:16px"></div>
-    <div class="card" style="margin-top:16px"><div class="card-head"><h2>公开配置</h2><span class="sub">只读视图（密钥不在此列）</span></div>
-      <div class="card-body tight table-wrap"><table class="data"><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
-        ${Object.entries(config).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td>
-          <td class="mono small">${esc(typeof v === 'object' ? JSON.stringify(v) : String(v))}</td></tr>`).join('')}
-      </tbody></table></div></div>
-    <div class="card" style="margin-top:16px"><div class="card-body small muted">
-      <strong>离线部署：</strong>平台后端仅使用 Python 3.12 标准库，PyYAML 已 vendor 到 vendor/yaml；前端为免构建原生 JS，不依赖 npm/CDN。
-      数据、技能、案例与密钥均保存在本机 data 目录。
-    </div></div>`;
-  renderMigrationPanel(view.querySelector('#migration-panel'), migrations || { items: [] });
-  renderUpdatePanel(view.querySelector('#update-panel'), updates || { items: [] }, info.version);
-  renderRuntimeConfigPanel(view.querySelector('#runtime-config-panel'));
-  renderStoragePanel(view.querySelector('#storage-panel'));
+    <div class="system-panel" data-system-panel="runtime" hidden>
+      <div id="runtime-config-panel"><div class="card"><div class="card-body">${icon('refresh')} 运行配置加载中…</div></div></div>
+    </div>
+    <div class="system-panel" data-system-panel="storage" hidden>
+      <div id="storage-panel"><div class="card"><div class="card-body">${icon('refresh')} 任务空间加载中…</div></div></div>
+    </div>
+    <div class="system-panel" data-system-panel="backups" hidden>
+      <div id="backup-panel"><div class="card"><div class="card-body">${icon('refresh')} 备份记录加载中…</div></div></div>
+    </div>
+    <div class="system-panel" data-system-panel="migration" hidden><div id="migration-panel"></div></div>
+    <div class="system-panel" data-system-panel="update" hidden><div id="update-panel"></div></div>
+    <div class="system-panel" data-system-panel="mcp" hidden><div id="mcp-panel"></div></div>`;
+  const loaded = { overview: true, runtime: false, storage: false, backups: false, migration: false, update: false, mcp: false };
+  const show = (name) => {
+    view.querySelectorAll('[data-system-tab]').forEach((tab) => {
+      const active = tab.dataset.systemTab === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    view.querySelectorAll('[data-system-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.systemPanel !== name;
+    });
+    if (name === 'runtime' && !loaded.runtime) {
+      loaded.runtime = true;
+      renderRuntimeConfigPanel(view.querySelector('#runtime-config-panel'));
+    } else if (name === 'storage' && !loaded.storage) {
+      loaded.storage = true;
+      renderStoragePanel(view.querySelector('#storage-panel'));
+    } else if (name === 'backups' && !loaded.backups) {
+      loaded.backups = true;
+      renderBackupPanel(view.querySelector('#backup-panel'));
+    } else if (name === 'migration' && !loaded.migration) {
+      loaded.migration = true;
+      renderMigrationPanel(view.querySelector('#migration-panel'), migrations || { items: [] });
+    } else if (name === 'update' && !loaded.update) {
+      loaded.update = true;
+      renderUpdatePanel(view.querySelector('#update-panel'), updates || { items: [] }, info.version);
+    } else if (name === 'mcp' && !loaded.mcp) {
+      loaded.mcp = true;
+      renderMCPPanel(view.querySelector('#mcp-panel'), mcp || {});
+    }
+  };
+  view.querySelectorAll('[data-system-tab]').forEach((tab) => {
+    tab.addEventListener('click', () => show(tab.dataset.systemTab));
+  });
+  show('overview');
   state.cleanup = () => {
     if (updatePollTimer) { clearInterval(updatePollTimer); updatePollTimer = null; }
     if (migrationPollTimer) { clearInterval(migrationPollTimer); migrationPollTimer = null; }

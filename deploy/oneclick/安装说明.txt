@@ -10,9 +10,9 @@ BBU FaultScope 一键部署包说明
 一、安装（root）
 ----------------
 1. 校验并解压：
-   sha256sum -c bbu-fault-platform-1.8.0-ubuntu1604-offline.tar.gz.sha256
-   tar -xzf bbu-fault-platform-1.8.0-ubuntu1604-offline.tar.gz
-   cd bbu-fault-platform-1.8.0-ubuntu1604-offline
+   sha256sum -c bbu-fault-platform-1.20.1-ubuntu1604-offline.tar.gz.sha256
+   tar -xzf bbu-fault-platform-1.20.1-ubuntu1604-offline.tar.gz
+   cd bbu-fault-platform-1.20.1-ubuntu1604-offline
 
 2. 一键安装：
    sudo bash install.sh
@@ -55,8 +55,8 @@ BBU FaultScope 一键部署包说明
 4. 升级异常可在同一页面回滚。
 
 更新包由研发侧生成，命名形如：
-   bbu-fault-platform-1.10.0-offline.tar.gz
-   bbu-fault-platform-1.10.0-offline.tar.gz.sha256
+   bbu-fault-platform-1.20.1-offline.tar.gz
+   bbu-fault-platform-1.20.1-offline.tar.gz.sha256
 
 更新包只包含程序代码，不需要再次安装 Python；升级助手会使用
 /opt/bbu-python313/bin/python3.13 执行数据库迁移。
@@ -83,4 +83,4 @@ BBU FaultScope 一键部署包说明
 - 页面 403/500：确认程序目录 root 只读、数据目录属于 bbu 用户。
 - 首次登录不知道密码：查看数据目录/data/初始管理员密码.txt。
 - 解压/校验失败：先 sha256sum -c，确认传输完整。
-- 模型连接失败：企业内网 MaaS 需在企业内网/VPN；个人 Key 在个人中心配置。
+- 模型连接失败：企业内网 MaaS 需在办公网/VPN；个人 Key 在个人中心配置。

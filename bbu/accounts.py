@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import sqlite3
 from datetime import timedelta
 from typing import Any
 
@@ -60,8 +61,6 @@ def public_user(row: dict[str, Any]) -> dict[str, Any]:
         "active": bool(row.get("active")),
         "status": normalize_status(row),
         "must_change": bool(row.get("must_change")),
-        "team": row.get("team") or "",
-        "site": row.get("site") or "",
         "created_at": row.get("created_at"),
         "last_login_at": row.get("last_login_at"),
         "expires_at": row.get("expires_at"),
@@ -72,7 +71,7 @@ def public_user(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_invite(db: Database, actor_id: int, username: str, display_name: str,
-                  role: str, team: str = "", site: str = "", hours: int = 24,
+                  role: str, hours: int = 24,
                   expires_at: str | None = None) -> tuple[dict[str, Any], str]:
     username = username.strip()
     if not USERNAME_RE.fullmatch(username):
@@ -94,27 +93,26 @@ def create_invite(db: Database, actor_id: int, username: str, display_name: str,
         "%Y-%m-%dT%H:%M:%SZ")
     if existing:
         db.execute(
-            "UPDATE users SET display_name=?, role=?, team=?, site=?, invited_by=?, "
+            "UPDATE users SET display_name=?, role=?, invited_by=?, "
             "invited_at=?, updated_at=?, status='invited', active=0, must_change=1 WHERE id=?",
-            (display_name.strip() or username, role, team.strip()[:64], site.strip()[:64],
-             actor_id, now, now, existing["id"]))
+            (display_name.strip() or username, role, actor_id, now, now, existing["id"]))
     else:
         db.execute(
             "INSERT INTO users(username,display_name,role,password_hash,must_change,active,"
-            "created_at,status,team,site,invited_by,invited_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at,status,invited_by,invited_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (username, display_name.strip() or username, role, "", 1, 0, now,
-             "invited", team.strip()[:64], site.strip()[:64], actor_id, now, now))
+             "invited", actor_id, now, now))
     db.execute(
-        "INSERT INTO user_invites(id,username,display_name,role,team,site,code_hash,"
-        "expires_at,created_at,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (invite_id, username, display_name.strip() or username, role, team.strip()[:64],
-         site.strip()[:64], invite_hash(code), expiry, now, actor_id),
+        "INSERT INTO user_invites(id,username,display_name,role,code_hash,"
+        "expires_at,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)",
+        (invite_id, username, display_name.strip() or username, role,
+         invite_hash(code), expiry, now, actor_id),
     )
     invite = {
         "id": invite_id, "username": username,
         "display_name": display_name.strip() or username,
-        "role": role, "team": team.strip()[:64], "site": site.strip()[:64],
+        "role": role,
         "expires_at": expiry, "created_at": now, "status": "pending",
     }
     return invite, code
@@ -138,7 +136,6 @@ def list_invites(db: Database, status: str = "all") -> list[dict[str, Any]]:
         result.append({
             "id": row["id"], "username": row["username"],
             "display_name": row["display_name"], "role": row["role"],
-            "team": row["team"], "site": row["site"],
             "expires_at": row["expires_at"], "created_at": row["created_at"],
             "used_at": row["used_at"], "revoked_at": row["revoked_at"],
             "status": state,
@@ -158,6 +155,27 @@ def revoke_invite(db: Database, invite_id: str) -> dict[str, Any]:
     return db.one("SELECT * FROM user_invites WHERE id=?", (invite_id,)) or row
 
 
+def register_user(db: Database, username: str, password: str, display_name: str = "",
+                  domain: str = "", min_length: int = 10) -> dict[str, Any]:
+    """自助注册：固定创建普通工程师账号，不开放角色和班组/站点字段。"""
+    username = str(username or "").strip()
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError("用户名只能包含字母/数字/._-，3–32 位")
+    if db.one("SELECT id FROM users WHERE username=?", (username,)):
+        raise ValueError("用户名已存在")
+    validate_password(password, username, min_length)
+    now = iso_now()
+    try:
+        uid = db.execute(
+            "INSERT INTO users(username,display_name,role,password_hash,must_change,active,"
+            "created_at,status,domain,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (username, (str(display_name or "").strip() or username)[:64], "engineer",
+             hash_password(password), 0, 1, now, "active", str(domain or "").strip()[:64], now))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("用户名已存在") from exc
+    return db.one("SELECT * FROM users WHERE id=?", (uid,)) or {}
+
+
 def activate_invite(db: Database, code: str, password: str, min_length: int = 10,
                     ip: str = "") -> dict[str, Any]:
     code = code.strip()
@@ -175,17 +193,17 @@ def activate_invite(db: Database, code: str, password: str, min_length: int = 10
         uid = existing["id"]
         db.execute(
             "UPDATE users SET password_hash=?, must_change=0, active=1, status='active', "
-            "display_name=?, role=?, team=?, site=?, expires_at=NULL, invited_by=?, "
+            "display_name=?, role=?, expires_at=NULL, invited_by=?, "
             "invited_at=?, updated_at=? WHERE id=?",
-            (hash_password(password), row["display_name"], row["role"], row["team"],
-             row["site"], row["created_by"], row["created_at"], now, uid))
+            (hash_password(password), row["display_name"], row["role"],
+             row["created_by"], row["created_at"], now, uid))
     else:
         uid = db.execute(
             "INSERT INTO users(username,display_name,role,password_hash,must_change,active,created_at,"
-            "status,team,site,expires_at,invited_by,invited_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "status,expires_at,invited_by,invited_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["username"], row["display_name"], row["role"], hash_password(password), 0, 1,
-             now, "active", row["team"], row["site"], None, row["created_by"], row["created_at"], now),
+             now, "active", None, row["created_by"], row["created_at"], now),
         )
     db.execute("UPDATE user_invites SET used_at=?, used_by=? WHERE id=?", (now, uid, row["id"]))
     return db.one("SELECT * FROM users WHERE id=?", (uid,)) or {}

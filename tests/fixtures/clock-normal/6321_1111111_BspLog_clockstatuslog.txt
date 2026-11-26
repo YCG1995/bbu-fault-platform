@@ -1,0 +1,2 @@
+Clk[032]2026-01-01,00:00:00 LockSatFail: OK
+Clk[021]2026-01-01,00:00:01 Ref:1 Lock:12 FixT:5 FixF:1

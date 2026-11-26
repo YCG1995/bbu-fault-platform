@@ -7,6 +7,7 @@ LLM 只出现在四处：规划（1 次）、补规划（最多 1 次）、冲�
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 import time
@@ -16,8 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from .ai import AIGateway, AIError, Budget, BudgetExceeded, NoModelError
+from .data_egress import DataEgressPolicy
 from .db import Database
 from .evidence import assess_evidence
+from .agent import BoundedAgent
+from .calibration import CalibrationStore
+from .decision_cards import build_decision_cards, decision_summary
+from .claims import (build_claims, claims_markdown, validate_claims,
+                     validate_narrative)
+from .evidence_store import EvidenceStore
 from .learning import ExperienceStore
 from .notifications import create_notification
 from .planner import (GATE_LABELS, compact_plan, deterministic_plan, gate_allows, needs_replan,
@@ -28,7 +36,42 @@ from .prompts import (ARBITER_SCHEMA, ARBITER_SYSTEM, PLAN_SCHEMA, PLANNER_SYSTE
 from .reports import (build_narrative_facts, compose_markdown, evidence_for_prompt,
                       render_html, validate_citations)
 from .skills import Matcher, Skill, SkillRegistry, SkillRunner, inventory_inputs, shallow_archive_text
+from .session import DiagnosticSession
+from .tool_contract import ToolPolicy
 from .util import iso_now, read_json, truncate, write_json, write_text
+
+def _json_load(value: Any, default: Any) -> Any:
+    try:
+        text = value if isinstance(value, str) else json.dumps(value or {})
+        return json.loads(text or "{}") if text else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _skill_source_hints(skill: Any) -> list[str]:
+    """从子 Skill profile 抽取声明的日志来源，供 HypothesisState 记录适用条件。"""
+    if not skill:
+        return []
+    hints: list[str] = []
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 7:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("globs", "paths", "name") and isinstance(
+                        value, (str, list)) and len(hints) < 6:
+                    rows = value if isinstance(value, list) else [value]
+                    hints.extend(str(x) for x in rows[:3] if str(x).strip())
+                elif isinstance(value, (dict, list)):
+                    walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(getattr(skill, "profile", {}) or {})
+    return list(dict.fromkeys(hints))[:6]
+
 
 STAGES = {
     "queued": "排队",
@@ -54,6 +97,20 @@ class TaskPipeline:
         self.runner = runner
         self.matcher = Matcher(registry)
         self.experiences = experiences or ExperienceStore(db)
+        self.egress = DataEgressPolicy.for_diagnostic(config)
+        self.evidence_store = EvidenceStore(db)
+        self.tools = ToolPolicy(db, config)
+        self.calibration = CalibrationStore(db, config)
+        self.agent = BoundedAgent(db, config)
+        if getattr(runner, "policy", None) is None:
+            runner.db = db
+            runner.policy = self.tools
+
+    def _audit_model_egress(self, task: dict[str, Any], stage: str,
+                            original: Any, sanitized: Any) -> None:
+        detail = {"stage": stage, **self.egress.payload_audit(original, sanitized)}
+        self.db.audit(task.get("user_id"), task.get("username"),
+                      "diagnostic_model_egress", str(task.get("id") or ""), detail)
 
     # ---------- 基础设施 ----------
     def _emit(self, task_id: str, level: str, message: str,
@@ -99,16 +156,40 @@ class TaskPipeline:
         task_dir.mkdir(parents=True, exist_ok=True)
         stage_times: dict[str, float] = {}
         models_used: set[str] = set()
+        session = DiagnosticSession(self.db, task_id)
+        session_snapshot = session.ensure()
+        session_round = int(session_snapshot.get("supplement_round") or 0)
+        try:
+            prior_budget = json.loads(task.get("session_budget_json") or "{}")
+        except json.JSONDecodeError:
+            prior_budget = {}
+        if not isinstance(prior_budget, dict):
+            prior_budget = {}
+
+        def _budget_event(kind: str, msg: str, data: dict | None) -> None:
+            self._emit(task_id, "debug", msg, task.get("stage", ""), data or {})
+            try:
+                self.db.execute("UPDATE tasks SET session_budget_json=? WHERE id=?",
+                                (json.dumps(budget.snapshot(), ensure_ascii=False), task_id))
+            except Exception as exc:  # noqa: BLE001 - 预算落库失败要留痕，但不能掩盖原错误
+                self._emit(task_id, "warning", f"跨轮预算写入失败：{exc}", task.get("stage", ""))
+
         budget = Budget(
             max_calls=int(self.config.get("max_llm_calls", 12)),
             max_tokens=int(self.config.get("max_total_tokens", 200000)),
             deadline=time.time() + int(self.config.get("task_timeout_sec", 2400)),
-            on_event=lambda kind, msg, data: self._emit(task_id, "debug", msg, task.get("stage", ""), data),
+            on_event=_budget_event, prior=prior_budget,
         )
-        resume = bool(task.get("resume_count")) and (task_dir / "plan.json").exists() \
-            and (task_dir / "routing.json").exists()
+        resume = bool(task.get("resume_count") or task.get("continuation_count")) \
+            and (task_dir / "plan.json").exists() and (task_dir / "routing.json").exists()
         existing_results = self._load_skill_results(task_id) if resume else []
-        replan_done = resume and (task_dir / "replan.json").exists()
+        replan_done = resume and session_round == 0 and (task_dir / "replan.json").exists()
+        session.append("run_started", {
+            "state": "planning" if resume else "intake",
+            "supplement_round": session_round,
+            "continuation": bool(task.get("continuation_count")),
+            "budget": budget.snapshot(),
+        }, event_key=f"run-start-{session_round}-{int(resume)}")
 
         def _mark(stage: str) -> None:
             stage_times[stage] = time.time()
@@ -156,14 +237,27 @@ class TaskPipeline:
                     resume = False
                 else:
                     replan_file = task_dir / "replan.json"
-                    if replan_file.exists():
+                    if session_round == 0 and replan_file.exists():
                         replan_plan = read_json(replan_file, {}) or {}
                         if replan_plan.get("steps"):
                             plan["steps"] = (plan.get("steps") or []) + replan_plan["steps"]
                             plan["resume_replan_merged"] = True
+                    invalidated = set((session_snapshot.get("last_input") or {}).get(
+                        "invalidated_skills") or [])
+                    invalidated.update(row["skill_name"] for row in self.db.all(
+                        "SELECT skill_name FROM task_skills WHERE task_id=? AND invalidated=1",
+                        (task_id,)))
+                    if invalidated:
+                        for step in plan.get("steps") or []:
+                            if any(name in invalidated for name in (step.get("skills") or [])):
+                                step.pop("status", None)
+                                step.pop("skill_results", None)
+                        plan.pop("replan", None)
                     self._emit(task_id, "warning",
-                               f"服务重启，从检查点恢复：已有 {len(existing_results)} 个技能结果，"
-                               "跳过重复执行", "planning")
+                               f"从检查点恢复：已有 {len(existing_results)} 个可复用技能结果，"
+                               f"本轮补充失效的技能将重新执行" if session_round
+                               else f"服务重启，从检查点恢复：已有 {len(existing_results)} 个技能结果，跳过重复执行",
+                               "planning")
                     self._stage(task, "planning", 22,
                                 f"断点恢复：{len(plan.get('steps') or [])} 个波次，"
                                 f"已有 {len(existing_results)} 个技能结果")
@@ -192,10 +286,14 @@ class TaskPipeline:
                     entry = s.catalog_entry()
                     entry["rule_score"] = round(scores.get(s.name, 0), 1)
                     catalog.append(entry)
+                options = _json_load(task.get("options_json"), {})
                 experiences = self.experiences.search(
                     task["description"] or match_text, inventory.get("detected_hints") or [],
                     all_skills[0].name if all_skills else "", limit=3,
-                    include_unreviewed=bool(self.config.get("experience_include_unreviewed", False)))
+                    include_unreviewed=bool(self.config.get("experience_include_unreviewed", False)),
+                    device_type=str(options.get("device_type") or ""),
+                    software_version=str(options.get("software_version") or ""),
+                    exclude_task=str(task.get("id") or ""), with_counterexamples=True)
                 plan, plan_meta = self._plan(task, inventory, catalog, experiences, scores,
                                              budget, models_used)
                 plan["experience_refs"] = [
@@ -223,6 +321,19 @@ class TaskPipeline:
                             f"{len(plan_skill_names(plan))} 个技能")
                 _mark("planning")
 
+            agent_trace = self.agent.review_plan(task, plan, all_skills,
+                                                 existing_results)
+            write_json(task_dir / "agent-trace.json", agent_trace)
+            self._emit(task_id, "info",
+                       f"有界 Agent（{agent_trace['mode']}）动作 "
+                       f"{agent_trace['action_count']}/{agent_trace['limits']['max_steps']} 波次；"
+                       f"违规 {len(agent_trace['violations'])} 项",
+                       "planning", {"agent_trace": agent_trace})
+            if agent_trace.get("violations") and agent_trace["mode"] == "bounded":
+                return self._needs_data(
+                    task, task_dir, stage_times, budget,
+                    ["有界 Agent 拒绝执行计划：" + "；".join(agent_trace["violations"][:4])],
+                    "计划越过固定动作空间", inventory, routing, plan)
             if cancel_event.is_set():
                 return self._finish_cancelled(task, task_dir)
 
@@ -234,6 +345,7 @@ class TaskPipeline:
                     "未生成可执行的诊断计划", inventory, routing, plan)
 
             # 3. 按计划执行：波次内并行，波次间按门槛推进
+            self._init_hypotheses(task, session, plan, routing)
             self._stage(task, "fanout", 25, "按 AI 计划开始执行并行技能")
             results, executed = self._execute_plan(
                 task, plan, inputs, task_dir, cancel_event, budget, models_used, existing_results,
@@ -266,6 +378,7 @@ class TaskPipeline:
             if cancel_event.is_set():
                 return self._finish_cancelled(task, task_dir, results)
 
+            self._init_hypotheses(task, session, plan, routing)
             if not results:
                 return self._needs_data(
                     task, task_dir, stage_times, budget,
@@ -275,6 +388,19 @@ class TaskPipeline:
             # 5. 仲裁
             self._stage(task, "arbitration", 70, "汇总计划执行结果，进行证据仲裁")
             arbitration = self._arbitrate(task, results, budget, models_used)
+            self._sync_hypotheses(task, session, results, arbitration)
+            chosen_for_cards = arbitration.get("chosen_skill") or ""
+            if chosen_for_cards:
+                skill_for_cards = self.registry.get(chosen_for_cards)
+                chosen_result = next((r for r in results
+                                      if r.get("skill_name") == chosen_for_cards), None)
+                arbitration["decision_cards"] = build_decision_cards(
+                    skill_for_cards, chosen_result) if skill_for_cards else []
+                arbitration["decision_summary"] = decision_summary(
+                    arbitration["decision_cards"])
+            arbitration["calibration"] = self.calibration.annotate(
+                str(arbitration.get("confidence") or "medium"))
+            agent_trace = self.agent.finalize(agent_trace, results, arbitration, budget)
             write_json(task_dir / "arbitration.json", arbitration)
             self._emit(task_id, "info", f"仲裁结论：{arbitration['status']} / "
                        f"{arbitration.get('chosen_skill') or '-'} / {arbitration.get('root_cause') or '-'}",
@@ -283,9 +409,10 @@ class TaskPipeline:
 
             # 6. 报告
             self._stage(task, "reporting", 82, "生成统一诊断报告")
-            report_md, report_html, narrative = self._report(task, results, arbitration,
-                                                             inventory, stage_times, budget,
-                                                             models_used, started, plan)
+            (report_md, report_html, narrative, claims, claim_check,
+             narrative_check) = self._report(
+                task, results, arbitration, inventory, stage_times, budget,
+                models_used, started, plan)
             _mark("reporting")
             md_path = write_text(task_dir / "report.md", report_md)
             html_path = write_text(task_dir / "report.html", render_html(
@@ -300,6 +427,7 @@ class TaskPipeline:
                     "root_cause_name": arbitration.get("root_cause_name"),
                     "skill": arbitration.get("chosen_skill"),
                     "confidence": arbitration.get("confidence"),
+                    "calibration": arbitration.get("calibration"),
                 },
                 "arbitration": arbitration,
                 "routing": routing,
@@ -314,6 +442,10 @@ class TaskPipeline:
                     "duration_ms", "error", "limitations")} for r in results],
                 "stats": stats,
                 "narrative": narrative,
+                "claims": claims,
+                "claim_check": claim_check,
+                "narrative_check": narrative_check,
+                "agent_trace": agent_trace,
             }
             self.db.execute(
                 "UPDATE tasks SET status=?, stage='done', progress=100, finished_at=?, "
@@ -327,6 +459,17 @@ class TaskPipeline:
             self._emit(task_id, "success", "诊断完成，报告已生成", "done",
                        {"report": {"md": str(md_path), "html": str(html_path)},
                         "verdict": result["verdict"], "stats": stats})
+            terminal_state = ("resolved" if arbitration["status"] in (
+                "matched", "multiple_causes", "temporal_conflict")
+                else "unknown_fault" if arbitration["status"] in ("unknown_fault", "unmatched")
+                else status)
+            self._session_note(task_id, "decision_summary", {
+                "state": terminal_state, "verdict": result["verdict"],
+                "reason": arbitration.get("reason"),
+                "evidence_count": self.evidence_store.count(task_id),
+                "budget": budget.snapshot(),
+                "report": {"md": str(md_path), "html": str(html_path)},
+            }, f"decision-{session_round}")
             try:
                 self.experiences.record(task, result)
             except Exception as exc:  # noqa: BLE001 - 经验写失败不能覆盖诊断结果
@@ -450,9 +593,18 @@ class TaskPipeline:
             "top_members": (inventory.get("top_members") or [])[:40],
         }
         try:
+            source_payload = {
+                "description": task.get("description") or "",
+                "inventory": prompt_inventory,
+                "catalog": catalog,
+                "experiences": experiences,
+            }
+            safe_payload = self.egress.sanitize_structure(source_payload)
+            self._audit_model_egress(task, f"planner:{role}", source_payload, safe_payload)
             result = self.gateway.complete(
                 role, PLANNER_SYSTEM,
-                planner_user(task["description"], prompt_inventory, catalog, experiences,
+                planner_user(safe_payload["description"], safe_payload["inventory"],
+                             safe_payload["catalog"], safe_payload["experiences"],
                              mode, max_skills, max_steps),
                 json_schema=PLAN_SCHEMA, purpose="plan", budget=budget,
                 model_override=task.get("model_override"))
@@ -567,7 +719,7 @@ class TaskPipeline:
         rows = self.db.all(
             "SELECT skill_name, skill_version, score, status, result_json FROM task_skills "
             "WHERE task_id=? AND result_json IS NOT NULL AND status NOT IN ('running') "
-            "ORDER BY id", (task_id,))
+            "AND invalidated=0 ORDER BY id", (task_id,))
         results: list[dict[str, Any]] = []
         for row in rows:
             try:
@@ -653,14 +805,50 @@ class TaskPipeline:
                        {"skill": skill.name, "score": cand["score"], "plan_step": step_id})
             out = task_dir / "skills" / skill.name
             self._ensure_skill_row(task["id"], skill, cand["score"])
+            role = "engineer"
+            if self.db:
+                user = self.db.one("SELECT role FROM users WHERE id=?", (task.get("user_id"),))
+                role = str((user or {}).get("role") or "engineer")
+            approval_id = ""
+            try:
+                manifest = self.tools.manifest(skill)
+                if manifest.approval == "required":
+                    args = self.tools.arguments(task["id"], inputs, task["description"],
+                                                self.tools.current_revision(task["id"]))
+                    approval_id = self.tools.find_approved(
+                        task["id"], manifest.tool_name, manifest.version,
+                        self.tools.arguments_hash(args))
+            except Exception as exc:  # noqa: BLE001 - 审批查询失败按无审批处理
+                self._emit(task["id"], "warning", f"工具审批查询失败：{exc}", stage)
+            tool_key = f"{task['id']}-{step_id}-{skill.name}-{time.time_ns()}"
+            self._session_note(task["id"], "tool_started", {
+                "state": "fanout", "skill": skill.name, "plan_step": step_id,
+                "score": cand["score"], "approval_id": approval_id,
+            }, f"tool-start-{tool_key}")
             res = self.runner.run(skill, inputs, task["description"], out,
-                                  cancel_event=cancel_event)
+                                  cancel_event=cancel_event, task_id=task["id"],
+                                  actor_role=role, approval_id=approval_id)
             res["skill_name"] = skill.name
             res["skill_title"] = skill.title
             res["score"] = cand["score"]
             res["match_reason"] = cand.get("reason", "")
             res["plan_step"] = step_id
+            res["evidence_ids"] = self.evidence_store.extend_legacy(
+                task["id"], skill.name, skill.version or "", res.get("evidence") or [],
+                source_root=out)
             self._persist_skill(task["id"], res, skill)
+            self._session_note(task["id"], "tool_finished", {
+                "state": "fanout", "skill": skill.name, "plan_step": step_id,
+                "status": res.get("status") or ("done" if res.get("ok") else "failed"),
+                "ok": bool(res.get("ok")), "tool_call_id": res.get("tool_call_id") or "",
+                "duration_ms": res.get("duration_ms"),
+            }, f"tool-finish-{tool_key}")
+            if res.get("evidence_ids"):
+                self._session_note(task["id"], "evidence_added", {
+                    "state": "fanout", "skill": skill.name,
+                    "evidence_ids": res["evidence_ids"][:100],
+                    "count": len(res["evidence_ids"]),
+                }, f"evidence-{tool_key}")
             self._emit(task["id"],
                        "success" if res.get("ok") else "error",
                        f"{skill.name} 完成：{res.get('status')}"
@@ -693,19 +881,23 @@ class TaskPipeline:
             "INSERT OR IGNORE INTO task_skills(task_id, skill_name, skill_version, status, "
             "score, started_at) VALUES(?,?,?,?,?,?)",
             (task_id, skill.name, skill.version, "running", score, now))
+        self.db.execute(
+            "UPDATE task_skills SET invalidated=0 WHERE task_id=? AND skill_name=?",
+            (task_id, skill.name))
 
     def _persist_skill(self, task_id: str, res: dict[str, Any], skill: Skill) -> None:
         now = iso_now()
         self.db.execute(
             "UPDATE task_skills SET status=?, verdict_json=?, summary_json=?, result_json=?, "
             "report_md_path=?, report_html_path=?, error=?, started_at=COALESCE(started_at,?), "
-            "finished_at=?, stats_json=? WHERE task_id=? AND skill_name=?",
+            "finished_at=?, stats_json=?, invalidated=0 WHERE task_id=? AND skill_name=?",
             (res.get("status") or ("done" if res.get("ok") else "failed"),
              json.dumps(res.get("verdict") or {}, ensure_ascii=False, default=str),
              json.dumps(res.get("summary") or {}, ensure_ascii=False, default=str),
              json.dumps({k: res.get(k) for k in (
                  "ok", "status", "primary", "root_cause", "evidence", "match_counts",
-                 "glob_fallback", "sites", "limitations", "verdict", "rule_meta")}, ensure_ascii=False, default=str),
+                 "glob_fallback", "sites", "limitations", "verdict", "rule_meta", "evidence_ids")},
+                 ensure_ascii=False, default=str),
              (res.get("reports") or {}).get("md") or None,
              (res.get("reports") or {}).get("html") or None,
              res.get("error"),
@@ -742,10 +934,14 @@ class TaskPipeline:
             entry = s.catalog_entry()
             entry["rule_score"] = round(float(scores.get(s.name, 0.0)), 1)
             catalog.append(entry)
+        options = _json_load(task.get("options_json"), {})
         experiences = self.experiences.search(
             task["description"], inventory.get("detected_hints") or [],
             (results[0].get("skill_name") if results else ""), limit=3,
-            include_unreviewed=bool(self.config.get("experience_include_unreviewed", False)))
+            include_unreviewed=bool(self.config.get("experience_include_unreviewed", False)),
+            device_type=str(options.get("device_type") or ""),
+            software_version=str(options.get("software_version") or ""),
+            exclude_task=str(task.get("id") or ""), with_counterexamples=True)
         executed_summary = []
         for r in results:
             root = r.get("root_cause") or {}
@@ -875,7 +1071,9 @@ class TaskPipeline:
                     "quality_score", "confidence", "unique_clusters", "supporting_clusters",
                     "unrelated_clusters", "duplicate_occurrences", "direct_rules",
                     "independent_files", "reasons")},
-                "evidence": [{k: e.get(k) for k in ("rule_id", "file", "line_no", "timestamp", "text")}
+                "evidence": [{k: (self.egress.sanitize_text(e.get(k), limit=240)
+                                   if k == "text" else e.get(k)) for k in (
+                                   "rule_id", "file", "line_no", "timestamp", "text")}
                              for e in (row.get("evidence") or [])[:4]],
                 "limitations": row.get("limitations") or [],
             }
@@ -924,9 +1122,13 @@ class TaskPipeline:
         data: dict[str, Any] = {}
         if not deterministic_ok and self.gateway.has_real_model("arbiter") and self.gateway.available("arbiter"):
             try:
+                source_payload = {"description": task.get("description") or "",
+                                  "candidates": candidates}
+                safe_payload = self.egress.sanitize_structure(source_payload)
+                self._audit_model_egress(task, "arbiter", source_payload, safe_payload)
                 result = self.gateway.complete(
                     "arbiter", ARBITER_SYSTEM,
-                    arbiter_user(task["description"], candidates),
+                    arbiter_user(safe_payload["description"], safe_payload["candidates"]),
                     json_schema=ARBITER_SCHEMA, purpose="adjudicate", budget=budget,
                     model_override=task.get("model_override"))
                 llm_used = True
@@ -1025,20 +1227,37 @@ class TaskPipeline:
                 arbitration: dict[str, Any], inventory: dict[str, Any],
                 stage_times: dict[str, float], budget: Budget,
                 models_used: set[str], started: float,
-                plan: dict[str, Any] | None = None) -> tuple[str, str, dict[str, Any] | None]:
+                plan: dict[str, Any] | None = None) -> tuple[
+                    str, str, dict[str, Any] | None, dict[str, Any],
+                    dict[str, Any], dict[str, Any]]:
         chosen_name = arbitration.get("chosen_skill")
         chosen = next((r for r in results if r["skill_name"] == chosen_name and r.get("ok")), None)
+        claims = build_claims(task, results, arbitration)
+        claim_check = validate_claims(
+            claims, evidence=(chosen or {}).get("evidence") or [],
+            arbitration=arbitration)
         narrative = None
-        if chosen and self.config.get("report_llm") and self.gateway.has_real_model("writer") \
+        narrative_check: dict[str, Any] = {"ok": True, "skipped": True, "errors": []}
+        if not claim_check.get("ok"):
+            self._emit(task["id"], "warning",
+                       "结构化 claim 校验未通过，报告只保留确定性模板：" +
+                       "；".join(f"{x.get('claim')}/{x.get('code')}"
+                                for x in (claim_check.get("errors") or [])[:4]),
+                       "reporting")
+        if chosen and claim_check.get("ok") and self.config.get("report_llm") \
+                and self.gateway.has_real_model("writer") \
                 and self.gateway.available("writer"):
             facts = build_narrative_facts(task, chosen, arbitration)
             facts["并行技能"] = [{"skill": r.get("skill_name"), "status": r.get("status"),
-                                "root_cause": (r.get("root_cause") or {}).get("name"),
-                                "score": r.get("score")} for r in results]
+                                "root_cause": (r.get("root_cause") or {}).get("name")}
+                                for r in results]
             evidence = evidence_for_prompt(chosen)
             try:
+                source_payload = {"facts": facts, "evidence": evidence}
+                safe_payload = self.egress.sanitize_structure(source_payload)
+                self._audit_model_egress(task, "writer", source_payload, safe_payload)
                 result = self.gateway.complete(
-                    "writer", REPORT_SYSTEM, report_user(facts, evidence),
+                    "writer", REPORT_SYSTEM, report_user(safe_payload["facts"], safe_payload["evidence"]),
                     json_schema=REPORT_SCHEMA, purpose="report", budget=budget,
                     model_override=task.get("model_override"))
                 models_used.add(result.model_name)
@@ -1051,7 +1270,14 @@ class TaskPipeline:
                                "报告研判引用不存在的证据，已回退确定性模板：" + "；".join(bad[:3]),
                                "reporting")
                 else:
-                    narrative = data
+                    narrative_check = validate_narrative(
+                        data, claims, evidence=(chosen or {}).get("evidence") or [])
+                    if narrative_check.get("ok"):
+                        narrative = data
+                    else:
+                        self._emit(task["id"], "warning",
+                                   "模型叙述含未支撑数字/时间或过度断言，已回退确定性模板",
+                                   "reporting")
             except (AIError, NoModelError) as exc:
                 self._emit(task["id"], "warning",
                            f"LLM 报告研判失败，使用确定性模板：{exc}", "reporting")
@@ -1059,8 +1285,10 @@ class TaskPipeline:
         stage_times.setdefault("reporting", time.time())
         stats = self._stats(started, stage_times, budget, models_used)
         md = compose_markdown(task, results, arbitration, inventory, stats, narrative, plan)
-        return md, render_html(md, f"{task['title']} - 诊断报告",
-                               self.config.get("brand")), narrative
+        md += claims_markdown(claims, claim_check, narrative_check)
+        return (md, render_html(md, f"{task['title']} - 诊断报告",
+                                self.config.get("brand")), narrative,
+                claims, claim_check, narrative_check)
 
     def _stats(self, started: float, stage_times: dict[str, float],
                budget: Budget, models_used: set[str]) -> dict[str, Any]:
@@ -1117,6 +1345,20 @@ class TaskPipeline:
              str(md_path), str(html_path), json.dumps(stats, ensure_ascii=False), task["id"]))
         self._emit(task["id"], "warning", f"需要补充数据：{reason}", "done",
                    {"missing_info": missing, "report": {"md": str(md_path), "html": str(html_path)}})
+        session = DiagnosticSession(self.db, task["id"])
+        session_round = int(session.snapshot().get("supplement_round") or 0)
+        questions = [{
+            "question_id": f"Q{i + 1}", "question": text, "blocking": True,
+            "distinguishes": [c.get("skill") for c in (routing or {}).get("candidates") or []][:3],
+        } for i, text in enumerate(missing[:3])]
+        self._session_note(task["id"], "gaps_updated", {
+            "state": "needs_data", "gaps": questions, "reason": reason,
+        }, f"gaps-{session_round}")
+        self._session_note(task["id"], "decision_summary", {
+            "state": "needs_data", "verdict": result["verdict"], "reason": reason,
+            "evidence_count": self.evidence_store.count(task["id"]),
+            "report": {"md": str(md_path), "html": str(html_path)},
+        }, f"decision-{session_round}")
         create_notification(self.db, task["user_id"], "task_failed", "任务需要补充数据",
                             f"{task['title']}：{reason}", f"/#/tasks/{task['id']}")
         return result
@@ -1126,9 +1368,143 @@ class TaskPipeline:
             "UPDATE tasks SET status='cancelled', stage='done', progress=100, finished_at=?, error=? WHERE id=?",
             (iso_now(), "用户取消", task["id"]))
         self._emit(task["id"], "warning", "任务已取消", "done", {})
+        self._session_note(task["id"], "decision_summary", {
+            "state": "cancelled", "reason": "用户取消",
+        }, "decision-cancelled")
         create_notification(self.db, task["user_id"], "task_failed", "任务已取消",
                             task["title"], f"/#/tasks/{task['id']}")
         return {"status": "cancelled"}
+
+    def _session_note(self, task_id: str, event_type: str, payload: dict[str, Any],
+                      event_key: str) -> None:
+        try:
+            DiagnosticSession(self.db, task_id).append(
+                event_type, payload, event_key=event_key)
+        except Exception as exc:  # noqa: BLE001 - 会话留痕失败不应覆盖已经生成的报告
+            self._emit(task_id, "warning", f"诊断会话写入失败：{exc}", "done")
+
+    @staticmethod
+    def _hypothesis_id(skill_name: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(skill_name or "")).strip("-") or "candidate"
+        return "H-" + slug[:40]
+
+    def _init_hypotheses(self, task: dict[str, Any], session: DiagnosticSession,
+                         plan: dict[str, Any], routing: dict[str, Any]) -> None:
+        """把计划候选技能变成可更新的 HypothesisState，而不是只写一句计划文本。"""
+        try:
+            existing = session.snapshot().get("hypotheses") or {}
+        except Exception:
+            existing = {}
+        names = plan_skill_names(plan) or [
+            str(x.get("skill")) for x in routing.get("candidates") or [] if x.get("skill")]
+        options = {}
+        try:
+            options = json.loads(task.get("options_json") or "{}")
+        except json.JSONDecodeError:
+            options = {}
+        for name in names[:12]:
+            hid = self._hypothesis_id(name)
+            if hid in existing:
+                continue
+            skill = self.registry.get(name)
+            statement = (f"{getattr(skill, 'title', '') or name} 可能是当前故障根因"
+                         if skill else f"技能 {name} 可能是当前故障根因")
+            hypothesis = {
+                "hypothesis_id": hid, "statement": statement, "skill": name,
+                "status": "open", "state": "planned",
+                "applicability": {
+                    "site": options.get("site") or "",
+                    "device_type": options.get("device_type") or "",
+                    "required_sources": _skill_source_hints(skill),
+                },
+                "necessary_checks": [
+                    "至少一个规则命中且证据可定位",
+                    "证据来自至少两个独立来源或专家确认",
+                    "反证/近似故障未被同时高置信命中",
+                ],
+                "prior_score": float((next(
+                    (x.get("score") for x in routing.get("candidates") or []
+                     if x.get("skill") == name), 30) or 30)) / 100.0,
+                "supporting_evidence": [], "contradicting_evidence": [],
+                "missing_data": [], "seen_count": 0,
+            }
+            self._session_note(task["id"], "hypothesis_updated",
+                               {"hypothesis": hypothesis, "hypothesis_state": "planned"},
+                               f"hyp-init-{hid}")
+
+    def _sync_hypotheses(self, task: dict[str, Any], session: DiagnosticSession,
+                         results: list[dict[str, Any]],
+                         arbitration: dict[str, Any] | None = None) -> None:
+        """按技能结果更新假设；同一状态和证据集不重复写事件。"""
+        try:
+            existing = session.snapshot().get("hypotheses") or {}
+        except Exception:
+            existing = {}
+        chosen = str((arbitration or {}).get("chosen_skill") or "")
+        for result in results:
+            name = str(result.get("skill_name") or "")
+            if not name:
+                continue
+            hid = self._hypothesis_id(name)
+            old = dict(existing.get(hid) or {})
+            if not old:
+                continue
+            root = result.get("root_cause") or {}
+            evidence_ids = [str(x) for x in (result.get("evidence_ids") or []) if x]
+            quality = result.get("evidence_quality") or {}
+            status = str(old.get("status") or "open")
+            missing = list(old.get("missing_data") or [])
+            reason = ""
+            if result.get("ok") and root:
+                if quality.get("confidence") in ("high", "medium"):
+                    status = "supported"
+                    reason = f"技能命中根因 {root.get('name') or ''}，证据质量 {quality.get('confidence')}"
+                else:
+                    status = "weakened"
+                    reason = f"技能命中候选根因，但证据质量 {quality.get('confidence') or 'low'}"
+            elif result.get("status") in ("needs_data", "unmatched", "inconclusive"):
+                status = "weakened" if status != "confirmed" else status
+                reason = f"技能结果 {result.get('status')}，未形成确定结论"
+                for item in result.get("limitations") or []:
+                    if str(item) not in missing:
+                        missing.append(str(item))
+            elif not result.get("ok"):
+                status = "refuted" if str(result.get("status")) in ("missing", "denied", "failed") \
+                    else "weakened"
+                reason = f"技能未完成：{result.get('status')} {result.get('error') or ''}"
+            if arbitration and chosen:
+                if name == chosen and arbitration.get("status") in (
+                        "matched", "multiple_causes", "temporal_conflict"):
+                    status = "confirmed"
+                    reason = f"仲裁选择 {name} 作为最终根因"
+                elif status == "supported":
+                    status = "weakened"
+                    reason = f"同题其他候选 {chosen} 已获仲裁采信"
+            hypothesis = {
+                **old,
+                "status": status,
+                "supporting_evidence": evidence_ids or list(old.get("supporting_evidence") or []),
+                "contradicting_evidence": list(old.get("contradicting_evidence") or []),
+                "missing_data": missing[:8],
+                "seen_count": int(old.get("seen_count") or 0) + 1,
+                "last_result": {
+                    "status": result.get("status"),
+                    "root_cause": root.get("name"),
+                    "confidence": quality.get("confidence"),
+                },
+            }
+            changed = any(hypothesis.get(k) != old.get(k) for k in (
+                "status", "supporting_evidence", "missing_data", "seen_count", "last_result"))
+            if not changed:
+                continue
+            digest = hashlib.sha256(
+                ("|".join(evidence_ids) + "|" + status).encode("utf-8")).hexdigest()[:10]
+            state = ("confirmed" if status == "confirmed" else
+                     "supported" if status == "supported" else
+                     "refuted" if status == "refuted" else "evaluating")
+            self._session_note(task["id"], "hypothesis_updated",
+                               {"hypothesis": hypothesis, "hypothesis_state": state},
+                               f"hyp-{hid}-{status}-{digest}")
 
     def _fail(self, task, task_dir, error: str, stage_times, budget) -> dict[str, Any]:
         stats = self._stats(time.time(), stage_times, budget, set())
@@ -1137,6 +1513,9 @@ class TaskPipeline:
             "error=?, stats_json=? WHERE id=?",
             (iso_now(), error[:2000], json.dumps(stats, ensure_ascii=False), task["id"]))
         self._emit(task["id"], "error", f"任务失败：{error}", "done", {"error": error})
+        self._session_note(task["id"], "decision_summary", {
+            "state": "failed", "reason": error[:300],
+        }, f"decision-failed-{int(time.time())}")
         create_notification(self.db, task["user_id"], "task_failed", "任务执行失败",
                             f"{task['title']}：{error[:300]}", f"/#/tasks/{task['id']}")
         return {"status": "failed", "error": error}

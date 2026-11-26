@@ -7,6 +7,8 @@ import { modelNoticeHtml, openPersonalModelModal } from './personal_model.js';
 
 let selectedId = null;
 let workshopPoll = null;
+let workshopStep = 1;
+let workshopStepDraftId = null;
 
 export async function renderWorkshop() {
   if (workshopPoll) { clearInterval(workshopPoll); workshopPoll = null; }
@@ -17,15 +19,17 @@ export async function renderWorkshop() {
       <div class="card-head"><h2>草稿</h2><span class="sub" id="draft-count"></span></div>
       <div class="card-body" id="draft-list">${icon('refresh')} 加载中…</div>
     </aside>
-    <section id="draft-detail"><div class="card">${icon('flask')}<div class="empty"><h3>选择一个草稿</h3>
+    <section id="draft-detail"><div class="card"><div class="empty">${icon('flask')}<h3>选择一个草稿</h3>
       <p>可以直接粘贴故障描述、日志样例、判断思路、根因和案例，无需逐格填写。</p></div></div></section>
   </div>`;
 
   let drafts = [];
   let models = [];
+  let recipes = [];
   try {
     drafts = (await api('/api/workshop/drafts')).items || [];
     try { models = ((await api('/api/models')).items || []).filter((m) => m.enabled); } catch { models = []; }
+    try { recipes = (await api('/api/workshop/recipes')).items || []; } catch { recipes = []; }
   } catch (err) {
     view.querySelector('#draft-detail').innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return view;
@@ -35,6 +39,8 @@ export async function renderWorkshop() {
   view.querySelector('#draft-count').textContent = `${drafts.length} 个`;
   listEl.innerHTML = drafts.length ? `<div class="draft-list">${drafts.map((d) => `
     <div class="draft-item ${d.id === selectedId ? 'active' : ''}" data-draft="${esc(d.id)}">
+      <button class="icon-btn draft-delete" data-act="delete-draft" data-draft="${esc(d.id)}"
+        title="删除草稿" aria-label="删除草稿">${icon('trash')}</button>
       <strong>${esc(d.title)}</strong><div class="name">${esc(d.name)}</div>
       <div class="meta">${statusBadge(d.status)}<span>${fmtDate(d.updated_at)}</span></div>
       ${d.last_error ? `<div class="tiny" style="color:#b91c1c;margin-top:3px">${esc(d.last_error.slice(0, 100))}</div>` : ''}
@@ -42,10 +48,16 @@ export async function renderWorkshop() {
       <h3>还没有草稿</h3><p>粘贴一段故障资料，系统会自动识别并生成。</p>
       <button class="btn btn-primary btn-sm" data-act="new-draft">${icon('plus')}开始生成</button></div>`;
   listEl.querySelectorAll('[data-draft]').forEach((el) => {
-    el.addEventListener('click', () => { selectedId = el.dataset.draft; renderWorkshop(); });
+    el.addEventListener('click', (event) => {
+      if (event.target.closest('[data-act="delete-draft"]')) return;
+      const nextId = el.dataset.draft;
+      if (nextId !== selectedId) { workshopStepDraftId = null; workshopStep = 1; }
+      selectedId = nextId;
+      renderWorkshop();
+    });
   });
   if (!selectedId) {
-    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models) };
+    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes) };
     bindActions(view, handlers); bindTopbar(handlers); return view;
   }
 
@@ -61,8 +73,12 @@ export async function renderWorkshop() {
     return view;
   }
   if (selectedId !== draftId) return view;
+  if (workshopStepDraftId !== draftId) {
+    workshopStepDraftId = draftId;
+    workshopStep = suggestedStep(draft, caseData);
+  }
   const detailEl = view.querySelector('#draft-detail');
-  detailEl.innerHTML = renderDetail(draft, caseData, models);
+  detailEl.innerHTML = renderDetail(draft, caseData, models, recipes);
   const profileValue = () => detailEl.querySelector('#profile-yaml').value;
   const saveProfileSilently = async () => {
     await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}`, { method: 'PUT', body: { profile_yaml: profileValue() } });
@@ -101,10 +117,13 @@ export async function renderWorkshop() {
         renderJobProgress(next);
         if (next.status === 'done') {
           clearInterval(workshopPoll); workshopPoll = null;
+          workshopStep = ({ analyze: 2, logs: 2, refine: 2, case: 4, build: 5 })[next.kind] || workshopStep;
           toast(next.message || '工坊任务完成', 'ok');
           setTimeout(refresh, 250);
         } else if (['failed', 'interrupted'].includes(next.status)) {
           clearInterval(workshopPoll); workshopPoll = null;
+          if (next.kind === 'analyze' || next.kind === 'logs' || next.kind === 'refine') workshopStep = 2;
+          if (next.kind === 'build') workshopStep = 5;
           toast(next.error || next.message || '工坊任务失败', 'error', 7000);
           setTimeout(refresh, 400);
         }
@@ -152,8 +171,78 @@ export async function renderWorkshop() {
   }
 
   const handlers = {
-    'new-draft': () => openCreateModal(() => renderWorkshop(), models),
+    'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes),
+    'workshop-step': (btn) => {
+      workshopStep = Math.max(1, Math.min(5, Number(btn.dataset.step) || 1));
+      detailEl.querySelectorAll('[data-workshop-panel]').forEach((panel) => {
+        panel.hidden = Number(panel.dataset.workshopPanel) !== workshopStep;
+      });
+      detailEl.querySelectorAll('[data-act="workshop-step"]').forEach((tab) => {
+        tab.classList.toggle('active', Number(tab.dataset.step) === workshopStep);
+        tab.setAttribute('aria-selected', Number(tab.dataset.step) === workshopStep ? 'true' : 'false');
+      });
+    },
+    'delete-draft': async (btn) => {
+      const id = btn.dataset.draft;
+      const item = drafts.find((d) => d.id === id);
+      if (!item) return;
+      const ok = await confirmDialog(
+        `删除草稿「${item.title}」及其日志/解压副本？${item.status === 'published'
+          ? '该草稿已发布，删除草稿记录不会删除已发布技能。' : '此操作不可恢复。'}`,
+        { title: '删除草稿', okText: '确认删除', danger: true });
+      if (!ok) return;
+      try {
+        await api(`/api/workshop/drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        toast('草稿已删除', 'ok');
+        if (selectedId === id) { selectedId = null; workshopStepDraftId = null; workshopStep = 1; }
+        renderWorkshop();
+      } catch (err) { toast(err.message, 'error'); }
+    },
     'upload-logs': () => detailEl.querySelector('#log-input').click(),
+    'save-source': async (btn) => {
+      if (draft.status === 'published') { toast('已发布草稿不可编辑，请新建版本', 'warn'); return; }
+      const sourceText = detailEl.querySelector('#source-text').value.trim();
+      if (sourceText.length < 20) { toast('请粘贴完整故障资料，至少 20 字', 'warn'); return; }
+      if (sourceText !== (draft.source_text || '').trim() && analysis.intake) {
+        const ok = await confirmDialog(
+          '修改资料会清空现有的规则审查、案例回归和构建结果；原始日志仍保留。确定重新分析？',
+          { title: '重新分析资料', okText: '保存并重新分析' });
+        if (!ok) return;
+      }
+      setBusy(btn, true, '保存资料中…');
+      try {
+        await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}`, {
+          method: 'PUT', body: { source_text: sourceText },
+        });
+        workshopStep = 2;
+        await startJsonJob(
+          `/api/workshop/drafts/${encodeURIComponent(draftId)}/analyze`,
+          { model_override: selectedModel() || null }, btn, '提交后台分析…');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    },
+    'save-recipe': async (btn) => {
+      if (draft.status === 'published') { toast('已发布草稿不可编辑，请新建版本', 'warn'); return; }
+      const recipeId = detailEl.querySelector('#recipe-select').value;
+      const changed = recipeId !== (draft.recipe_id || 'auto');
+      if (!changed) { toast('配方未变化', 'info'); return; }
+      if (analysis.intake) {
+        const ok = await confirmDialog(
+          '切换领域配方会清空现有规则审查、案例回归和构建结果，并按新配方重新分析。确定继续？',
+          { title: '切换领域配方', okText: '保存并重新分析' });
+        if (!ok) return;
+      }
+      setBusy(btn, true, '保存配方中…');
+      try {
+        await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}`, {
+          method: 'PUT', body: { recipe_id: recipeId },
+        });
+        if (!draft.source_text) { toast('配方已保存；补充资料后再分析', 'ok'); refresh(); return; }
+        workshopStep = 2;
+        await startJsonJob(
+          `/api/workshop/drafts/${encodeURIComponent(draftId)}/analyze`,
+          { model_override: selectedModel() || null }, btn, '提交后台分析…');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    },
     reanalyze: (btn) => startJsonJob(
       `/api/workshop/drafts/${encodeURIComponent(draftId)}/analyze`,
       { model_override: selectedModel() || null }, btn, '提交后台分析…'),
@@ -163,6 +252,20 @@ export async function renderWorkshop() {
       await startJsonJob(
         `/api/workshop/drafts/${encodeURIComponent(draftId)}/refine`,
         { text, model_override: selectedModel() || null }, btn, '提交后台重建…');
+    },
+    'lock-provenance': async (btn) => {
+      setBusy(btn, true, '锁定中…');
+      try {
+        const proof = await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/provenance`);
+        const paths = Object.values(proof.provenance || {}).filter((x) => x.hard && !x.locked).map((x) => x.path);
+        if (!paths.length) { toast('没有可锁定的关键字段', 'warn'); return; }
+        const ok = await confirmDialog(`锁定 ${paths.length} 个关键字段？锁定后模型修复不能覆盖其值。`,
+          { title: '锁定字段来源', okText: '锁定' });
+        if (!ok) return;
+        await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/provenance/lock`,
+          { method: 'POST', body: { paths, source_revision: proof.source_revision, locked: true } });
+        toast(`已锁定 ${paths.length} 个字段`, 'ok'); refresh();
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
     },
     save: async (btn) => {
       setBusy(btn, true, '保存中…');
@@ -182,17 +285,22 @@ export async function renderWorkshop() {
       await startJsonJob(
         `/api/workshop/drafts/${encodeURIComponent(draftId)}/build`, {}, btn, '提交后台构建…');
     },
+    'rule-check-all': (el) => {
+      detailEl.querySelectorAll('.rule-check').forEach((check) => { check.checked = el.checked; });
+    },
     'verify-rules': async (btn) => {
-      const ids = String(btn.dataset.ids || '').split(',').filter(Boolean);
-      if (!ids.length) return;
-      const ok = await confirmDialog(`确认已人工核对规则 ${ids.join('、')}？标记后仍需真实案例回归才能发布。`, { title: '确认规则', okText: '确认并重建' });
+      const ids = [...detailEl.querySelectorAll('.rule-check:checked')].map((el) => el.value);
+      if (!ids.length) { toast('请先勾选已核对过的规则', 'warn'); return; }
+      const ok = await confirmDialog(`确认已人工核对规则 ${ids.join('、')}？标记后仍需真实案例回归才能发布。`,
+        { title: '确认规则', okText: '确认规则' });
       if (!ok) return;
       setBusy(btn, true, '标记中…');
       try {
         await saveProfileSilently();
-        await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/verify-rules`, { method: 'POST', body: { rule_ids: ids } });
-        await startJsonJob(
-          `/api/workshop/drafts/${encodeURIComponent(draftId)}/build`, {}, btn, '提交后台构建…');
+        await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/verify-rules`,
+          { method: 'POST', body: { rule_ids: ids } });
+        toast(`已确认 ${ids.length} 条规则，可继续案例回归`, 'ok');
+        refresh();
       } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
     },
     publish: async (btn) => {
@@ -265,7 +373,16 @@ function issueHtml(items, type) {
     <strong>${esc(x.field || '')}</strong> ${esc(x.message || x.suggestion || '')}</div>`).join('');
 }
 
-function renderDetail(draft, caseData = {}, models = []) {
+function suggestedStep(draft, caseData = {}) {
+  const analysis = draft.analysis || {};
+  const quality = analysis.quality || draft.check?.quality || {};
+  if (!analysis.intake) return (draft.source_text || draft.log_path) ? 2 : 1;
+  if (quality.ok === false) return 3;
+  if (!(draft.build || {}).verified) return 4;
+  return 5;
+}
+
+function renderDetail(draft, caseData = {}, models = [], recipes = []) {
   const analysis = draft.analysis || {};
   const intake = analysis.intake || {};
   const quality = analysis.quality || draft.check?.quality || {};
@@ -277,136 +394,249 @@ function renderDetail(draft, caseData = {}, models = []) {
   const counts = quality.counts || {};
   const cases = caseData.items || [];
   const isAdmin = state.user?.role === 'admin';
-  const canPublish = build.ok && build.verified && quality.ok !== false && isAdmin && draft.status !== 'published';
+  const published = draft.status === 'published';
+  const canPublish = build.ok && build.verified && quality.ok !== false && isAdmin && !published;
   const aiLabels = { success: 'AI 提取成功', failed: 'AI 失败，已降级为确定性解析', not_configured: '未配置模型，使用确定性解析', unavailable: '模型暂不可用，已降级', not_applicable: '人工草稿' };
+  const aiStatusText = () => {
+    if (analysis.ai_status === 'success') {
+      if (analysis.repair_status === 'failed') return 'AI 提取成功，修复未完成';
+      if (analysis.review_status === 'failed') return 'AI 提取成功，评审未完成';
+      if (analysis.review_status === 'success' && analysis.repair_status === 'success') return 'AI 提取、评审与修复成功';
+      if (analysis.review_status === 'success') return 'AI 提取与评审成功';
+    }
+    return aiLabels[analysis.ai_status] || analysis.ai_status || '人工编辑';
+  };
   const roots = intake.root_causes || [];
-  const rules = intake.evidence_rules || suggestions.filter((s) => s.rule).map((s) => s.rule);
+  const rawRules = (intake.evidence_rules || []).length
+    ? intake.evidence_rules
+    : suggestions.filter((s) => s.rule).map((s) => s.rule);
+  const ruleItems = [...new Map((rawRules || []).map((rule) => [String(rule.id || ''), rule])).values()];
+  const unverified = new Set((check.unverified_rules || []).map(String));
+  ruleItems.forEach((rule) => { if (rule.verified === false && rule.id) unverified.add(String(rule.id)); });
   const activeJob = (draft.jobs || []).find((j) => ['queued', 'running'].includes(j.status));
   const hasPositive = cases.some((c) => c.kind === 'positive');
   const hasNegative = cases.some((c) => c.kind === 'negative');
   const nextStep = !analysis.intake ? '等待 AI 解析资料，或补充文字后重新分析'
     : quality.ok === false ? '先处理质量审查中的错误，再继续案例回归'
     : !build.verified ? (hasPositive && hasNegative ? '案例已齐备，执行构建回归' : '上传至少一个故障正例和一个正常反例')
-    : draft.status === 'published' ? '已发布' : '回归已通过，可由管理员发布';
-  return `<div class="card">
+    : published ? '已发布' : '回归已通过，可由管理员发布';
+  const currentStep = Math.max(1, Math.min(5, Number(workshopStep) || 1));
+  const done = {
+    1: Boolean(draft.source_text || draft.log_path),
+    2: Boolean(analysis.intake),
+    3: Boolean(analysis.intake) && quality.ok !== false,
+    4: Boolean(build.verified),
+    5: published,
+  };
+  const stepButton = (num, label) => `<button class="workshop-tab ${num === currentStep ? 'active' : ''} ${done[num] ? 'done' : ''}"
+    role="tab" aria-selected="${num === currentStep ? 'true' : 'false'}" data-act="workshop-step" data-step="${num}">
+    <span class="n">${num}</span><span>${label}</span>${done[num] ? '<span class="tick">✓</span>' : ''}</button>`;
+  const panel = (num, html) => `<div class="workshop-step-panel" data-workshop-panel="${num}" ${num === currentStep ? '' : 'hidden'}>${html}</div>`;
+  const nextButton = (num, label) => `<button class="btn" data-act="workshop-step" data-step="${num}">${label}${icon('chevron')}</button>`;
+  const prevButton = (num) => `<button class="btn" data-act="workshop-step" data-step="${num}">←返回上一步</button>`;
+  const conditionText = (rule) => {
+    const bits = [];
+    if ((rule.all_of || []).length) bits.push(`全部：${rule.all_of.join('、')}`);
+    if ((rule.any_of || []).length) bits.push(`任一：${rule.any_of.join('、')}`);
+    if ((rule.none_of || []).length) bits.push(`排除：${rule.none_of.join('、')}`);
+    return bits.join('；') || '未填写匹配条件';
+  };
+  const issue = issueHtml(quality.errors, 'error') + issueHtml(quality.warnings, 'warning');
+  const qualityAlert = `<div class="alert ${quality.ok === false ? 'danger' : quality.warnings?.length ? 'warn' : 'ok'}">
+    ${icon(quality.ok === false ? 'alert' : 'check')}<div style="flex:1"><strong>${quality.ok === false ? '需要补充或修正' : '结构与质量审查通过'}</strong>
+    · ${esc(aiStatusText())}${analysis.model ? ` · ${esc(analysis.model)}` : ''}
+    ${issue}</div></div>`;
+
+  const header = `<div class="card">
     <div class="card-head">
       <div style="flex:1;min-width:0"><h2 style="display:flex;align-items:center;gap:8px">${esc(draft.title)} ${statusBadge(draft.status)}
         ${draft.skill_version ? `<span class="badge muted">v${esc(draft.skill_version)}</span>` : ''}</h2>
         <div class="mono muted tiny">${esc(draft.name)} ${draft.name_auto ? '<span class="badge muted">AI 自动命名</span>' : ''} · ${esc(draft.fault_name)} · 更新 ${fmtDate(draft.updated_at)}</div>
-        <div class="tiny muted" style="margin-top:4px">技能名和中文标题由 AI 自动生成；首次写入案例或构建后锁定，避免后续升级改名。</div></div>
+        <div class="tiny muted" style="margin-top:4px">5 个步骤可随时切换：回到任一步修改后，再继续执行后续步骤。</div></div>
       <div class="inline">
         <select class="select" id="workshop-model" title="本步骤使用的模型" style="max-width:210px">
           <option value="">自动选择默认模型</option>
           ${models.map((m) => `<option value="${m.id}">${esc(m.name || m.model || ('模型 ' + m.id))}</option>`).join('')}
         </select>
-        <button class="btn" data-act="build">${icon('play')}校验并构建</button>
         <button class="btn ${canPublish ? 'btn-primary' : ''}" data-act="publish" ${canPublish ? '' : 'disabled'}
           title="${!isAdmin ? '仅管理员可发布' : !build.verified ? '需正例和反例回归通过' : ''}">${icon('upload')}发布</button>
       </div>
     </div>
     <div class="card-body">
-      <div class="wizard-steps">
-        <span class="ws ${draft.source_text ? 'active' : ''}"><span class="n">1</span>资料输入</span>
-        <span class="ws ${analysis.intake ? 'active' : ''}"><span class="n">2</span>AI 解析与命名</span>
-        <span class="ws ${quality.ok ? 'active' : ''}"><span class="n">3</span>规则审查</span>
-        <span class="ws ${build.verified ? 'active' : ''}"><span class="n">4</span>案例回归</span>
-        <span class="ws ${draft.status === 'published' ? 'active' : ''}"><span class="n">5</span>构建发布</span>
+      <div class="tabs workshop-tabs" role="tablist">
+        ${stepButton(1, '资料输入')}${stepButton(2, 'AI 解析与命名')}${stepButton(3, '规则审查')}${stepButton(4, '案例回归')}${stepButton(5, '构建发布')}
       </div>
       <div id="job-status" class="alert info" ${activeJob ? '' : 'hidden'}>${activeJob ? `${icon('activity')}<div>${esc(activeJob.message || '后台任务执行中')} · ${Number(activeJob.progress || 0)}%</div>` : ''}</div>
       ${modelNoticeHtml(draft.model_status?.notice, { compact: true })}
       <div class="alert ${quality.ok === false ? 'warn' : 'info'}">${icon('info')}<div><strong>当前下一步：</strong>${esc(nextStep)}
-        <span class="tiny muted"> · ${esc(aiLabels[analysis.ai_status] || analysis.ai_status || '人工编辑')}${analysis.model ? ` · ${esc(analysis.model)}` : ''}</span></div></div>
-      <div class="analysis-cards" style="margin-bottom:14px">
+        <span class="tiny muted"> · ${esc(aiStatusText())}${analysis.model ? ` · ${esc(analysis.model)}` : ''}</span></div></div>
+    </div>
+  </div>`;
+
+  const step1 = panel(1, `<div class="alert info">${icon('info')}<div>直接粘贴整段故障资料即可，字段不完整也可以。修改资料并重新分析后，后续规则审查、案例回归和构建结果会重置，原始日志不会删除。</div></div>
+    <div class="form-row"><label class="label" for="source-text">故障资料</label>
+      <textarea class="textarea" id="source-text" rows="16" ${published ? 'readonly' : ''}
+        placeholder="例如：故障名称、现场现象、日志路径、关键日志、判断思路、根因与处理、案例……">${esc(draft.source_text || '')}</textarea></div>
+    <div class="between tiny muted"><span>${draft.source_text ? '可以直接补改原文；保存后重新进入 AI 解析。' : '至少需要故障名称、日志特征和判断思路，约 20 字以上。'}</span><span>${draft.source_text ? `${draft.source_text.length} 字` : ''}</span></div>
+    <div class="form-row" style="margin-top:12px"><label class="label" for="recipe-select">领域配方（可选）</label>
+      <select class="select" id="recipe-select" ${published ? 'disabled' : ''}>
+        <option value="auto" ${!draft.recipe_id || draft.recipe_id === 'auto' ? 'selected' : ''}>自动识别（只选候选，规则仍需确认）</option>
+        <option value="none" ${draft.recipe_id === 'none' ? 'selected' : ''}>不使用领域配方（仅通用编译）</option>
+        ${recipes.map((r) => `<option value="${esc(r.id)}" ${draft.recipe_id === r.id ? 'selected' : ''}>${esc(r.name)}（${r.verified ? '已' : '未'}验证）</option>`).join('')}
+      </select>
+      <div class="help" style="margin-top:5px">配方从 <span class="mono">bbu/workshop_recipes/</span> 加载；规则默认 <strong>verified=false</strong>，必须勾选人工确认或通过真实案例回归后才能进入根因。</div></div>
+    <div class="inline" style="margin-top:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" data-act="save-source" ${published ? 'disabled' : ''}>${icon('play')}保存资料并重新分析</button>
+      <button class="btn" data-act="save-recipe" ${published ? 'disabled' : ''}>${icon('refresh')}保存配方并重新分析</button>
+      <button class="btn" data-act="upload-logs" ${published ? 'disabled' : ''}>${icon('upload')}上传日志并分析</button>
+      <input type="file" id="log-input" accept=".zip,.tar.gz,.tgz,.7z,.tar,.gz,.log" multiple hidden>
+    </div>
+    ${extract.files ? `<div class="alert info" style="margin-top:12px">${icon('folder')}<div>最近一次分析已解压 ${extract.files} 个文件 · ${(extract.bytes || 0) / 1024 / 1024} MB；中间解压文件可在“系统信息 → 任务空间”单独释放。</div></div>` : ''}
+    ${(analysis.notes || []).length ? `<div class="alert warn" style="margin-top:10px">${icon('alert')}<div>${analysis.notes.map((n) => esc(n)).join('<br>')}</div></div>` : ''}
+    <div class="inline" style="margin-top:14px">${draft.source_text || draft.log_path ? nextButton(2, '进入 AI 解析') : ''}</div>`);
+
+  const step2 = panel(2, !analysis.intake
+    ? `<div class="empty">${icon('cpu')}<h3>还没有解析结果</h3><p>先在“资料输入”粘贴故障资料，或上传日志包。</p>${prevButton(1)}</div>`
+    : `<div class="analysis-cards" style="margin-bottom:14px">
         <div class="mini-stat"><div class="v">${quality.score ?? '—'}</div><div class="k">质量分</div></div>
-        <div class="mini-stat"><div class="v">${counts.rules ?? 0}</div><div class="k">证据规则</div></div>
-        <div class="mini-stat"><div class="v">${counts.root_causes ?? 0}</div><div class="k">根因分支</div></div>
+        <div class="mini-stat"><div class="v">${counts.rules ?? ruleItems.length}</div><div class="k">证据规则</div></div>
+        <div class="mini-stat"><div class="v">${counts.root_causes ?? roots.length}</div><div class="k">根因分支</div></div>
         <div class="mini-stat"><div class="v">${cases.length}</div><div class="k">已写入案例</div></div>
       </div>
-      <div class="alert ${quality.ok === false ? 'danger' : (quality.warnings || []).length ? 'warn' : 'ok'}">
-        ${icon(quality.ok === false ? 'alert' : 'check')}<div style="flex:1"><strong>${quality.ok === false ? '需要补充或修正' : '结构与质量审查通过'}</strong>
-        · ${esc(aiLabels[analysis.ai_status] || analysis.ai_status || '人工编辑')}${analysis.model ? ` · ${esc(analysis.model)}` : ''}
-        ${issueHtml(quality.errors, 'error')}${issueHtml(quality.warnings, 'warning')}</div></div>
-      ${(analysis.notes || []).length ? `<div class="alert warn" style="margin-top:10px">${icon('alert')}<div>${analysis.notes.map((n) => esc(n)).join('<br>')}</div></div>` : ''}
-
-      <div class="hr"></div>
-      <h3 style="font-size:14px;margin:0 0 8px">步骤 2 · AI 解析、自动命名与中途确认</h3>
-      <div class="grid grid-2" style="gap:16px">
-        <div>
-          <div class="kv">
-            <div class="k">技能名</div><div class="v mono">${esc(draft.name)}</div>
-            <div class="k">故障名称</div><div class="v">${esc(intake.fault_name || draft.fault_name)}</div>
-            <div class="k">适用范围</div><div class="v">${esc(intake.domain?.boards || '待补充')}</div>
-            <div class="k">现场现象</div><div class="v">${esc((intake.symptoms?.observable || []).join('；') || '待补充')}</div>
-          </div>
-          ${(quality.questions || []).length ? `<div class="alert info" style="margin-top:10px">${icon('info')}<div><strong>建议确认</strong>
-            <ol style="margin:6px 0 0;padding-left:20px">${quality.questions.map((q) => `<li>${esc(q.question)}</li>`).join('')}</ol></div></div>` : ''}
-          <textarea class="textarea" id="refine-text" rows="4" placeholder="直接补充或纠正，例如：0x634=0x10 是 caterr；C1 是正常反例。无需按字段填写。"></textarea>
-          <div class="inline" style="margin-top:8px"><button class="btn btn-primary" data-act="refine">${icon('refresh')}按补充重新生成</button>
+      ${qualityAlert}
+      ${(() => {
+        const prov = intake.provenance || {};
+        const hard = (intake.hard_fields || []).map((k) => prov[k]).filter(Boolean);
+        const verified = hard.filter((x) => x.validation_status === 'verified').length;
+        const derived = hard.filter((x) => x.validation_status === 'derived').length;
+        const sourced = verified + derived;
+        const missing = hard.filter((x) => x.validation_status !== 'verified' && x.validation_status !== 'derived');
+        const locked = Object.values(prov).filter((x) => x.locked).length;
+        return `<div class="alert ${missing.length ? 'warn' : 'ok'}" style="margin-top:12px">${icon(missing.length ? 'alert' : 'check')}<div style="flex:1">
+          <strong>字段来源 ${sourced}/${hard.length}</strong>${derived ? `（原文直引 ${verified}，可追溯推导 ${derived}）` : ''} · 锁定 ${locked} 个
+          <div class="tiny muted">来源修订 ${esc(intake.source_revision || '—')}；引用区间与 quote hash 随原文保存，模型改写不会静默覆盖已锁字段。</div>
+          ${missing.length ? `<div class="tiny" style="margin-top:4px">未定位：${missing.slice(0, 6).map((x) => esc(x.path)).join('、')}</div>` : ''}
+          <div class="inline" style="margin-top:8px"><button class="btn btn-sm" data-act="lock-provenance" ${locked || !hard.length ? 'disabled' : ''}>${icon('lock')}锁定关键字段</button></div>
+        </div></div>`;
+      })()}
+      <div class="grid grid-2" style="gap:16px;margin-top:14px">
+        <div><div class="kv">
+          <div class="k">技能名</div><div class="v mono">${esc(draft.name)}</div>
+          <div class="k">故障名称</div><div class="v">${esc(intake.fault_name || draft.fault_name)}</div>
+          <div class="k">领域配方</div><div class="v">${intake.recipe?.id
+            ? `${esc(intake.recipe.name || intake.recipe.id)} <span class="badge ${intake.recipe.verified ? 'ok' : 'warn'}">${intake.recipe.verified ? '已' : '未'}验证</span>${intake.recipe.auto_selected ? ' <span class="badge muted">自动匹配</span>' : ''}<div class="tiny muted">${esc(intake.recipe.version_scope || '版本范围待补充')} · 来源 ${esc(intake.recipe.source || '—')}</div>`
+            : '未使用领域配方（仅通用编译）'}</div>
+          <div class="k">适用范围</div><div class="v">${esc(intake.domain?.boards || '待补充')}</div>
+          <div class="k">现场现象</div><div class="v">${esc((intake.symptoms?.observable || []).join('；') || '待补充')}</div>
+        </div>
+        ${(quality.questions || []).length ? `<div class="alert info" style="margin-top:10px">${icon('info')}<div><strong>建议确认</strong>
+          <ol style="margin:6px 0 0;padding-left:20px">${quality.questions.map((q) => `<li>${esc(q.question)}</li>`).join('')}</ol></div></div>` : ''}
+        </div>
+        <div><h3 style="font-size:14px;margin:0 0 8px">补充或纠正</h3>
+          <textarea class="textarea" id="refine-text" rows="6" placeholder="直接补充或纠正，例如：0x634=0x10 是 caterr；C1 是正常反例。无需按字段填写。"></textarea>
+          <div class="inline" style="margin-top:8px;flex-wrap:wrap"><button class="btn btn-primary" data-act="refine">${icon('refresh')}按补充重新生成</button>
             <button class="btn" data-act="reanalyze">重新分析原文</button></div>
-          ${draft.source_text ? `<details style="margin-top:10px"><summary class="small muted" style="cursor:pointer">查看原始资料</summary>
-            <div class="check-output" style="max-height:220px;margin-top:6px">${esc(draft.source_text)}</div></details>` : ''}
-        </div>
-        <div>
-          <h3 style="font-size:14px;margin:0 0 8px">真实日志与案例</h3>
-          <div class="help">文本可以生成技能，但发布必须上传至少 1 个正例和 1 个正常/反例并通过回归。</div>
-          <div class="inline" style="margin:10px 0"><button class="btn" data-act="upload-logs">${icon('upload')}上传日志并分析</button>
-            <input type="file" id="log-input" accept=".zip,.tar.gz,.tgz,.7z,.tar,.gz,.log" multiple hidden></div>
-          ${analysis.extract ? `<div class="tiny muted">解压 ${extract.files ?? 0} 个文件 · ${suggestions.length} 条规则候选</div>` : ''}
-          ${(intake.cases || []).length ? `<div class="stack" style="max-height:180px;overflow:auto;margin-top:10px">${intake.cases.map((c) => `
-            <div class="suggestion"><strong>${esc(c.id)} · ${c.kind === 'negative' ? '正常/反例' : '故障正例'}</strong>
-              <div class="tiny">${esc(c.description || '')} → ${esc(c.expected_root_cause || '待确认')}</div></div>`).join('')}</div>` : ''}
-          ${samples.length ? `<details style="margin-top:10px"><summary class="small muted">查看日志样例</summary>
-            <div class="check-output" style="max-height:160px">${samples.map((s) => `### ${esc(s.file)}\n${esc((s.lines || '').slice(0, 700))}`).join('\n\n')}</div></details>` : ''}
+          <div class="help" style="margin-top:8px">补充内容会追加到原始资料后重新生成；原始资料可在“资料输入”中修改。</div>
         </div>
       </div>
+      ${samples.length ? `<details style="margin-top:10px"><summary class="small muted">查看日志样例</summary>
+        <div class="check-output" style="max-height:160px">${samples.map((s) => `### ${esc(s.file)}\n${esc((s.lines || '').slice(0, 700))}`).join('\n\n')}</div></details>` : ''}
+      <div class="inline" style="margin-top:14px">${prevButton(1)}${nextButton(3, '进入规则审查')}</div>`);
 
-      <div class="hr"></div>
-      <div class="grid grid-2" style="gap:18px">
-        <div><h3 style="font-size:14px;margin:0 0 8px">步骤 4 · 上传并写入回归案例</h3>
-          <div class="help" style="margin-bottom:8px">至少 1 个故障正例和 1 个正常反例；正例根因必填，反例根因固定为 NONE。</div>
-          ${cases.length ? `<div class="stack" style="max-height:220px;overflow:auto;margin-bottom:10px">${cases.map((c) => `
-            <div class="suggestion"><div class="between"><strong>${esc(c.case_id)} · ${c.kind === 'negative' ? '正常/反例' : '故障正例'}</strong>
-              <span class="badge ${c.kind === 'negative' ? 'muted' : 'ok'}">${esc(c.expected?.root_cause || c.expected_root_cause || 'NONE')}</span></div>
-              <div class="tiny">${esc(c.description || '')}${((c.expected?.hit_rules || c.hit_rules || []).length) ? ` · 命中 ${esc((c.expected?.hit_rules || c.hit_rules || []).join(', '))}` : ''}</div></div>`).join('')}</div>`
-            : `<div class="empty" style="padding:16px"><div class="tiny">尚未写入可回归的真实日志案例</div></div>`}
-          <details ${cases.length ? '' : 'open'}><summary class="small muted" style="cursor:pointer">新增案例</summary>
-          <form id="case-form" style="margin-top:10px"><div class="form-grid">
-            <div class="form-row"><label class="label">案例 ID（自动递增，可修改）</label><input class="input" name="case_id" value="${esc(caseData.next_id || 'case-01')}"></div>
-            <div class="form-row"><label class="label">类型</label><select class="select" name="kind"><option value="positive">故障正例</option><option value="negative">正常/反例</option></select></div></div>
-            <div class="form-row"><label class="label">期望根因 ID（反例填 NONE）</label>
-              <input class="input" name="root_cause" list="workshop-roots" placeholder="从根因下拉选择，正例必填">
-              <datalist id="workshop-roots">${roots.map((r) => `<option value="${esc(r.id)}">${esc(r.name || r.title || '')}</option>`).join('')}<option value="NONE">正常/反例</option></datalist></div>
-            <div class="form-row"><label class="label">应命中规则（可多选，逗号分隔）</label>
-              <input class="input" name="hit_rules" list="workshop-rules" placeholder="E1,E2">
-              <datalist id="workshop-rules">${rules.map((r) => `<option value="${esc(r.id)}">${esc(r.description || '')}</option>`).join('')}</datalist></div>
-            <div class="form-row"><label class="label">案例日志包</label><input class="input" type="file" id="case-file" accept=".zip,.tar.gz,.tgz,.7z,.tar,.gz,.log" required></div>
-            <div class="form-row"><label class="label">说明</label><input class="input" name="description" placeholder="现场现象、期望结论"></div>
-            <label class="inline tiny" style="margin:6px 0"><input type="checkbox" name="overwrite"> 如案例 ID 已存在，明确覆盖旧案例</label>
-            <button class="btn" type="submit">${icon('upload')}写入案例</button></form></details></div>
-        <div><h3 style="font-size:14px;margin:0 0 8px">步骤 5 · 构建门禁与发布</h3>
-          ${build.ok ? `<div class="alert ${build.verified ? 'ok' : 'warn'}">${icon(build.verified ? 'check' : 'alert')}<div>
-            <strong>${build.verified ? '构建和案例回归通过' : '仅构建成功，不能发布'}</strong><br>v${esc(build.version || '—')} · ${build.verified ? '可以发布' : '请补真实正例和反例'}</div></div>`
-            : `<div class="alert info">${icon('info')}<div>生成不等于验证。完成真实案例回归后，发布按钮才会开放。</div></div>`}
-          ${build.output ? `<details style="margin-top:10px"><summary class="small muted">构建输出</summary><div class="check-output">${esc(build.output)}</div></details>` : ''}
-        </div>
+  const step3 = panel(3, !analysis.intake
+    ? `<div class="empty">${icon('list')}<h3>尚未生成规则</h3><p>先完成资料输入和 AI 解析。</p>${prevButton(1)}</div>`
+    : `${ruleItems.length ? `<div class="alert ${unverified.size ? 'warn' : 'ok'}">${icon(unverified.size ? 'alert' : 'check')}<div>
+        <strong>${ruleItems.length} 条证据规则</strong> · ${unverified.size ? `${unverified.size} 条待人工确认` : '全部已确认'}
+        <div class="tiny muted">人工确认仅表示规则表达式经过核对；发布仍需真实正例和反例回归。</div></div></div>
+      <div class="between" style="margin:10px 0"><label class="check"><input type="checkbox" data-change="rule-check-all"> 全选待确认规则</label>
+        <button class="btn btn-sm" data-act="check">${icon('check')}校验规则结构</button></div>
+      <div class="stack">${ruleItems.map((rule) => {
+        const id = String(rule.id || '');
+        const pending = unverified.has(id);
+        return `<div class="suggestion">
+          <div class="between"><strong>${esc(id || '未命名')} · ${esc(rule.description || '')}</strong>
+            <span class="badge ${pending ? 'warn' : 'ok'}">${pending ? '待人工确认' : '已确认'}</span></div>
+          <div class="tiny muted" style="margin-top:4px">${esc(conditionText(rule))}</div>
+          <div class="tiny muted mono" style="margin-top:3px">${esc((rule.globs || []).join(', ') || '未限定文件')}</div>
+          ${pending ? `<label class="check tiny" style="margin-top:7px"><input type="checkbox" class="rule-check" value="${esc(id)}"> 已核对这条规则</label>` : ''}
+        </div>`;
+      }).join('')}</div>
+      ${unverified.size ? `<div class="inline" style="margin-top:12px"><button class="btn btn-primary" data-act="verify-rules">${icon('check')}确认选中的规则</button></div>` : ''}`
+      : `<div class="empty">${icon('list')}<h3>没有可审查的规则</h3><p>AI 解析未生成证据规则，请回到资料输入补充日志特征或判断思路。</p></div>`}
+      ${check.output ? `<details style="margin-top:10px"><summary class="small muted">校验输出</summary><div class="check-output">${esc(check.output)}</div></details>` : ''}
+      <div class="inline" style="margin-top:14px">${prevButton(2)}${nextButton(4, '进入案例回归')}</div>`);
+
+  const step4 = panel(4, `<div class="alert info">${icon('info')}<div>至少上传 1 个故障正例和 1 个正常/反例，正例根因必填，反例根因固定为 NONE。构建会执行真实案例回归。</div></div>
+    <div class="grid grid-2" style="gap:18px;align-items:start">
+      <div><h3 style="font-size:14px;margin:0 0 8px">已写入案例（${cases.length}）</h3>
+        ${cases.length ? `<div class="stack" style="max-height:360px;overflow:auto">${cases.map((c) => `
+          <div class="suggestion"><div class="between"><strong>${esc(c.case_id)} · ${c.kind === 'negative' ? '正常/反例' : '故障正例'}</strong>
+            <span class="badge ${c.kind === 'negative' ? 'muted' : 'ok'}">${esc(c.expected?.root_cause || c.expected_root_cause || 'NONE')}</span></div>
+            <div class="tiny">${esc(c.description || '')}${((c.expected?.hit_rules || c.hit_rules || []).length) ? ` · 命中 ${esc((c.expected?.hit_rules || c.hit_rules || []).join(', '))}` : ''}</div></div>`).join('')}</div>`
+          : `<div class="empty" style="padding:18px">${icon('flask')}<p>尚未写入可回归的真实日志案例。</p></div>`}
+        <div class="inline" style="margin-top:12px;flex-wrap:wrap">
+          <button class="btn" data-act="build">${icon('play')}执行构建与案例回归</button>
+          <span class="tiny muted">构建完成后自动进入第 5 步</span></div>
       </div>
+      <div><h3 style="font-size:14px;margin:0 0 8px">新增案例</h3>
+        <form id="case-form"><div class="form-grid">
+          <div class="form-row"><label class="label">案例 ID（自动递增，可修改）</label><input class="input" name="case_id" value="${esc(caseData.next_id || 'case-01')}"></div>
+          <div class="form-row"><label class="label">类型</label><select class="select" name="kind"><option value="positive">故障正例</option><option value="negative">正常/反例</option></select></div></div>
+          <div class="form-row"><label class="label">期望根因 ID（反例填 NONE）</label>
+            <input class="input" name="root_cause" list="workshop-roots" placeholder="从根因下拉选择，正例必填">
+            <datalist id="workshop-roots">${roots.map((r) => `<option value="${esc(r.id)}">${esc(r.name || r.title || '')}</option>`).join('')}<option value="NONE">正常/反例</option></datalist></div>
+          <div class="form-row"><label class="label">应命中规则（可多选，逗号分隔）</label>
+            <input class="input" name="hit_rules" list="workshop-rules" placeholder="E1,E2">
+            <datalist id="workshop-rules">${ruleItems.map((r) => `<option value="${esc(r.id)}">${esc(r.description || '')}</option>`).join('')}</datalist></div>
+          <div class="form-row"><label class="label">案例日志包</label><input class="input" type="file" id="case-file" accept=".zip,.tar.gz,.tgz,.7z,.tar,.gz,.log" required></div>
+          <div class="form-row"><label class="label">说明</label><input class="input" name="description" placeholder="现场现象、期望结论"></div>
+          <label class="inline tiny" style="margin:6px 0"><input type="checkbox" name="overwrite"> 如案例 ID 已存在，明确覆盖旧案例</label>
+          <button class="btn" type="submit">${icon('upload')}写入案例</button></form>
+      </div>
+    </div>
+    ${build.ok ? `<div class="alert ${build.verified ? 'ok' : 'warn'}" style="margin-top:12px">${icon(build.verified ? 'check' : 'alert')}<div>
+      <strong>${build.verified ? '构建和案例回归通过' : '仅构建成功，不能发布'}</strong><br>v${esc(build.version || '—')} · ${build.verified ? '可以发布' : '请补真实正例和反例'}</div></div>` : ''}
+    <div class="inline" style="margin-top:14px">${prevButton(3)}${nextButton(5, '进入构建发布')}</div>`);
 
-      <details style="margin-top:18px"><summary class="small muted" style="cursor:pointer">高级：手工检查或编辑 Profile YAML（通常无需修改）</summary>
-        <textarea class="textarea mono" id="profile-yaml" style="min-height:420px;margin-top:10px" spellcheck="false">${esc(draft.profile_yaml || '')}</textarea>
-        <div class="between" style="margin-top:10px"><span class="small muted">优先用上方“补充/纠正”让 AI 重建；手工修改仅用于排障。</span>
-          <div class="inline"><button class="btn" data-act="save">保存</button><button class="btn" data-act="check">${icon('check')}校验</button></div></div>
-        ${check.output ? `<details style="margin-top:10px"><summary class="small muted">校验输出</summary><div class="check-output">${esc(check.output)}</div></details>` : ''}
-      </details>
-    </div></div>`;
+  const step5 = panel(5, `<div class="alert ${build.verified ? 'ok' : build.ok ? 'warn' : 'info'}">${icon(build.verified ? 'check' : build.ok ? 'alert' : 'info')}<div>
+      <strong>${published ? '已发布' : build.verified ? '构建和案例回归通过，可以发布' : build.ok ? '仅构建成功，不能发布' : '尚未构建'}</strong><br>
+      ${build.ok ? `v${esc(build.version || '—')} · ${build.verified ? '正例/反例回归已验证' : '需要至少 1 个正例和 1 个反例通过'}`
+        : '完成前 4 步后执行构建；生成不等于验证。'}
+      ${published && draft.skill_version ? ` · 已发布 v${esc(draft.skill_version)}` : ''}
+    </div></div>
+    ${!isAdmin ? `<div class="alert warn">${icon('shield')}<div>仅管理员可发布；你可以完成规则审查和案例回归后交由管理员发布。</div></div>` : ''}
+    <div class="inline" style="margin-top:12px;flex-wrap:wrap">
+      <button class="btn" data-act="build">${icon('play')}${build.ok ? '重新构建回归' : '执行构建回归'}</button>
+      <button class="btn ${canPublish ? 'btn-primary' : ''}" data-act="publish" ${canPublish ? '' : 'disabled'}>${icon('upload')}发布技能</button>
+    </div>
+    ${build.output ? `<details style="margin-top:12px"><summary class="small muted">构建输出</summary><div class="check-output">${esc(build.output)}</div></details>` : ''}
+    <div class="hr"></div>
+    <details><summary class="small muted" style="cursor:pointer">高级：手工检查或编辑 Profile YAML（通常无需修改）</summary>
+      <textarea class="textarea mono" id="profile-yaml" style="min-height:420px;margin-top:10px" spellcheck="false" ${published ? 'readonly' : ''}>${esc(draft.profile_yaml || '')}</textarea>
+      <div class="between" style="margin-top:10px"><span class="small muted">优先用前面步骤的补充/纠正重建；手工修改仅用于排障。</span>
+        <div class="inline"><button class="btn" data-act="save" ${published ? 'disabled' : ''}>保存</button><button class="btn" data-act="check">${icon('check')}校验</button></div></div>
+      ${check.output ? `<details style="margin-top:10px"><summary class="small muted">校验输出</summary><div class="check-output">${esc(check.output)}</div></details>` : ''}
+    </details>
+    <div class="inline" style="margin-top:14px">${prevButton(4)}</div>`);
+
+  return header + step1 + step2 + step3 + step4 + step5;
 }
 
-function openCreateModal(onDone, models = []) {
+
+function openCreateModal(onDone, models = [], recipes = []) {
   const m = modal({
     title: '粘贴资料生成技能', wide: true,
     body: `<form id="create-form">
       <div class="alert info">${icon('info')}<div>直接粘贴整段故障资料。系统会自主识别故障名称、日志路径、关键字、阈值、根因、处理动作和案例；缺信息时再集中确认。</div></div>
       <div class="form-row"><label class="label">故障资料</label>
         <textarea class="textarea" name="source_text" rows="16" required placeholder="例如：&#10;故障名称：VSW 看门狗复位&#10;现场现象：……&#10;日志路径：……&#10;关键日志：……&#10;判断思路：……&#10;根因与处理：……&#10;案例：……"></textarea></div>
+      <div class="form-row"><label class="label">领域配方（可选）</label>
+        <select class="select" name="recipe_id">
+          <option value="none" selected>不使用领域配方（仅通用编译）</option>
+          <option value="auto">自动识别（只选候选，规则仍需确认）</option>
+          ${recipes.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}（${r.verified ? '已' : '未'}验证）</option>`).join('')}
+        </select>
+        <div class="help" style="margin-top:5px">配方是外部规则包，默认未验证；自动匹配只负责提名，不会把规则当成已验证。</div></div>
       <div class="form-row"><label class="label">本步骤模型（可选）</label>
         <select class="select" name="model_id"><option value="">自动选择默认模型</option>
           ${models.map((m) => `<option value="${m.id}">${esc(m.name || m.model || ('模型 ' + m.id))}</option>`).join('')}
@@ -425,8 +655,11 @@ function openCreateModal(onDone, models = []) {
     try {
       const res = await api('/api/workshop/drafts?async=1', { method: 'POST', body: {
         source_text: sourceText, model_id: form.elements.model_id.value || null,
+        recipe_id: form.elements.recipe_id.value || 'auto',
       } });
       selectedId = res.draft.id;
+      workshopStepDraftId = res.draft.id;
+      workshopStep = 2;
       toast('已提交后台解析，正在自动识别并命名', 'ok');
       m.close(); onDone && onDone();
     } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }

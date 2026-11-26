@@ -131,8 +131,10 @@ log "安装程序到 $PREFIX"
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 tar -C "$APP_SRC" \
-  --exclude='./config.json' \
+  --exclude='./config.json*' \
   --exclude='./data' \
+  --exclude='./evaluations' \
+  --exclude='./testlab' \
   --exclude='./skills' \
   --exclude='./cases' \
   --exclude='./dist' \

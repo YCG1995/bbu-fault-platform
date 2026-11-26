@@ -47,13 +47,15 @@ mkdir -p "$STAGE/${NAME}/app" "$STAGE/${NAME}/runtime"
 
 tar -C "$ROOT_DIR" \
   --exclude='./data' \
+  --exclude='./evaluations' \
+  --exclude='./testlab' \
   --exclude='./skills' \
   --exclude='./cases' \
   --exclude='./updates' \
   --exclude='./backups' \
   --exclude='./dist' \
   --exclude='./build' \
-  --exclude='./config.json' \
+  --exclude='./config.json*' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   --exclude='./.git' \

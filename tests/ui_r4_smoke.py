@@ -93,6 +93,9 @@ def main() -> int:
                     if m.type == "error" else None)
             page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
             page.goto(f"http://{host}:{port}/#/system", wait_until="networkidle")
+            # 系统页默认只渲染概览；“离线升级”在 update tab 内，先切 tab。
+            page.click('[data-system-tab="update"]')
+            page.wait_for_selector('[data-system-panel="update"]:not([hidden])')
             page.wait_for_selector("text=离线升级")
             page.set_input_files("#update-file", str(package))
             page.click("#update-upload-btn")

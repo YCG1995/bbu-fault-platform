@@ -321,7 +321,7 @@ evidence-rules 含 `root_causes` 段时，search_evidence.py 在 evidence.json �
 
 `assets/alarm-code-dictionary.yaml` 由生成器 `assets/shared/` 统一分发。基础字段：`{code/codes, name, applicable.boards, default_severity, reason_codes, extra_params, detection, detect_cycle, debounce, thresholds, masking, related_alarms, related_files, related_faults, handling, source, verified}`。
 
-- 只收录权威来源（告警手册/公司文档/用户确认）条目；`verified: false` 不得作为结论唯一依据。
+- 只收录权威来源（告警手册/企业文档/用户确认）条目；`verified: false` 不得作为结论唯一依据。
 - 检索到告警码时用字典解释含义、原因码、检测周期/防抖、门限、关联告警、关联文件与处理措施；未收录条目在报告标注"字典待补充"。
 - `reason_codes` 是随告警附加参数上报的子码（如 198096841 原因码 1-5）；多原因码告警必须先按 `masking` 屏蔽关系收敛根因（如"报文接收异常"屏蔽"协商异常/时钟质量差/服务器时间异常/PDV"），被屏蔽的原因码不得作为最终结论。
 - `thresholds` 为机读门限（如压控电压 0x500/0xFB00、SyncE 降质 400ppb、1PPS 降质 15us/100ppb、锁星 ≥6 颗 cno>35dB 且锁定<4 持续 120s），与 `clk-field-dictionary.yaml` 的 `alarm_field_mapping` 配合定位日志字段。

@@ -33,11 +33,39 @@ DEFAULTS: dict[str, Any] = {
     "llm_retry_backoff_sec": 2.0,
     "llm_health_window": 20,
     "metrics_token": "",
+    "assistant_enabled": True,
+    "assistant_rate_per_min": 12,
+    "mcp_allow_remote": False,
     "max_llm_calls": 12,
     "max_total_tokens": 200000,
     "max_upload_mb": 2048,
     "max_update_mb": 512,
     "max_migration_mb": 4096,
+    "workshop_source_mode": "excerpt",
+    "workshop_egress_max_chars": 12000,
+    "diagnostic_egress_max_chars": 8000,
+    "session_continue_enabled": True,
+    "session_max_supplements": 3,
+    "evaluation_hidden_min_cases": 20,
+    "evaluation_hidden_min_f1": 0.75,
+    "tool_policy_mode": "shadow",
+    "tool_sandbox_mode": "audit",
+    "tool_sandbox_cpu_sec": 600,
+    "tool_sandbox_memory_mb": 2048,
+    "tool_sandbox_max_output_mb": 128,
+    "tool_sandbox_max_children": 32,
+    "tool_approval_ttl_min": 120,
+    "skill_manifest_mode": "shadow",
+    "model_schema_mode": "auto",
+    "model_capability_cache_hours": 24,
+    "agent_engine_mode": "shadow",
+    "agent_max_steps": 4,
+    "agent_max_skills": 16,
+    "agent_max_replans": 1,
+    "calibration_min_samples": 20,
+    "import_max_files": 5000,
+    "import_max_total_mb": 512,
+    "import_max_ratio": 100,
     "upgrade_service_name": "bbu-fault-platform",
     "upgrade_service_user": "bbu",
     "upgrade_helper_cmd": "",
@@ -48,6 +76,7 @@ DEFAULTS: dict[str, Any] = {
     "session_warn_sec": 120,
     "cookie_secure": False,
     "password_min_length": 10,
+    "allow_self_register": False,
     "login_rate_window_sec": 300,
     "login_rate_ip_limit": 30,
     "login_rate_account_limit": 10,
@@ -68,9 +97,9 @@ DEFAULTS: dict[str, Any] = {
     "install_demo_skills": True,
     "log_level": "info",
     "personal_model_base_url": "https://maas.example.com/v1",
-    "personal_model_default": "deepseek-v4-flash",
+    "personal_model_default": "gpt-4o-mini",
     "personal_model_models": [
-        "deepseek-v4-flash",
+        "gpt-4o-mini",
         "enterprise-lite-v7.0",
         "enterprise-lite-cot-v7.0",
     ],
@@ -98,6 +127,9 @@ ENV_OVERRIDES = {
     "BBU_LOGIN_RATE_ACCOUNT_LIMIT": ("login_rate_account_limit", int),
     "BBU_TRUSTED_PROXIES": ("trusted_proxies", lambda v: [x.strip() for x in v.split(",") if x.strip()]),
     "BBU_METRICS_TOKEN": ("metrics_token", str),
+    "BBU_ASSISTANT_ENABLED": ("assistant_enabled", _env_bool),
+    "BBU_ASSISTANT_RATE_PER_MIN": ("assistant_rate_per_min", int),
+    "BBU_MCP_ALLOW_REMOTE": ("mcp_allow_remote", _env_bool),
     "BBU_UPGRADE_HELPER_CMD": ("upgrade_helper_cmd", str),
     "BBU_PERSONAL_MODEL_BASE_URL": ("personal_model_base_url", str),
     "BBU_PERSONAL_MODEL_DEFAULT": ("personal_model_default", str),
@@ -134,6 +166,40 @@ RUNTIME_SETTINGS: dict[str, dict[str, Any]] = {
     "max_extract_files": {"label": "解压文件数上限", "group": "容量与解压", "min": 100, "max": 2000000},
     "max_update_mb": {"label": "更新包上限（MB）", "group": "容量与解压", "min": 1, "max": 4096},
     "max_migration_mb": {"label": "迁移包上限（MB）", "group": "容量与解压", "min": 1, "max": 16384},
+    "allow_self_register": {"label": "允许免邀请码自助注册", "group": "账号与注册",
+                            "restart_required": False},
+    "tool_policy_mode": {"label": "工具授权模式", "group": "工具与沙箱", "type": "enum",
+                         "choices": ["off", "shadow", "enforce"]},
+    "tool_sandbox_mode": {"label": "沙箱模式", "group": "工具与沙箱", "type": "enum",
+                          "choices": ["off", "audit", "strict"]},
+    "tool_sandbox_cpu_sec": {"label": "沙箱 CPU 上限（秒）", "group": "工具与沙箱",
+                             "min": 1, "max": 86400},
+    "tool_sandbox_memory_mb": {"label": "沙箱内存上限（MB）", "group": "工具与沙箱",
+                               "min": 64, "max": 32768},
+    "tool_sandbox_max_output_mb": {"label": "沙箱输出上限（MB）", "group": "工具与沙箱",
+                                   "min": 1, "max": 2048},
+    "tool_sandbox_max_children": {"label": "沙箱子进程预算", "group": "工具与沙箱",
+                                  "min": 4, "max": 512},
+    "tool_approval_ttl_min": {"label": "工具审批有效期（分钟）", "group": "工具与沙箱",
+                              "min": 5, "max": 10080},
+    "skill_manifest_mode": {"label": "技能清单校验模式", "group": "工具与沙箱",
+                            "type": "enum", "choices": ["off", "shadow", "enforce"]},
+    "model_schema_mode": {"label": "模型 JSON 能力模式", "group": "工具与沙箱",
+                          "type": "enum", "choices": ["auto", "probe", "off"]},
+    "model_capability_cache_hours": {"label": "模型能力缓存（小时）", "group": "工具与沙箱",
+                                     "min": 1, "max": 720},
+    "import_max_files": {"label": "技能导入文件数上限", "group": "工具与沙箱",
+                         "min": 1, "max": 200000},
+    "import_max_total_mb": {"label": "技能导入解压上限（MB）", "group": "工具与沙箱",
+                            "min": 1, "max": 16384},
+    "import_max_ratio": {"label": "技能导入压缩比上限", "group": "工具与沙箱",
+                         "min": 1, "max": 10000},
+    "agent_engine_mode": {"label": "有界 Agent 模式", "group": "诊断 Agent",
+                          "type": "enum", "choices": ["off", "shadow", "canary", "bounded"]},
+    "agent_max_steps": {"label": "Agent 最大波次", "group": "诊断 Agent", "min": 1, "max": 12},
+    "agent_max_skills": {"label": "Agent 最大技能数", "group": "诊断 Agent", "min": 1, "max": 64},
+    "agent_max_replans": {"label": "Agent 最大重规划", "group": "诊断 Agent", "min": 0, "max": 2},
+    "calibration_min_samples": {"label": "校准最小样本", "group": "诊断 Agent", "min": 1, "max": 500},
 }
 RUNTIME_ENV_LABELS: dict[str, str] = {
     "max_workers": "BBU_MAX_WORKERS",
@@ -143,6 +209,10 @@ RUNTIME_ENV_LABELS: dict[str, str] = {
     "max_upload_mb": "BBU_MAX_UPLOAD_MB",
 }
 
+
+
+def _path_items(values: dict[str, Any]) -> list[tuple[str, Any]]:
+    return [(key, values.get(key)) for key in _PATH_KEYS]
 
 
 class Config:
@@ -186,8 +256,19 @@ class Config:
             self.values["work_dir"] = self._common_work_dir()
         if not str(self.values.get("work_dir") or "").strip():
             self.values["work_dir"] = self._common_work_dir()
+        self._reject_root_paths()
         self.values["_root"] = str(self.root)
         self.ensure_dirs()
+
+    def _reject_root_paths(self) -> None:
+        """拒绝把运行目录解析到文件系统根，避免误写 /data、/skills 或 /。"""
+        for key, raw in [("work_dir", self.values.get("work_dir")), *_path_items(self.values)]:
+            if not raw:
+                continue
+            path = Path(str(raw))
+            if path == Path(path.anchor):
+                raise SystemExit(
+                    f"{key} 不能指向文件系统根目录: {path}；请配置到独立工作目录")
 
     def _common_work_dir(self) -> str:
         try:
@@ -196,6 +277,10 @@ class Config:
             ]))
             if common.name in ("data", "skills", "cases"):
                 common = common.parent
+            if common == Path(common.anchor):
+                # 三个路径分处不同挂载点时 commonpath 会退化为根目录；
+                # 此时以 data 的父目录作为工作目录，避免尝试写入 /updates。
+                common = Path(self.values["data_dir"]).parent
             return str(common)
         except ValueError:
             return str(Path(self.values["data_dir"]).parent)
@@ -292,7 +377,8 @@ class Config:
                 "key": key, "label": meta["label"], "group": meta["group"],
                 "value": value, "default": default, "type": value_type,
                 "min": meta.get("min"), "max": meta.get("max"),
-                "restart_required": True, "env_override": self._env_for_key(key),
+                "restart_required": bool(meta.get("restart_required", True)),
+                "env_override": self._env_for_key(key),
             })
         return items
 
@@ -320,6 +406,11 @@ class Config:
                         value = bool(raw)
                 elif isinstance(default, float):
                     value = float(raw)
+                elif isinstance(default, str):
+                    value = str(raw).strip().lower()
+                    choices = meta.get("choices")
+                    if choices and value not in choices:
+                        raise ValueError(f"{key} 只能是 {'/'.join(choices)}")
                 else:
                     value = int(raw)
             except (TypeError, ValueError) as exc:
@@ -354,7 +445,7 @@ class Config:
         for key, value in updates.items():
             meta = RUNTIME_SETTINGS[key]
             saved.append({"key": key, "label": meta["label"], "value": value,
-                          "restart_required": True})
+                          "restart_required": bool(meta.get("restart_required", True))})
         return saved
 
     def public(self) -> dict[str, Any]:
@@ -366,6 +457,14 @@ class Config:
             "llm_retry_attempts", "llm_retry_backoff_sec",
             "max_total_tokens", "max_upload_mb", "max_update_mb", "session_hours", "local_tz_offset",
             "session_warn_sec", "cookie_secure", "password_min_length",
+            "allow_self_register",
+            "tool_policy_mode", "tool_sandbox_mode", "tool_sandbox_cpu_sec",
+            "tool_sandbox_memory_mb", "tool_sandbox_max_output_mb",
+            "tool_sandbox_max_children", "tool_approval_ttl_min",
+            "skill_manifest_mode", "model_schema_mode", "model_capability_cache_hours",
+            "import_max_files", "import_max_total_mb", "import_max_ratio",
+            "agent_engine_mode", "agent_max_steps", "agent_max_skills",
+            "agent_max_replans", "calibration_min_samples",
             "min_route_score", "fast_max_skills", "deep_max_skills",
             "planner_enabled", "planner_replan", "planner_max_steps",
             "planner_max_total_skills", "planner_replan_max_skills",

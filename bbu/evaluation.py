@@ -11,6 +11,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
+import random
+import re
 import shutil
 import threading
 import time
@@ -29,6 +32,44 @@ from .util import iso_now, new_id, read_json, sha256_file, write_json, write_tex
 UNKNOWN_ROOTS = {"__unknown__", "unknown", "未知", "未知故障", "none"}
 VALID_STATUS = {"unlabeled", "labeled", "golden", "deprecated"}
 VALID_SPLITS = {"unlabeled", "dev", "test", "hidden", "train"}
+LEAK_SPLITS = {"dev", "test", "hidden", "train"}
+VALID_LLM_MODES = {"off", "planner", "report", "full"}
+
+
+def _shingles(text: str, size: int = 3) -> set[str]:
+    normalized = re.sub(r"\s+", "", str(text or "").lower())
+    if len(normalized) < size:
+        return set()
+    return {normalized[i:i + size] for i in range(len(normalized) - size + 1)}
+
+
+def _wilson(success: int, total: int, z: float = 1.96) -> list[float] | None:
+    if total <= 0:
+        return None
+    p = success / total
+    denom = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denom
+    margin = z * math.sqrt(max(0.0, p * (1 - p) / total + z * z / (4 * total * total))) / denom
+    return [round(max(0.0, center - margin), 3), round(min(1.0, center + margin), 3)]
+
+
+def _bootstrap_f1(results: list[dict[str, Any]], iterations: int = 1000) -> list[float] | None:
+    rows = [r.get("metrics") or {} for r in results if (r.get("metrics") or {}).get("status")]
+    if len(rows) < 3:
+        return None
+    rng = random.Random(20261125)
+    values: list[float] = []
+    for _ in range(iterations):
+        sample = [rows[rng.randrange(len(rows))] for _ in rows]
+        tp = sum(int(r.get("tp") or 0) for r in sample)
+        fp = sum(int(r.get("fp") or 0) for r in sample)
+        fn = sum(int(r.get("fn") or 0) for r in sample)
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        values.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
+    values.sort()
+    return [round(values[int(0.025 * len(values))], 3),
+            round(values[min(len(values) - 1, int(0.975 * len(values)))], 3)]
 
 
 def normalize_root(value: Any) -> str:
@@ -310,11 +351,166 @@ class EvaluationService:
         self.data_dir = Path(data_dir or config.data_dir)
         self.store = case_store or RealCaseStore(db, self.data_dir)
 
+    def _model_gateway(self, llm_mode: str, model_config_id: int | None) -> AIGateway | None:
+        """校验模型参与模式；返回使用主库模型配置的网关，不把密钥复制进评测目录。"""
+        if llm_mode not in VALID_LLM_MODES:
+            raise ValueError(f"非法 llm_mode: {llm_mode}；可选 {sorted(VALID_LLM_MODES)}")
+        if llm_mode == "off":
+            return None
+        if model_config_id is not None:
+            try:
+                mid = int(model_config_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("model_config_id 必须是整数") from exc
+            row = self.db.one(
+                "SELECT * FROM model_configs WHERE id=? AND enabled=1", (mid,))
+            if not row:
+                raise ValueError(f"模型配置不存在或未启用: {mid}")
+            if str(row.get("provider") or "").lower() == "mock":
+                raise ValueError(f"模型配置 {mid} 是 mock provider，不能用于模型参与评测")
+            try:
+                roles = set(json.loads(row.get("roles") or "[]"))
+            except (TypeError, json.JSONDecodeError):
+                roles = set()
+            required = []
+            if llm_mode in ("planner", "full"):
+                required.append("planner")
+            if llm_mode in ("report", "full"):
+                required.append("writer")
+            missing = [role for role in required if role not in roles]
+            if missing:
+                raise ValueError(f"模型配置 {mid} 缺少角色: {', '.join(missing)}")
+        gateway = AIGateway(self.db, self.config,
+                            secret_box=SecretBox(Path(self.config.data_dir)))
+        required = []
+        if llm_mode in ("planner", "full"):
+            required.append("planner")
+        if llm_mode in ("report", "full"):
+            required.append("writer")
+        missing = [role for role in required if not gateway.has_real_model(role)]
+        if missing:
+            raise ValueError(
+                "模型参与评测需要先配置真实模型角色: " + ", ".join(missing)
+                + "；请先在模型接入中启用对应模型，或改用 llm_mode=off")
+        return gateway
+
+    @staticmethod
+    def _llm_usage(results: list[dict[str, Any]]) -> dict[str, Any]:
+        calls = 0
+        tokens = 0
+        models: set[str] = set()
+        used_cases = 0
+        narrative_used = 0
+        narrative_fallback = 0
+        for item in results:
+            result = item.get("result") or {}
+            stats = result.get("stats") or {}
+            case_calls = int(stats.get("llm_calls") or 0)
+            calls += case_calls
+            used_cases += 1 if case_calls else 0
+            tokens += int(stats.get("total_tokens") or 0)
+            if result.get("narrative"):
+                narrative_used += 1
+            check = result.get("narrative_check") or {}
+            if check and not check.get("skipped") and not check.get("ok"):
+                narrative_fallback += 1
+            for name in stats.get("models") or []:
+                if name:
+                    models.add(str(name))
+        return {"calls": calls, "tokens": tokens, "models": sorted(models),
+                "used_cases": used_cases, "narrative_used": narrative_used,
+                "narrative_fallback": narrative_fallback}
+
+    def audit_splits(self) -> dict[str, Any]:
+        """跨 split 泄漏检查：输入指纹精确重复 + 描述近重复。"""
+        cases = [c for c in self.store.list(split="all")
+                 if c.get("status") in ("labeled", "golden") and c.get("split") in LEAK_SPLITS]
+        counts: dict[str, int] = {}
+        for case in cases:
+            counts[case["split"]] = counts.get(case["split"], 0) + 1
+        leaks: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+
+        def add_pair(left: dict[str, Any], right: dict[str, Any], kind: str, score: float) -> None:
+            if left["split"] == right["split"]:
+                return
+            key = tuple(sorted((left["id"], right["id"])))
+            if key in seen_pairs:
+                return
+            seen_pairs.add(key)
+            leaks.append({
+                "kind": kind, "score": round(score, 3),
+                "left_id": left["id"], "left_name": left["name"], "left_split": left["split"],
+                "right_id": right["id"], "right_name": right["name"], "right_split": right["split"],
+            })
+
+        by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+        for case in cases:
+            fingerprint = str(case.get("dataset_sha256") or "")
+            if fingerprint and case.get("input_paths"):
+                by_fingerprint.setdefault(fingerprint, []).append(case)
+        for group in by_fingerprint.values():
+            for i, left in enumerate(group):
+                for right in group[i + 1:]:
+                    add_pair(left, right, "exact_input", 1.0)
+
+        candidates = [c for c in cases if len(_shingles(
+            f"{c.get('title') or ''}{c.get('description') or ''}{c.get('notes') or ''}")) >= 12]
+        for i, left in enumerate(candidates):
+            left_text = _shingles(f"{left.get('title') or ''}{left.get('description') or ''}{left.get('notes') or ''}")
+            for right in candidates[i + 1:]:
+                if left["split"] == right["split"]:
+                    continue
+                right_text = _shingles(f"{right.get('title') or ''}{right.get('description') or ''}{right.get('notes') or ''}")
+                if not left_text or not right_text:
+                    continue
+                score = len(left_text & right_text) / len(left_text | right_text)
+                if score >= 0.82:
+                    add_pair(left, right, "near_description", score)
+        return {
+            "ok": not leaks, "cases": len(cases), "counts": counts,
+            "leaks": sorted(leaks, key=lambda x: (-x["score"], x["left_id"]))[:200],
+            "thresholds": {"near_description_jaccard": 0.82},
+            "limitations": [
+                "只检查已标注/ golden 的 dev/test/hidden/train 案例。",
+                "输入指纹来自文件路径与内容哈希；缺失原文件的历史案例无法完成精确指纹检查。",
+                "近重复基于标题、描述和备注的字符三元组，不等同于专家判定。",
+            ],
+        }
+
+    def _hidden_gate(self, cases: list[dict[str, Any]], summary: dict[str, Any], split: str) -> dict[str, Any]:
+        min_cases = max(1, int(self.config.get("evaluation_hidden_min_cases", 20))
+                        if hasattr(self.config, "get") else 20)
+        min_f1 = float(self.config.get("evaluation_hidden_min_f1", 0.75))
+        applied = split == "hidden"
+        passed = (not applied) or (len(cases) >= min_cases and summary.get("f1", 0) >= min_f1)
+        return {"applied": applied, "passed": passed, "min_cases": min_cases,
+                "min_f1": min_f1, "cases": len(cases), "f1": summary.get("f1"),
+                "reason": "" if passed else (
+                    f"hidden 样本 {len(cases)} < {min_cases}" if len(cases) < min_cases
+                    else f"hidden F1 {summary.get('f1')} < {min_f1}")}
+
     def evaluate(self, *, split: str = "test", limit: int = 0,
-                 case_ids: list[str] | None = None, name: str = "") -> dict[str, Any]:
+                 case_ids: list[str] | None = None, name: str = "",
+                 llm_mode: str = "off",
+                 model_config_id: int | None = None) -> dict[str, Any]:
+        mode = str(llm_mode or "off").strip().lower()
+        gateway = self._model_gateway(mode, model_config_id)
+        audit = self.audit_splits()
+        if split == "hidden":
+            blocking = [item for item in audit["leaks"]
+                        if "hidden" in (item["left_split"], item["right_split"])]
+            if blocking:
+                raise ValueError(
+                    f"hidden 与其它 split 存在 {len(blocking)} 条泄漏，拒绝运行独立评测")
         cases = self._select_cases(split, case_ids, limit)
         if not cases:
             raise ValueError("没有可用于评测的已标注案例；请先 label 案例并设置 dev/test/hidden")
+        min_cases = max(1, int(self.config.get("evaluation_hidden_min_cases", 20)))
+        if split == "hidden" and len(cases) < min_cases:
+            raise ValueError(
+                f"hidden 独立评测至少需要 {min_cases} 个已标注案例，当前 {len(cases)} 个；"
+                "数据不足时只报告缺口，不用合成案例补齐")
         eval_id = new_id("EV")
         started = time.time()
         now = iso_now()
@@ -322,13 +518,15 @@ class EvaluationService:
             "INSERT INTO evaluations(id,name,split,status,config_json,created_at) "
             "VALUES(?,?,?,?,?,?)",
             (eval_id, name or f"{split}-{now[:10]}", split, "running",
-             json.dumps({"deterministic": True, "limit": limit}, ensure_ascii=False), now))
+             json.dumps({"deterministic": mode == "off", "llm_mode": mode,
+                         "model_config_id": model_config_id, "limit": limit},
+                        ensure_ascii=False), now))
         results: list[dict[str, Any]] = []
         failures = 0
         for case in cases:
             case_started = time.time()
             try:
-                outcome = self._run_case(case, eval_id)
+                outcome = self._run_case(case, eval_id, mode, model_config_id, gateway)
                 metrics = self._case_metrics(case, outcome["result"])
                 status = "ok" if metrics["exact"] else "miss"
                 results.append({"case": case, **outcome, "metrics": metrics, "status": status})
@@ -357,6 +555,15 @@ class EvaluationService:
                                  "excluded": case["excluded_roots"]}, ensure_ascii=False),
                      "{}", "{}", round(time.time() - case_started, 2), error, iso_now()))
         summary = self._summarize(results, failures, round(time.time() - started, 2))
+        summary["llm_mode"] = mode
+        summary["model_config_id"] = int(model_config_id) if model_config_id is not None else None
+        summary["llm"] = self._llm_usage(results)
+        if mode != "off":
+            summary["limitations"][1] = (
+                "模型参与评测：模型只负责规划/报告叙述，根因仍由技能规则与证据链决定；"
+                "结果不应当作确定性版本基线。")
+        summary["leakage"] = audit
+        summary["hidden_gate"] = self._hidden_gate(cases, summary, split)
         self.db.execute(
             "UPDATE evaluations SET status='done', summary_json=?, finished_at=? WHERE id=?",
             (json.dumps(summary, ensure_ascii=False, default=str), iso_now(), eval_id))
@@ -381,7 +588,9 @@ class EvaluationService:
             cases = cases[:limit]
         return cases
 
-    def _run_case(self, case: dict[str, Any], eval_id: str) -> dict[str, Any]:
+    def _run_case(self, case: dict[str, Any], eval_id: str, llm_mode: str = "off",
+                  model_config_id: int | None = None,
+                  model_gateway: AIGateway | None = None) -> dict[str, Any]:
         inputs = [Path(p) for p in case["input_paths"] if Path(p).exists()]
         if not inputs:
             raise ValueError("案例输入文件不存在，可能已被移动或清理")
@@ -389,16 +598,21 @@ class EvaluationService:
         work.mkdir(parents=True, exist_ok=True)
         eval_config = copy.deepcopy(self.config)
         eval_config.values["data_dir"] = str(work / "data")
-        eval_config.values["planner_enabled"] = False
-        eval_config.values["planner_replan"] = False
+        eval_config.values["planner_enabled"] = llm_mode in ("planner", "full")
+        eval_config.values["planner_replan"] = llm_mode in ("planner", "full")
         eval_config.values["auto_distill"] = False
-        eval_config.values["report_llm"] = False
+        eval_config.values["report_llm"] = llm_mode in ("report", "full")
         eval_config.values["max_workers"] = 1
         eval_config.ensure_dirs()
         db = Database(eval_config.db_path)
-        registry = SkillRegistry(db, Path(eval_config.skills_dir))
+        # 技能签名密钥属于实例级资产，不能在每个临时评测库里重新生成；
+        # 任务产物仍写入 eval_config.data_dir，只有验签使用主库 data_dir。
+        registry = SkillRegistry(db, Path(eval_config.skills_dir), data_dir=Path(self.config.data_dir),
+                             manifest_mode=str(eval_config.get("skill_manifest_mode", "shadow")))
         registry.scan()
-        gateway = AIGateway(db, eval_config, secret_box=SecretBox(eval_config.data_dir))
+        # 模型配置来自主库，任务/证据仍然只写入本案例的临时库。
+        gateway = model_gateway or AIGateway(
+            db, eval_config, secret_box=SecretBox(eval_config.data_dir))
         runner = SkillRunner(eval_config)
         pipeline = TaskPipeline(db, eval_config, registry, gateway, runner,
                                 experiences=ExperienceStore(db))
@@ -406,11 +620,14 @@ class EvaluationService:
         description = case.get("description") or f"{case['title']}（真实案例评测）"
         db.execute(
             "INSERT INTO tasks(id,user_id,title,description,status,stage,progress,mode,"
-            "input_json,options_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "model_override,input_json,options_json,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (task_id, 0, case["title"][:80], description, "queued", "queued", 0, "deep",
+             int(model_config_id) if model_config_id is not None else None,
              json.dumps([{"name": p.name, "stored_path": str(p), "size": p.stat().st_size
                           if p.is_file() else 0} for p in inputs], ensure_ascii=False),
-             json.dumps({"evaluation": True, "case_id": case["id"]}, ensure_ascii=False),
+             json.dumps({"evaluation": True, "case_id": case["id"],
+                         "llm_mode": llm_mode}, ensure_ascii=False),
              iso_now()))
         started = time.time()
         result = pipeline.run(task_id, threading.Event())
@@ -468,9 +685,11 @@ class EvaluationService:
         return {
             "cases": total, "completed": total - errors, "errors": errors,
             "exact": exact, "exact_rate": round(exact / total, 3) if total else 0.0,
+            "exact_rate_ci95": _wilson(exact, total),
             "tp": tp, "fp": fp, "fn": fn,
             "precision": round(precision, 3), "recall": round(recall, 3),
-            "f1": round(f1, 3),
+            "precision_ci95": _wilson(tp, tp + fp), "recall_ci95": _wilson(tp, tp + fn),
+            "f1": round(f1, 3), "f1_ci95": _bootstrap_f1(results),
             "negative_cases": len(negative_cases),
             "false_positive_rate": round(negative_fp / len(negative_cases), 3) if negative_cases else None,
             "abstain_rate": round(abstain / total, 3) if total else 0.0,
@@ -480,16 +699,28 @@ class EvaluationService:
                 "仅统计 labeled/golden 案例；unlabeled 不参与准确率。",
                 "确定性评测关闭 LLM 与自学习，用于版本可复现对比。",
                 "样本规模不足时，指标只能作为缺口信号，不能对外宣称现网准确率。",
+                "置信区间只反映已标注样本内的抽样不确定性，不代表现网分布。",
             ],
         }
 
     @staticmethod
     def _public_case_result(r: dict[str, Any]) -> dict[str, Any]:
         case = r.get("case") or {}
+        result = r.get("result") or {}
+        stats = result.get("stats") or {}
         return {"case_id": case.get("id"), "case_name": case.get("name"),
                 "expected": case.get("expected_roots"), "status": r.get("status"),
                 "metrics": r.get("metrics"), "error": r.get("error"),
-                "duration_sec": r.get("duration_sec")}
+                "duration_sec": r.get("duration_sec"),
+                "llm": {"calls": int(stats.get("llm_calls") or 0),
+                        "models": stats.get("models") or [],
+                        "tokens": int(stats.get("total_tokens") or 0)},
+                "llm_used": bool((result.get("routing") or {}).get("llm_used")
+                                 or (result.get("arbitration") or {}).get("llm_used")
+                                 or result.get("narrative")
+                                 or int(stats.get("llm_calls") or 0)),
+                "narrative": bool(result.get("narrative")),
+                }
 
 
 def format_evaluation_markdown(eval_id: str, summary: dict[str, Any],
@@ -497,11 +728,18 @@ def format_evaluation_markdown(eval_id: str, summary: dict[str, Any],
     lines = [
         "# BBU 真实案例评测报告", "",
         f"- 评测 ID：`{eval_id}`",
+        f"- 模型参与：{summary.get('llm_mode', 'off')}；调用 {((summary.get('llm') or {}).get('calls', 0))} 次；"
+        f"模型 {((summary.get('llm') or {}).get('models') or ['无'])}；"
+        f"模型叙述采纳 {((summary.get('llm') or {}).get('narrative_used', 0))}，"
+        f"回退 {((summary.get('llm') or {}).get('narrative_fallback', 0))}",
         f"- 案例数：{summary.get('cases')}，完成 {summary.get('completed')}，错误 {summary.get('errors')}",
-        f"- 完全命中率：{summary.get('exact_rate')}",
+        f"- 完全命中率：{summary.get('exact_rate')}（95% CI {summary.get('exact_rate_ci95')}）",
         f"- 根因 Precision / Recall / F1：{summary.get('precision')} / {summary.get('recall')} / {summary.get('f1')}",
+        f"- Precision 95% CI：{summary.get('precision_ci95')}；Recall 95% CI：{summary.get('recall_ci95')}；F1 95% CI：{summary.get('f1_ci95')}",
         f"- 阴性误报率：{summary.get('false_positive_rate')}",
         f"- 拒判率：{summary.get('abstain_rate')}",
+        f"- 跨 split 泄漏：{'无' if (summary.get('leakage') or {}).get('ok') else len((summary.get('leakage') or {}).get('leaks') or [])}",
+        f"- hidden 门禁：{json.dumps(summary.get('hidden_gate'), ensure_ascii=False)}",
         f"- 置信度校准：{json.dumps(summary.get('confidence_calibration'), ensure_ascii=False)}",
         "", "## 案例明细", "",
         "| 案例 | 期望 | 实际 | 完全命中 | 状态 | 耗时 |",

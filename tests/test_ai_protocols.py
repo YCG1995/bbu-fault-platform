@@ -8,12 +8,13 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
-from bbu.ai import AIGateway  # noqa: E402
+from bbu.ai import AIGateway, AIError  # noqa: E402
 from bbu.db import Database  # noqa: E402
 from bbu.security import SecretBox  # noqa: E402
 
@@ -32,6 +33,29 @@ class _Handler(BaseHTTPRequestHandler):
                 "content": [{"type": "text", "text": json.dumps({"ok": True})}],
                 "usage": {"input_tokens": 7, "output_tokens": 3},
             }
+        elif payload.get("stream"):
+            # 模拟 OpenAI SSE：先送 delta，再送 usage，最后 [DONE]。
+            if "SSE_FULL_MESSAGE" in str(payload.get("messages")):
+                chunks = [
+                    {"choices": [{"message": {"content": json.dumps({"ok": True})}}],
+                     "usage": {"prompt_tokens": 7, "completion_tokens": 3,
+                               "total_tokens": 10}},
+                ]
+            else:
+                chunks = [
+                    {"choices": [{"delta": {"content": json.dumps({"ok": True})}}]},
+                    {"choices": [{"delta": {}}],
+                     "usage": {"prompt_tokens": 7, "completion_tokens": 3,
+                               "total_tokens": 10}},
+                ]
+            raw = ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
+                   + "data: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         else:
             body = {
                 "choices": [{"message": {"content": json.dumps({"ok": True})}}],
@@ -68,7 +92,7 @@ class AIProtocolTests(unittest.TestCase):
         self.box = SecretBox(Path(self.tmp.name))
         _Handler.seen.clear()
 
-    def _add_model(self, provider: str, base_url: str):
+    def _add_model(self, provider: str, base_url: str, extra: dict | None = None):
         key = self.box.encrypt("test-key")
         now = "2026-11-24T00:00:00Z"
         self.db.execute(
@@ -76,7 +100,7 @@ class AIProtocolTests(unittest.TestCase):
             "temperature,timeout_sec,enabled,priority,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (f"{provider}-test", provider, base_url, key, "test-model",
-             json.dumps(["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
+             json.dumps(["default"]), 4096, 0.2, 5, 1, 0, json.dumps(extra or {}), now, now))
 
     def test_openai_compatible(self):
         self._add_model("openai", f"http://127.0.0.1:{self.port}/v1")
@@ -87,6 +111,8 @@ class AIProtocolTests(unittest.TestCase):
         call = _Handler.seen[-1]
         self.assertEqual(call["path"], "/v1/chat/completions")
         self.assertEqual(call["headers"].get("authorization"), "Bearer test-key")
+        response_format = call["payload"].get("response_format") or {}
+        self.assertEqual(response_format.get("type"), "json_object")
 
     def test_anthropic_native(self):
         self._add_model("anthropic", f"http://127.0.0.1:{self.port}")
@@ -98,6 +124,83 @@ class AIProtocolTests(unittest.TestCase):
         self.assertEqual(call["path"], "/v1/messages")
         self.assertEqual(call["headers"].get("x-api-key"), "test-key")
         self.assertTrue(call["headers"].get("anthropic-version"))
+
+    def test_declared_strict_schema_uses_native_json_schema(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1",
+                        extra={"capabilities": {"json_mode": True, "strict_schema": True}})
+        result = AIGateway(self.db, None, secret_box=self.box).complete(
+            "default", "你是测试助手", "只输出 JSON", json_schema={"type": "object"})
+        self.assertEqual(result.data, {"ok": True})
+        response_format = _Handler.seen[-1]["payload"].get("response_format") or {}
+        self.assertEqual(response_format.get("type"), "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
+
+    def test_openai_streaming(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1")
+        attempts: list[dict] = []
+        result = AIGateway(self.db, None, secret_box=self.box).complete(
+            "default", "你是测试助手", "只输出 JSON", json_schema={"type": "object"},
+            stream=True, attempt_sink=attempts.append)
+        self.assertEqual(result.data, {"ok": True})
+        self.assertEqual(result.usage.total_tokens, 10)
+        self.assertTrue(result.stream_used)
+        self.assertTrue(attempts[0]["stream"])
+        call = _Handler.seen[-1]
+        self.assertTrue(call["payload"].get("stream"))
+        self.assertEqual(call["headers"].get("accept"), "text/event-stream")
+
+    def test_openai_sse_full_message(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1")
+        result = AIGateway(self.db, None, secret_box=self.box).complete(
+            "default", "你是测试助手", "SSE_FULL_MESSAGE 只输出 JSON",
+            json_schema={"type": "object"}, stream=True)
+        self.assertEqual(result.data, {"ok": True})
+        self.assertEqual(result.usage.total_tokens, 10)
+
+    def test_stream_unsupported_falls_back_to_json(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1")
+        body = {
+            "choices": [{"message": {"content": json.dumps({"ok": True})}}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+        }
+        attempts: list[dict] = []
+        with patch("bbu.ai._post_openai_stream",
+                   side_effect=AIError("HTTP 400: stream unsupported")), \
+             patch("bbu.ai._post_json", return_value=(body, 200)) as post:
+            result = AIGateway(self.db, None, secret_box=self.box).complete(
+                "default", "sys", "user", json_schema={"type": "object"}, stream=True,
+                attempt_sink=attempts.append)
+        self.assertEqual(result.data, {"ok": True})
+        self.assertFalse(result.stream_used)
+        self.assertFalse(attempts[0]["stream"])
+        self.assertFalse(post.call_args.args[1].get("stream"))
+
+    def test_stream_interrupted_retries_stream_not_json(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1",
+                        extra={"capabilities": {"json_mode": True, "strict_schema": False}})
+        with patch("bbu.ai._post_openai_stream",
+                   side_effect=AIError("模型流式响应中断: IncompleteRead")), \
+             patch("bbu.ai._post_json") as post:
+            with self.assertRaises(AIError):
+                AIGateway(self.db, None, secret_box=self.box).complete(
+                    "default", "sys", "user", stream=True, retries_per_model=0)
+        post.assert_not_called()
+
+    def test_failed_call_is_reported_without_usage(self):
+        self._add_model("openai", f"http://127.0.0.1:{self.port}/v1")
+        attempts: list[dict] = []
+        with patch("bbu.ai._post_json", side_effect=AIError("HTTP 503: upstream connect error")):
+            with self.assertRaises(AIError):
+                AIGateway(self.db, None, secret_box=self.box).complete(
+                    "default", "sys", "user", attempt_sink=attempts.append,
+                    stage="extract", retries_per_model=0)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["stage"], "extract")
+        self.assertEqual(attempts[0]["status"], "error")
+        self.assertEqual(attempts[0]["http_status"], 503)
+        self.assertEqual(attempts[0]["input_tokens"], 0)
+        self.assertEqual(attempts[0]["output_tokens"], 0)
+        self.assertGreater(attempts[0].get("estimated_input_tokens", 0), 0)
 
 
 if __name__ == "__main__":

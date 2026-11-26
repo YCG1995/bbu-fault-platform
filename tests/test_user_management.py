@@ -7,7 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bbu.db import Database
+from bbu.db import Database, SCHEMA_VERSION
 
 
 class UserSchemaMigrationTests(unittest.TestCase):
@@ -36,15 +36,18 @@ class UserSchemaMigrationTests(unittest.TestCase):
 
             db = Database(path)
             cols = {r["name"] for r in db.all("PRAGMA table_info(users)")}
-            for name in ("status", "team", "site", "expires_at", "invited_by",
+            for name in ("status", "expires_at", "invited_by",
                          "invited_at", "updated_at", "notification_prefs"):
                 self.assertIn(name, cols)
+            self.assertNotIn("team", cols)
+            self.assertNotIn("site", cols)
             rows = {r["username"]: r for r in db.all("SELECT * FROM users")}
             self.assertEqual(rows["old_admin"]["status"], "active")
             self.assertEqual(rows["old_disabled"]["status"], "disabled")
             self.assertEqual(rows["old_admin"]["updated_at"], "2026-01-01T00:00:00Z")
             self.assertEqual(
-                db.one("SELECT value FROM settings WHERE key='schema_version'")["value"], "10")
+                db.one("SELECT value FROM settings WHERE key='schema_version'")["value"],
+                str(SCHEMA_VERSION))
             self.assertTrue(db.one(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='user_invites'"))
             self.assertTrue(db.one(

@@ -71,6 +71,9 @@ class Skill:
     health: dict[str, Any] = field(default_factory=dict)
     source: str = "imported"
     channel: str = "stable"
+    manifest_status: str = "missing"
+    manifest_error: str = ""
+    content_sha256: str = ""
 
     def to_db(self) -> dict[str, Any]:
         return {
@@ -127,9 +130,12 @@ class Skill:
 
 
 class SkillRegistry:
-    def __init__(self, db: Database, skills_dir: Path) -> None:
+    def __init__(self, db: Database, skills_dir: Path, data_dir: Path | None = None,
+                 manifest_mode: str = "shadow") -> None:
         self.db = db
         self.skills_dir = Path(skills_dir)
+        self.data_dir = Path(data_dir or (self.skills_dir.parent / "data"))
+        self.manifest_mode = manifest_mode if manifest_mode in ("off", "shadow", "enforce") else "shadow"
         self._cache: dict[str, Skill] = {}
         self._lock = threading.Lock()
 
@@ -234,12 +240,29 @@ class SkillRegistry:
         else:
             status = "ready"
 
-        # 只有“非 triage + 有根因 + 至少有案例”才视为已验证；
-        # --skip-regression 生成的草稿即使有根因也不得冒称已验证。
-        verified = (str(profile.get("mode") or "") != "triage"
-                    and bool(root_causes)
-                    and bool(profile.get("cases")))
+        # 只有“非 triage + 有根因 + 至少有案例”且签名清单记录了真实案例回归，
+        # 才视为已验证；--skip-regression 草稿、导入隔离包和仅签名都不算。
+        semantic_verified = (str(profile.get("mode") or "") != "triage"
+                             and bool(root_causes)
+                             and bool(profile.get("cases")))
         source = "workshop" if (path / ".bbu-workshop.json").exists() else "imported"
+        from .supply import verify_skill
+        manifest = verify_skill(path, data_dir=self.data_dir)
+        manifest_status = str(manifest.get("status") or "missing")
+        manifest_error = str(manifest.get("reason") or "")
+        verification = manifest.get("verification") or {}
+        verified = bool(
+            semantic_verified and manifest_status == "verified"
+            and verification.get("status") == "case_regression"
+            and verification.get("ok"))
+        if manifest_status == "verified":
+            manifest_error = ""
+        if self.manifest_mode == "enforce" and manifest_status != "verified":
+            status = "incompatible"
+            reasons.append(f"内容清单/签名校验未通过：{manifest_error or manifest_status}")
+        elif manifest_status in ("tampered", "bad_signature", "invalid"):
+            status = "incompatible"
+            reasons.append(f"内容清单/签名异常，禁止执行：{manifest_error or manifest_status}")
         return Skill(
             name=name, path=path, title=title, version=version, category=category,
             description=description, status=status, verified=verified,
@@ -250,8 +273,13 @@ class SkillRegistry:
             root_causes=root_causes if isinstance(root_causes, list) else [],
             rules=rules if isinstance(rules, list) else [],
             health={"reasons": reasons, "has_run_analysis": run_analysis.exists(),
-                    "rules": len(rules), "root_causes": len(root_causes)},
-            source=source,
+                    "rules": len(rules), "root_causes": len(root_causes),
+                    "manifest_status": manifest_status, "manifest_error": manifest_error,
+                    "verification_status": str(verification.get("status") or ""),
+                    "semantic_verified": semantic_verified},
+            source=source, manifest_status=manifest_status,
+            manifest_error=manifest_error,
+            content_sha256=str(manifest.get("content_sha256") or ""),
         )
 
     def _persist(self, skill: Skill) -> None:
@@ -319,6 +347,29 @@ class SkillRegistry:
                         (status, iso_now(), name))
         with self._lock:
             self._cache.pop(name, None)
+
+    def manifest(self, name: str) -> dict[str, Any]:
+        row = self.db.one("SELECT path FROM skills WHERE name=?", (name,))
+        if not row:
+            raise ValueError("技能不存在")
+        from .supply import verify_skill
+        return verify_skill(Path(row["path"]), data_dir=self.data_dir)
+
+    def sign_manifest(self, name: str) -> dict[str, Any]:
+        row = self.db.one("SELECT path,version FROM skills WHERE name=?", (name,))
+        if not row:
+            raise ValueError("技能不存在")
+        path = Path(row["path"])
+        from .util import within_directory
+        if not within_directory(self.skills_dir, path):
+            raise ValueError("技能目录越界")
+        from .supply import sign_skill
+        result = sign_skill(path, data_dir=self.data_dir, name=name,
+                            version=str(row.get("version") or ""), builder="admin-audit")
+        with self._lock:
+            self._cache.pop(name, None)
+        self.scan()
+        return result
 
 
 def _str_list(value: Any) -> list[str]:
@@ -493,13 +544,30 @@ def inventory_inputs(paths: list[Path]) -> dict[str, Any]:
     }
 
 
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 class SkillRunner:
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, db: Any | None = None, policy: Any | None = None) -> None:
         self.config = config
+        self.db = db
+        self.policy = policy
+
+    def _session_revision(self, task_id: str) -> int:
+        if not self.db or not task_id:
+            return 0
+        row = self.db.one("SELECT COALESCE(MAX(revision),0) AS n FROM session_events WHERE task_id=?",
+                          (task_id,))
+        return int((row or {}).get("n") or 0)
 
     def run(self, skill: Skill, inputs: list[Path], description: str,
             out_dir: Path, cancel_event: threading.Event | None = None,
-            timeout: int | None = None) -> dict[str, Any]:
+            timeout: int | None = None, task_id: str = "",
+            actor_role: str = "engineer", approval_id: str = "") -> dict[str, Any]:
         started = time.time()
         out_dir.mkdir(parents=True, exist_ok=True)
         entry = skill.path / "scripts" / "run_analysis.py"
@@ -509,23 +577,70 @@ class SkillRunner:
                     "duration_ms": 0}
         if skill.status == "disabled":
             return {"ok": False, "status": "disabled", "error": "技能已被停用", "duration_ms": 0}
+
+        call_id = ""
+        manifest = None
+        revision = self._session_revision(task_id)
+        if self.policy and task_id and hasattr(self.policy, "check"):
+            task = (self.db.one("SELECT * FROM tasks WHERE id=?", (task_id,)) if self.db else {}) or {}
+            decision = self.policy.check(task=task, skill=skill, inputs=inputs,
+                                         description=description,
+                                         session_revision=revision,
+                                         approval_id=approval_id, actor_role=actor_role)
+            manifest = self.policy.manifest(skill)
+            call_id = self.policy.record_start(task_id=task_id, manifest=manifest,
+                                               decision=decision, approval_id=approval_id,
+                                               session_revision=revision)
+            if not decision.get("allow"):
+                return {"ok": False, "status": "denied",
+                        "error": "工具授权拒绝：" + "; ".join(decision.get("reasons") or []),
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "tool_call_id": call_id, "tool_decision": decision,
+                        "policy": decision}
+        else:
+            decision = None
+
         cmd = [
             sys.executable, str(entry), *[str(p) for p in inputs],
             "--description", description,
             "--out", str(out_dir),
             "--local-tz-offset", str(self.config.get("local_tz_offset", 8)),
         ]
+        env = env_with_vendor()
+        preexec = None
+        sandbox_meta: dict[str, Any] = {"mode": str(self.config.get("tool_sandbox_mode", "audit"))}
+        if manifest is not None:
+            from .sandbox import build_command, output_limit_bytes
+            cmd, env, preexec = build_command(entry, cmd[2:], manifest, out_dir, inputs, self.config)
+            sandbox_meta.update({"mode": str(self.config.get("tool_sandbox_mode", "audit")),
+                                 "network": manifest.network,
+                                 "allow_subprocess": bool(manifest.process.get("allow_subprocess")),
+                                 "platform": "windows" if os.name == "nt" else "posix"})
         stdout_path = out_dir / "runner.out"
         stderr_path = out_dir / "runner.err"
-        timeout = timeout or int(self.config.get("skill_timeout_sec", 900))
+        timeout = timeout or (manifest.timeout_sec if manifest else
+                              int(self.config.get("skill_timeout_sec", 900)))
+
+        def _finish(res: dict[str, Any], status: str, error: str = "") -> dict[str, Any]:
+            if self.policy and call_id:
+                resource = {"duration_ms": res.get("duration_ms"),
+                            "output_bytes": _file_size(stdout_path) + _file_size(stderr_path),
+                            "sandbox": sandbox_meta, "session_revision": revision}
+                self.policy.record_finish(call_id, status=status, result=res,
+                                          error=error or res.get("error") or "",
+                                          resource=resource)
+                res["tool_call_id"] = call_id
+            return res
+
         with open(stdout_path, "wb") as out_fh, open(stderr_path, "wb") as err_fh:
             popen_kwargs: dict[str, Any] = {
-                "cwd": str(skill.path), "stdout": out_fh, "stderr": err_fh,
-                "env": env_with_vendor(),
+                "cwd": str(skill.path), "stdout": out_fh, "stderr": err_fh, "env": env,
             }
             if os.name != "nt":
                 # start_new_session 仅 POSIX 支持；Windows 用 taskkill /T 终止进程树。
                 popen_kwargs["start_new_session"] = True
+                if preexec is not None:
+                    popen_kwargs["preexec_fn"] = preexec
             proc = subprocess.Popen(cmd, **popen_kwargs)
             deadline = time.time() + timeout
             cancelled = False
@@ -543,24 +658,33 @@ class SkillRunner:
         duration_ms = int((time.time() - started) * 1000)
         summary = read_json(out_dir / "run-summary.json", {}) or {}
         if cancelled:
-            return {"ok": False, "status": "cancelled", "error": "用户取消",
-                    "duration_ms": duration_ms, "summary": summary}
+            return _finish({"ok": False, "status": "cancelled", "error": "用户取消",
+                            "duration_ms": duration_ms, "summary": summary}, "cancelled")
         if timed_out:
-            return {"ok": False, "status": "timeout",
-                    "error": f"子 Skill 执行超过 {timeout}s（日志见 {stderr_path.name}）",
-                    "duration_ms": duration_ms, "summary": summary,
-                    "stderr_tail": _tail(stderr_path)}
+            return _finish({"ok": False, "status": "timeout",
+                            "error": f"子 Skill 执行超过 {timeout}s（日志见 {stderr_path.name}）",
+                            "duration_ms": duration_ms, "summary": summary,
+                            "stderr_tail": _tail(stderr_path)}, "timeout")
+        if manifest is not None:
+            from .sandbox import output_limit_bytes
+            if _file_size(stdout_path) + _file_size(stderr_path) > output_limit_bytes(self.config):
+                return _finish({"ok": False, "status": "output_limited",
+                                "error": "子 Skill 输出超过沙箱上限",
+                                "duration_ms": duration_ms, "summary": summary}, "failed")
         if proc.returncode != 0 or not summary.get("ok"):
-            return {"ok": False, "status": "failed",
-                    "error": (summary.get("error") or f"退出码 {proc.returncode}"),
-                    "duration_ms": duration_ms, "summary": summary,
-                    "stderr_tail": _tail(stderr_path)}
+            return _finish({"ok": False, "status": "failed",
+                            "error": (summary.get("error") or f"退出码 {proc.returncode}"),
+                            "duration_ms": duration_ms, "summary": summary,
+                            "stderr_tail": _tail(stderr_path)}, "failed")
         evidence = read_json(out_dir / "evidence.json", {}) or {}
         report_md = out_dir / "report.md"
         report_html = out_dir / "report.html"
         normalized = self._normalize(skill, summary, evidence, report_md, report_html,
                                      duration_ms)
-        return normalized
+        normalized["sandbox"] = sandbox_meta
+        if decision:
+            normalized["tool_decision"] = decision.get("decision")
+        return _finish(normalized, "done")
 
     def _normalize(self, skill: Skill, summary: dict[str, Any], evidence: dict[str, Any],
                    report_md: Path, report_html: Path, duration_ms: int) -> dict[str, Any]:

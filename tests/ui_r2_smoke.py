@@ -71,7 +71,7 @@ def main() -> int:
         # 邀请 reviewer 并激活，随后创建一个真实任务并分配给他。
         invite = admin.json("POST", "/api/users/invites", {
             "username": "ui_reviewer", "display_name": "UI 复核专家",
-            "role": "reviewer", "team": "无线", "hours": 24}, expected=201)[1]
+            "role": "reviewer", "hours": 24}, expected=201)[1]
         reviewer = Client(host, port)
         reviewer.json("POST", "/api/auth/activate", {
             "code": invite["code"], "password": "Reviewer!2026x"}, expected=201)

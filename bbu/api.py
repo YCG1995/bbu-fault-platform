@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import csv
+import fnmatch
+import hashlib
 import io
 import ipaddress
 import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import zipfile
@@ -24,29 +27,45 @@ import yaml
 
 from . import __version__, updater
 from .accounts import (activate_invite, create_invite, list_invites as list_invites_service,
-                       normalize_status, public_user, revoke_invite)
+                       normalize_status, public_user, register_user, revoke_invite)
+from .assistant import AssistantError, AssistantService
+from .backups import BackupManager
 from .ai import AIGateway
 from .config import Config
 from .db import Database
 from .evaluation import EvaluationService, RealCaseStore
+from .evidence_store import EvidenceStore
 from .migration import (
     workdir_supported,
     MaintenanceGate, MigrationConflict, MigrationError, MigrationManager,
     allowed_work_roots, assert_idle, delete_job, list_jobs, mark_interrupted,
     public_status, find_job_file, validate_target_root,
 )
+from .mcp_server import MCPService
 from .metrics import collect as collect_metrics, prometheus as prometheus_metrics
+from .model_roles import MODEL_ROLES
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
 from .pipeline import TaskPipeline
 from .review import ReviewService
+from .agent import BoundedAgent
+from .calibration import CalibrationStore
+from .provenance import audit_provenance, lock_fields
+from .workshop_spec import parse_source, public_spec
+from .recovery import (compare as recovery_compare, create_run as recovery_create,
+                       get_run as recovery_get, list_runs as recovery_list,
+                       observe as recovery_observe, review as recovery_review)
+from .case_matrix import (build_matrix, decide_candidate, latest_matrix, save_matrix,
+                          verify_matrix)
 from .security import (ROLE_RANK, SESSION_COOKIE, SecretBox, bootstrap_admin, check_role,
                        cleanup_sessions, create_session, delete_other_sessions, delete_session,
                        delete_user_sessions, extend_session, get_session, hash_password,
                        list_user_sessions, revoke_user_session, rotate_session_csrf,
                        session_public_id, validate_initial_password, validate_password, verify_password)
 from .skills import SkillRegistry, SkillRunner, parse_frontmatter
+from .session import DiagnosticSession, RevisionConflict
+from .tool_contract import ToolPolicy
 from .storage import save_upload
 from .util import (CST, iso_now, new_id, read_json, safe_filename, sha256_file, truncate,
                    unique_path, within_directory, write_json)
@@ -270,16 +289,22 @@ class App:
             "UPDATE evaluations SET status='error', error=?, finished_at=? "
             "WHERE status='running'",
             ("interrupted: 平台重启导致评测中断", iso_now()))
-        self.registry = SkillRegistry(self.db, config.skills_dir)
-        self.runner = SkillRunner(config)
+        self.registry = SkillRegistry(self.db, config.skills_dir, data_dir=config.data_dir,
+                                      manifest_mode=str(config.get("skill_manifest_mode", "shadow")))
+        self.tools = ToolPolicy(self.db, config)
+        self.runner = SkillRunner(config, db=self.db, policy=self.tools)
         self.gateway = AIGateway(self.db, config, secret_box=self.secret_box)
         self.workshop = WorkshopService(self.db, config, self.registry, self.gateway)
         self.workshop_jobs = WorkshopJobService(self.db, config, self.workshop, self.gateway)
         self.storage = TaskStorageService(self.db, config)
+        self.backups = BackupManager(self.db, config)
         self.learning = LearningService(self.db, config, self.registry, self.workshop)
         self.pipeline = TaskPipeline(self.db, config, self.registry,
                                      self.gateway, self.runner,
                                      experiences=self.learning.experiences)
+        self.evidence_store = EvidenceStore(self.db)
+        self.assistant = AssistantService(self)
+        self.mcp = MCPService(self, self.assistant)
         self.worker = TaskWorker(self.db, config, self.pipeline, learning=self.learning)
         self.migration_gate = MaintenanceGate()
         self.migration = MigrationManager(self, self.migration_gate)
@@ -338,6 +363,7 @@ class App:
         r.add("GET", r"/api/auth/me", h_me)
         r.add("POST", r"/api/auth/password", h_change_password)
         r.add("POST", r"/api/auth/activate", h_activate)
+        r.add("POST", r"/api/auth/register", h_register)
         r.add("POST", r"/api/auth/refresh", h_session_refresh)
         r.add("GET", r"/api/auth/sessions", h_sessions)
         r.add("POST", r"/api/auth/sessions/revoke-others", h_revoke_other_sessions)
@@ -346,6 +372,18 @@ class App:
         r.add("GET", r"/api/stats", h_stats)
         r.add("GET", r"/api/metrics", h_metrics)
         r.add("GET", r"/api/metrics/prometheus", h_metrics_prometheus)
+        r.add("GET", r"/mcp", h_mcp_http)
+        r.add("POST", r"/mcp", h_mcp_http)
+        r.add("GET", r"/api/assistant/status", h_assistant_status)
+        r.add("GET", r"/api/assistant/suggestions", h_assistant_suggestions)
+        r.add("POST", r"/api/assistant/chat", h_assistant_chat)
+        r.add("POST", r"/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/confirm",
+              h_assistant_confirm)
+        r.add("POST", r"/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/cancel",
+              h_assistant_cancel)
+        r.add("GET", r"/api/mcp/info", h_mcp_info)
+        r.add("POST", r"/api/mcp/token", h_mcp_token_create)
+        r.add("DELETE", r"/api/mcp/token", h_mcp_token_delete)
         r.add("GET", r"/api/cases", h_cases)
         r.add("GET", r"/api/cases/(?P<case_id>[A-Za-z0-9_-]+)", h_case_detail)
         r.add("POST", r"/api/cases/(?P<case_id>[A-Za-z0-9_-]+)/label", h_case_label)
@@ -366,6 +404,16 @@ class App:
         r.add("GET", r"/api/tasks", h_tasks)
         r.add("POST", r"/api/tasks", h_task_create)
         r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)", h_task_detail)
+        r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/questions", h_task_questions)
+        r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/session", h_task_session)
+        r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/evidence", h_task_evidence)
+        r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/agent-trace", h_agent_trace)
+        r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/recovery-runs", h_recovery_runs)
+        r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/recovery-runs", h_recovery_create)
+        r.add("POST", r"/api/recovery-runs/(?P<run_id>[A-Za-z0-9_-]+)/observe", h_recovery_observe)
+        r.add("POST", r"/api/recovery-runs/(?P<run_id>[A-Za-z0-9_-]+)/review", h_recovery_review)
+        r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/inputs", h_task_inputs)
+        r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/continue", h_task_continue)
         r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/events", h_task_events)
         r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/stream", h_task_stream)
         r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/cancel", h_task_cancel)
@@ -374,6 +422,8 @@ class App:
         r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/storage-jobs", h_task_storage_jobs)
         r.add("GET", r"/api/storage/overview", h_storage_overview)
         r.add("GET", r"/api/storage/jobs/(?P<job_id>[A-Za-z0-9_-]+)", h_storage_job)
+        r.add("GET", r"/api/backups", h_backups)
+        r.add("DELETE", r"/api/backups/(?P<name>[A-Za-z0-9._-]+)", h_backup_delete)
         r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/report", h_task_report)
         r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/review", h_task_review)
         r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/assign-reviewer", h_task_assign_reviewer)
@@ -387,14 +437,28 @@ class App:
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/disable", h_skill_disable)
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/enable", h_skill_enable)
         r.add("POST", r"/api/skills/import", h_skill_import)
+        r.add("GET", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/tool", h_skill_tool)
+        r.add("GET", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest", h_skill_manifest)
+        r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest/sign",
+              h_skill_manifest_sign)
+        r.add("GET", r"/api/tool-calls", h_tool_calls)
+        r.add("GET", r"/api/tool-approvals", h_tool_approvals)
+        r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/tool-approvals",
+              h_tool_approval_create)
+        r.add("POST", r"/api/tool-approvals/(?P<approval_id>[A-Za-z0-9_-]+)/decide",
+              h_tool_approval_decide)
         r.add("GET", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/export", h_skill_export)
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/rollback", h_skill_rollback)
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/channel", h_skill_channel)
 
+        r.add("GET", r"/api/workshop/recipes", h_workshop_recipes)
         r.add("GET", r"/api/workshop/drafts", h_workshop_list)
+        r.add("GET", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/provenance", h_workshop_provenance)
+        r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/provenance/lock", h_workshop_provenance_lock)
         r.add("POST", r"/api/workshop/drafts", h_workshop_create)
         r.add("GET", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_workshop_detail)
         r.add("PUT", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_workshop_update)
+        r.add("DELETE", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_workshop_delete)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/logs", h_workshop_logs)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/analyze", h_workshop_analyze)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/refine", h_workshop_refine)
@@ -406,6 +470,12 @@ class App:
         r.add("GET", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/cases", h_workshop_cases)
         r.add("GET", r"/api/workshop/jobs/(?P<job_id>[A-Za-z0-9_-]+)", h_workshop_job)
         r.add("GET", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/jobs", h_workshop_jobs)
+        r.add("GET", r"/api/calibration", h_calibration)
+        r.add("GET", r"/api/case-matrix", h_case_matrix)
+        r.add("POST", r"/api/case-matrix/rebuild", h_case_matrix_rebuild)
+        r.add("GET", r"/api/experience-candidates", h_experience_candidates)
+        r.add("POST", r"/api/experience-candidates/(?P<candidate_id>[A-Za-z0-9_-]+)/decide", h_candidate_decide)
+        r.add("POST", r"/api/calibration/fit", h_calibration_fit)
         r.add("GET", r"/api/skill-versions", h_versions)
 
         r.add("GET", r"/api/models", h_models)
@@ -414,6 +484,7 @@ class App:
         r.add("DELETE", r"/api/models/(?P<model_id>[0-9]+)", h_model_delete)
         r.add("POST", r"/api/models/test", h_model_test_draft)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/test", h_model_test)
+        r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/capabilities", h_model_capabilities)
 
         r.add("GET", r"/api/users", h_users)
         r.add("GET", r"/api/users/invites", h_invites)
@@ -469,6 +540,9 @@ def h_public_config(app: App, req):
                           "password_min_length": app.config.password_min_length,
                           "session_warn_sec": int(app.config.get("session_warn_sec", 120)),
                           "allow_engineer_workshop": bool(app.config.get("allow_engineer_workshop", True)),
+                          "allow_self_register": bool(app.config.get("allow_self_register", False)),
+                          "assistant_enabled": bool(app.config.get("assistant_enabled", True)),
+                          "mcp_endpoint": "/mcp",
                           "personal_model_base_url": app.config.get("personal_model_base_url"),
                           "personal_model_default": app.config.get("personal_model_default"),
                           "personal_model_models": app.config.get("personal_model_models") or [],
@@ -1008,8 +1082,41 @@ def _task_next_action(task: dict) -> str:
     return "查看任务时间线确认当前阶段。"
 
 
+def _session_state_for_task(task: dict[str, Any]) -> str:
+    status = task.get("status") or "intake"
+    verdict = _loads(task.get("verdict_json"), {}) or {}
+    if status == "done":
+        if verdict.get("status") in ("matched", "multiple_causes", "temporal_conflict"):
+            return "resolved"
+        if verdict.get("status") in ("unknown_fault", "unmatched"):
+            return "unknown_fault"
+        return "closed"
+    return {"queued": "queued", "running": "evaluating", "needs_data": "needs_data",
+            "failed": "failed", "cancelled": "cancelled"}.get(status, "intake")
+
+
+def _ensure_task_session(app: App, task: dict[str, Any]) -> DiagnosticSession:
+    session = DiagnosticSession(app.db, task["id"])
+    if session.revision == 0:
+        session.append("session_created", {"state": _session_state_for_task(task)},
+                       event_key="session-created")
+    return session
+
+
 def h_task_detail(app: App, req, task_id: str):
     task = _task_for(app, req, task_id)
+    session = _ensure_task_session(app, task)
+    snapshot = session.snapshot()
+    latest_supplement = app.db.one(
+        "SELECT * FROM task_supplements WHERE task_id=? ORDER BY revision DESC LIMIT 1", (task_id,))
+    pending_supplement = None
+    if latest_supplement and task["status"] == "needs_data" \
+            and latest_supplement["revision"] == snapshot.get("revision"):
+        pending_supplement = {
+            "id": latest_supplement["id"], "revision": latest_supplement["revision"],
+            "files_count": len(_loads(latest_supplement["files_json"], []) or []),
+            "answers_count": len(_loads(latest_supplement["answers_json"], {}) or {}),
+        }
     skills = app.db.all("SELECT * FROM task_skills WHERE task_id=? ORDER BY id", (task_id,))
     events = app.db.all(
         "SELECT seq,ts,level,stage,message,data_json FROM task_events WHERE task_id=? "
@@ -1032,6 +1139,12 @@ def h_task_detail(app: App, req, task_id: str):
         "model_status": app.gateway.model_status(task["user_id"]),
         "stage_timeline": _task_stage_timeline(app, task),
         "next_action": _task_next_action(task),
+        "continuation_count": int(task.get("continuation_count") or 0),
+        "session": snapshot,
+        "questions": session.questions(),
+        "pending_supplement": pending_supplement,
+        "evidence_count": app.evidence_store.count(task_id),
+        "supplement_enabled": bool(app.config.get("session_continue_enabled", True)),
         "skills": [{
             "skill_name": s["skill_name"], "version": s["skill_version"],
             "status": s["status"], "score": s["score"], "error": s["error"],
@@ -1047,6 +1160,405 @@ def h_task_detail(app: App, req, task_id: str):
                     "data": _loads(e["data_json"], {})} for e in events],
     })
     return response_json(detail)
+
+
+def h_task_questions(app: App, req, task_id: str):
+    task = _task_for(app, req, task_id)
+    session = _ensure_task_session(app, task)
+    return response_json({
+        "task_id": task_id, "revision": session.revision, "status": task["status"],
+        "questions": session.questions(),
+        "enabled": bool(app.config.get("session_continue_enabled", True)),
+        "max_supplements": int(app.config.get("session_max_supplements", 3)),
+    })
+
+
+def h_task_session(app: App, req, task_id: str):
+    task = _task_for(app, req, task_id)
+    session = _ensure_task_session(app, task)
+    snapshot = session.snapshot()
+    snapshot.update({
+        "status": task["status"], "can_continue": task["status"] == "needs_data"
+        and bool(app.config.get("session_continue_enabled", True)),
+        "questions": session.questions(),
+        "events": session.events()[-80:],
+    })
+    return response_json(snapshot)
+
+
+def h_task_evidence(app: App, req, task_id: str):
+    _task_for(app, req, task_id)
+    try:
+        limit = max(1, min(1000, int(req.query.get("limit", 300))))
+    except ValueError:
+        limit = 300
+    items = app.evidence_store.list(task_id, limit)
+    return response_json({"items": items, "total": app.evidence_store.count(task_id),
+                          "limit": limit})
+
+
+def _supplement_answers(fields: dict[str, str]) -> dict[str, str]:
+    answers: dict[str, str] = {}
+    raw = (fields.get("answers") or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPError(400, "answers 必须是 JSON 对象") from exc
+        if not isinstance(parsed, dict):
+            raise HTTPError(400, "answers 必须是 JSON 对象")
+        answers.update({str(k): str(v) for k, v in parsed.items()})
+    for key, value in fields.items():
+        if key.startswith("answer_"):
+            answers[key[7:]] = value
+    return {k: v.strip()[:4000] for k, v in answers.items() if str(v).strip()}
+
+
+def _supplement_hash(files: list[dict[str, Any]], answers: dict[str, str]) -> str:
+    payload = {"files": [{"name": f.get("name"), "size": f.get("size"),
+                         "sha256": f.get("sha256")} for f in files],
+               "answers": {k: answers[k] for k in sorted(answers)}}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _session_revision_conn(conn, task_id: str) -> int:
+    row = conn.execute("SELECT COALESCE(MAX(revision),0) AS revision FROM session_events "
+                       "WHERE task_id=?", (task_id,)).fetchone()
+    return int(row["revision"] or 0)
+
+
+def _input_members(stored: list[dict[str, Any]]) -> tuple[list[str], bool]:
+    """把补充文件展开为可匹配路径；返回 (成员名, 是否全部可解析)。"""
+    members: list[str] = []
+    complete = True
+    for item in stored:
+        path = Path(str(item.get("stored_path") or ""))
+        name = str(item.get("name") or item.get("stored_name") or path.name)
+        members.append(name)
+        members.append(path.name)
+        try:
+            if path.suffix.lower() == ".zip" and zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path) as zf:
+                    members.extend(str(x).replace("\\", "/") for x in zf.namelist())
+        except (OSError, zipfile.BadZipFile):
+            complete = False
+    return sorted(set(x for x in members if x)), complete
+
+
+def _skill_globs(skill: Any) -> list[str]:
+    globs: list[str] = []
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "globs" and isinstance(value, list):
+                    globs.extend(str(x) for x in value if str(x).strip())
+                elif isinstance(value, (dict, list)):
+                    walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(getattr(skill, "profile", {}) or {})
+    return sorted(set(globs))
+
+
+def _glob_match(pattern: str, member: str) -> bool:
+    pat = str(pattern or "").replace("\\", "/").lstrip("./")
+    name = str(member or "").replace("\\", "/")
+    variants = [pat]
+    while variants[-1].startswith("**/"):
+        variants.append(variants[-1][3:])
+    base = name.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatchcase(name, p) or fnmatch.fnmatchcase(base, p)
+               for p in variants if p)
+
+
+def _affected_skills(app: App, task_id: str,
+                     stored: list[dict[str, Any]]) -> tuple[list[str], dict[str, Any]]:
+    if not stored:
+        return [], {}
+    rows = app.db.all("SELECT skill_name FROM task_skills WHERE task_id=? ORDER BY id",
+                      (task_id,))
+    members, complete = _input_members(stored)
+    affected: list[str] = []
+    reasons: dict[str, Any] = {}
+    for row in rows:
+        name = str(row["skill_name"])
+        skill = app.registry.get(name)
+        if not skill:
+            continue
+        globs = _skill_globs(skill)
+        if not globs:
+            # 没有声明日志范围，无法证明无关；按保守策略重跑该技能。
+            affected.append(name)
+            reasons[name] = {"reason": "no_declared_globs"}
+            continue
+        matched = [m for m in members if any(_glob_match(p, m) for p in globs)]
+        if matched:
+            affected.append(name)
+            reasons[name] = {"reason": "glob_match", "matched": matched[:8],
+                             "members_complete": complete}
+    return sorted(set(affected)), reasons
+
+
+def h_task_inputs(app: App, req, task_id: str):
+    task, user = _task_owner_for(app, req, task_id)
+    if not app.config.get("session_continue_enabled", True):
+        raise HTTPError(400, "同任务补证功能未启用")
+    session = _ensure_task_session(app, task)
+    ctype = (req.headers.get("Content-Type") or "").lower()
+    files = []
+    if "multipart/form-data" in ctype:
+        max_mb = int(app.config.get("max_upload_mb", 2048))
+        fields, files = req.parse_multipart(max_mb * 1024 * 1024,
+                                            max_file_bytes=max_mb * 1024 * 1024)
+        if len(files) > 10:
+            raise HTTPError(400, "一次最多补充 10 个文件")
+    elif "application/json" in ctype:
+        data = req.json()
+        if not isinstance(data, dict):
+            raise HTTPError(400, "请求体必须是 JSON 对象")
+        fields = {str(k): str(v) for k, v in data.items() if not isinstance(v, (dict, list))}
+        raw_answers = data.get("answers")
+        if isinstance(raw_answers, dict):
+            fields["answers"] = json.dumps(raw_answers, ensure_ascii=False)
+    else:
+        raise HTTPError(400, "需要 multipart/form-data 或 application/json")
+    answers = _supplement_answers(fields)
+    if not files and not answers:
+        raise HTTPError(400, "请至少补充一个日志文件或回答一个问题")
+    if len(answers) > 12:
+        raise HTTPError(400, "一次最多回答 12 个问题")
+    try:
+        expected = int(fields.get("expected_revision") or "")
+    except ValueError as exc:
+        raise HTTPError(400, "expected_revision 必须是整数") from exc
+    idem = (req.headers.get("Idempotency-Key") or fields.get("idempotency_key") or "").strip()
+    if not re.match(r"^[A-Za-z0-9_.:-]{8,128}$", idem):
+        raise HTTPError(400, "缺少或非法的 Idempotency-Key（8-128 位字母数字/._:-）")
+    temp_files = [{"name": item.filename, "size": item.size,
+                   "sha256": sha256_file(item.path)} for item in files]
+    request_hash = _supplement_hash(temp_files, answers)
+    previous = app.db.one(
+        "SELECT * FROM task_supplements WHERE task_id=? AND idempotency_key=?",
+        (task_id, idem))
+    if previous:
+        if previous.get("request_hash") != request_hash:
+            raise HTTPError(409, "同一 Idempotency-Key 已用于不同内容")
+        return response_json(_supplement_replay(app, task, previous, answers), status=200)
+    if task["status"] != "needs_data":
+        raise HTTPError(409, "只有等待补充数据的任务可以提交补证")
+    if expected != session.revision:
+        raise HTTPError(409, f"会话版本冲突：当前 {session.revision}，提交基于 {expected}")
+    current_round = int(session.snapshot().get("supplement_round") or 0)
+    max_supplements = int(app.config.get("session_max_supplements", 3))
+    if current_round >= max_supplements:
+        raise HTTPError(429, f"最多补充 {max_supplements} 轮，请新建任务")
+
+    supplement_id = new_id("S")
+    target_dir = app.config.data_dir / "uploads" / task_id / "supplements" / supplement_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stored: list[dict[str, Any]] = []
+    try:
+        for item in files:
+            target = unique_path(target_dir, safe_filename(item.filename))
+            os.replace(item.path, target)
+            stored.append({"name": item.filename, "stored_name": target.name,
+                           "stored_path": str(target), "size": target.stat().st_size,
+                           "sha256": sha256_file(target)})
+        if _supplement_hash(stored, answers) != request_hash:
+            raise HTTPError(400, "补充文件在落盘时发生变化，请重新提交")
+        old_inputs = _loads(task.get("input_json"), [])
+        if not isinstance(old_inputs, list):
+            old_inputs = []
+        input_hash = hashlib.sha256(json.dumps(stored, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        invalidated, invalidation_reasons = _affected_skills(app, task_id, stored)
+        gaps = session.questions()
+        resolved = [g for g in gaps if str(g.get("question_id")) in answers]
+        remaining = [g for g in gaps if str(g.get("question_id")) not in answers]
+        answer_text = "；".join(f"{k}：{v}" for k, v in answers.items())[:3000]
+        file_text = "、".join(f["name"] for f in stored)[:1000]
+        block = f"\n\n【补充 {current_round + 1}】"
+        if stored:
+            block += f"\n新增日志：{file_text}"
+        if answer_text:
+            block += f"\n现场回答：{answer_text}"
+        new_description = (task["description"] + block)[:20000]
+        revision = expected + 1
+        with app.db.tx() as conn:
+            latest = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not latest or latest["status"] != "needs_data":
+                raise RevisionConflict("任务状态已变化，不能提交补证")
+            current = _session_revision_conn(conn, task_id)
+            if current != expected:
+                raise RevisionConflict(f"会话版本冲突：当前 {current}，提交基于 {expected}")
+            existing = conn.execute(
+                "SELECT * FROM task_supplements WHERE task_id=? AND idempotency_key=?",
+                (task_id, idem)).fetchone()
+            if existing:
+                if existing["request_hash"] != request_hash:
+                    raise RevisionConflict("同一 Idempotency-Key 已用于不同内容")
+                replay = dict(existing)
+            else:
+                replay = None
+                conn.execute(
+                    "INSERT INTO task_supplements(task_id,revision,idempotency_key,request_hash,"
+                    "files_json,answers_json,invalidated_skills_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (task_id, revision, idem, request_hash,
+                     json.dumps(stored, ensure_ascii=False), json.dumps(answers, ensure_ascii=False),
+                     json.dumps(invalidated, ensure_ascii=False), iso_now()))
+                payload = {"revision": revision, "input_hash": request_hash, "files": [
+                    {"name": f["name"], "size": f["size"], "sha256": f["sha256"]} for f in stored],
+                    "answers": answers, "invalidated_skills": invalidated,
+                    "invalidation_reasons": invalidation_reasons,
+                    "resolved_gaps": resolved, "remaining_gaps": remaining}
+                conn.execute(
+                    "INSERT INTO session_events(task_id,revision,event_type,payload_json,event_key,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (task_id, revision, "input_added",
+                     json.dumps(payload, ensure_ascii=False, default=str), f"input-{supplement_id}",
+                     iso_now()))
+                if invalidated:
+                    marks = ",".join("?" for _ in invalidated)
+                    conn.execute(f"UPDATE task_skills SET invalidated=1 WHERE task_id=? "
+                                 f"AND skill_name IN ({marks})",
+                                 (task_id, *invalidated))
+                conn.execute("UPDATE tasks SET input_json=?, description=? WHERE id=?",
+                             (json.dumps(old_inputs + stored, ensure_ascii=False), new_description, task_id))
+            if replay is not None:
+                raise RevisionConflict("并发提交命中同一幂等键")
+        if replay is not None:
+            return response_json(_supplement_replay(app, task, replay, answers), status=200)
+        new_rev = revision
+        app.db.audit(user["id"], user["username"], "task.supplement", task_id,
+                     {"revision": revision, "files": len(stored), "answers": len(answers),
+                      "invalidated": len(invalidated), "idempotency_key": idem}, req.ip)
+        return response_json({
+            "ok": True, "task_id": task_id, "revision": new_rev, "duplicate": False,
+            "supplement": {"id": supplement_id, "revision": new_rev,
+                           "files": [{"name": f["name"], "size": f["size"]} for f in stored],
+                           "answers": answers, "invalidated_skills": invalidated,
+                           "invalidation_reasons": invalidation_reasons},
+            "resolved_gaps": resolved, "remaining_gaps": remaining,
+        }, status=201)
+    except HTTPError:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+    except RevisionConflict as exc:
+        existing = app.db.one(
+            "SELECT * FROM task_supplements WHERE task_id=? AND idempotency_key=?",
+            (task_id, idem))
+        if existing and existing.get("request_hash") != request_hash:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise HTTPError(409, "同一 Idempotency-Key 已用于不同内容") from exc
+        if existing:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            return response_json(_supplement_replay(app, task, existing, answers), status=200)
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise HTTPError(409, str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        existing = app.db.one(
+            "SELECT * FROM task_supplements WHERE task_id=? AND idempotency_key=?",
+            (task_id, idem))
+        shutil.rmtree(target_dir, ignore_errors=True)
+        if existing and existing.get("request_hash") == request_hash:
+            return response_json(_supplement_replay(app, task, existing, answers), status=200)
+        if existing:
+            raise HTTPError(409, "同一 Idempotency-Key 已用于不同内容") from exc
+        raise HTTPError(409, "补充数据版本冲突，请刷新后重试") from exc
+    except Exception:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+
+
+def _supplement_replay(app: App, task: dict[str, Any], row: dict[str, Any],
+                       answers: dict[str, str]) -> dict[str, Any]:
+    files = _loads(row.get("files_json"), []) or []
+    invalidated = _loads(row.get("invalidated_skills_json"), []) or []
+    return {
+        "ok": True, "duplicate": True, "task_id": task["id"],
+        "revision": row.get("revision"), "supplement": {
+            "id": row.get("id"), "revision": row.get("revision"),
+            "files": [{"name": f.get("name"), "size": f.get("size")} for f in files],
+            "answers": answers, "invalidated_skills": invalidated},
+        "status": task["status"],
+    }
+
+
+def h_task_continue(app: App, req, task_id: str):
+    task, user = _task_owner_for(app, req, task_id)
+    if not app.config.get("session_continue_enabled", True):
+        raise HTTPError(400, "同任务续跑功能未启用")
+    data = req.json() if req.headers.get("Content-Length") else {}
+    if not isinstance(data, dict):
+        raise HTTPError(400, "请求体必须是 JSON 对象")
+    try:
+        expected = int(data.get("expected_revision"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPError(400, "expected_revision 必须是整数") from exc
+    session = _ensure_task_session(app, task)
+    event = session.event(f"continue-{expected}")
+    if event:
+        return response_json({"ok": True, "duplicate": True, "task": _task_summary(task),
+                              "revision": event["revision"]}, status=200)
+    if task["status"] != "needs_data":
+        raise HTTPError(409, "任务不在待补证状态，无法续跑")
+    if session.revision != expected:
+        raise HTTPError(409, f"会话版本冲突：当前 {session.revision}，提交基于 {expected}")
+    supplement = app.db.one(
+        "SELECT * FROM task_supplements WHERE task_id=? AND revision=?",
+        (task_id, expected))
+    if not supplement:
+        raise HTTPError(400, "没有待续跑的补充数据，请先提交补证")
+    stats = app.worker.stats()
+    if stats["queued"] >= stats.get("max_queue", 32):
+        raise HTTPError(429, f"任务队列已满（{stats['queued']}/{stats.get('max_queue')}），请稍后重试")
+    revision = expected + 1
+    try:
+        with app.db.tx() as conn:
+            current = _session_revision_conn(conn, task_id)
+            if current != expected:
+                raise RevisionConflict(f"会话版本冲突：当前 {current}，提交基于 {expected}")
+            latest = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not latest or latest["status"] != "needs_data":
+                raise RevisionConflict("任务状态已变化，无法续跑")
+            conn.execute(
+                "INSERT INTO session_events(task_id,revision,event_type,payload_json,event_key,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (task_id, revision, "continue", json.dumps({
+                    "state": "queued", "supplement_revision": expected,
+                    "continuation": int(task.get("continuation_count") or 0) + 1,
+                }, ensure_ascii=False), f"continue-{expected}", iso_now()))
+            conn.execute(
+                "UPDATE tasks SET status='queued', stage='queued', progress=0, finished_at=NULL, "
+                "error=NULL, verdict_json=NULL, result_json=NULL, report_md=NULL, report_html=NULL, "
+                "stats_json='{}', continuation_count=COALESCE(continuation_count,0)+1 WHERE id=?",
+                (task_id,))
+            seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM task_events WHERE task_id=?",
+                               (task_id,)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO task_events(task_id,seq,ts,level,stage,message,data_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (task_id, seq, iso_now(), "info", "queued",
+                 "补充数据已提交，任务在同一任务 ID 下重新排队", "{}"))
+    except RevisionConflict as exc:
+        raise HTTPError(409, str(exc)) from exc
+    if not app.worker.submit(task_id, fail_on_full=False):
+        # 事务已提交为 queued；这里只负责在容量释放后补投递，重启恢复也会接住。
+        def _retry() -> None:
+            for delay in (0.5, 1, 2, 4, 8, 15, 30):
+                time.sleep(delay)
+                if app.worker.submit(task_id, fail_on_full=False):
+                    return
+        threading.Thread(target=_retry, daemon=True, name=f"requeue-{task_id}").start()
+    app.db.audit(user["id"], user["username"], "task.continue", task_id,
+                 {"revision": revision, "supplement_revision": expected}, req.ip)
+    row = app.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+    return response_json({"ok": True, "task": _task_summary(row), "revision": revision,
+                          "supplement_revision": expected}, status=202)
 
 
 def h_task_events(app: App, req, task_id: str):
@@ -1107,13 +1619,21 @@ def h_task_retry(app: App, req, task_id: str):
 
 def h_task_release(app: App, req, task_id: str):
     task, user = _task_owner_for(app, req, task_id)
+    data = req.json() if req.headers.get("Content-Length") else {}
+    targets = data.get("targets") if isinstance(data, dict) else None
+    mode = str(data.get("mode") or "") if isinstance(data, dict) else ""
+    if not mode and isinstance(targets, list):
+        selected = {"raw_inputs" if "raw_inputs" in targets else "",
+                    "extracted" if "extracted" in targets else ""}
+        selected.discard("")
+        mode = "both" if len(selected) == 2 else (selected.pop() if selected else "")
     try:
-        job = app.storage.create(task_id, user["id"])
+        job = app.storage.create(task_id, user["id"], mode or "raw_inputs")
     except ValueError as exc:
         message = str(exc)
         raise HTTPError(429 if "队列已满" in message else 400, message) from exc
     app.db.audit(user["id"], user["username"], "task.release", task_id,
-                 {"job": job["id"]}, req.ip)
+                 {"job": job["id"], "mode": job.get("mode", "raw_inputs")}, req.ip)
     return response_json({"job": job}, status=202)
 
 
@@ -1140,6 +1660,23 @@ def h_storage_job(app: App, req, job_id: str):
         if not task or task["user_id"] != user["id"]:
             raise HTTPError(404, "空间释放任务不存在")
     return response_json(job)
+
+
+def h_backups(app: App, req):
+    _admin(app, req, csrf=False)
+    return response_json(app.backups.overview())
+
+
+def h_backup_delete(app: App, req, name: str):
+    user = _admin(app, req)
+    try:
+        result = app.backups.delete(name)
+    except ValueError as exc:
+        raise HTTPError(404 if "不存在" in str(exc) else 400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "backup.delete", name,
+                 {"size_bytes": result.get("size_bytes"), "file_count": result.get("file_count")},
+                 req.ip)
+    return response_json(result)
 
 
 def h_task_report(app: App, req, task_id: str):
@@ -1206,7 +1743,10 @@ def h_task_assign_reviewer(app: App, req, task_id: str):
 
 def h_quality(app: App, req):
     _admin(app, req, csrf=False)
-    return response_json(ReviewService(app.db, app.config.data_dir).quality())
+    quality = ReviewService(app.db, app.config.data_dir).quality()
+    quality["dataset_audit"] = EvaluationService(
+        app.db, app.config, app.config.data_dir).audit_splits()
+    return response_json(quality)
 
 
 def h_skill_report(app: App, req, task_id: str, skill: str):
@@ -1468,14 +2008,25 @@ def h_evaluation_run(app: App, req):
         limit = max(0, int(data.get("limit") or 0))
     except (TypeError, ValueError) as exc:
         raise HTTPError(400, "limit 必须是整数") from exc
+    llm_mode = str(data.get("llm_mode") or "off").strip().lower()
+    model_config_id = data.get("model_config_id", data.get("model_id"))
+    if model_config_id in ("", None):
+        model_config_id = None
+    else:
+        try:
+            model_config_id = int(model_config_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, "model_config_id 必须是整数") from exc
     try:
         result = EvaluationService(app.db, app.config).evaluate(
             split=split, limit=limit, case_ids=[str(x) for x in (data.get("case_ids") or [])] or None,
-            name=str(data.get("name") or ""))
+            name=str(data.get("name") or ""), llm_mode=llm_mode,
+            model_config_id=model_config_id)
     except ValueError as exc:
         raise HTTPError(400, str(exc)) from exc
     app.db.audit(user["id"], user["username"], "evaluation.run", result["id"],
-                 {"split": split, "limit": limit, "cases": result["summary"].get("cases")}, req.ip)
+                 {"split": split, "limit": limit, "cases": result["summary"].get("cases"),
+                  "llm_mode": llm_mode, "model_config_id": model_config_id}, req.ip)
     return response_json(result)
 
 
@@ -1581,50 +2132,283 @@ def h_skill_import(app: App, req):
     fields, files = req.parse_multipart(max_mb * 1024 * 1024)
     if not files:
         raise HTTPError(400, "请上传技能 zip 包")
+    from .supply import ImportLimits, ImportRejected, quarantine_zip, sign_skill
+    limits = ImportLimits.from_config(app.config)
     tmp = app.config.data_dir / "tmp" / f"import-{new_id('', with_time=False)}"
     tmp.mkdir(parents=True, exist_ok=True)
     try:
+        quarantined = []
         for f in files:
-            if not zipfile.is_zipfile(f.path):
-                raise HTTPError(400, "只支持 zip 格式的技能包")
-            with zipfile.ZipFile(f.path) as zf:
-                if len(zf.infolist()) > 5000:
-                    raise HTTPError(400, "技能包文件数过多")
-                for info in zf.infolist():
-                    if info.is_dir():
-                        continue
-                    member = info.filename.replace("\\", "/").lstrip("/")
-                    if "../" in member or member.startswith(".."):
-                        continue
-                    target = (tmp / member).resolve()
-                    if not within_directory(tmp, target):
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(info) as src, open(target, "wb") as out:
-                        shutil.copyfileobj(src, out)
-        candidates = list(tmp.rglob("SKILL.md"))
-        if not candidates:
-            raise HTTPError(400, "技能包中缺少 SKILL.md")
-        root = candidates[0].parent
-        fm = parse_frontmatter(candidates[0].read_text(encoding="utf-8", errors="replace"))
-        name = str(fm.get("name") or root.name)
+            try:
+                quarantined.append(quarantine_zip(f.path, tmp, limits))
+            except ImportRejected as exc:
+                raise HTTPError(422, f"技能包未通过导入检查：{exc}") from exc
+        if len(quarantined) != 1:
+            raise HTTPError(400, "一次只能导入一个技能包")
+        result = quarantined[0]
+        skill_md = result.root / "SKILL.md"
+        fm = parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+        name = str(fm.get("name") or result.name)
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]", name):
             raise HTTPError(400, "技能名不合法")
+        version = str((fm.get("metadata") or {}).get("profile_version") or "")
         target = app.config.skills_dir / name
         overwrite = fields.get("overwrite") == "1"
+        backup = None
         if target.exists():
             if not overwrite:
                 raise HTTPError(409, f"技能 {name} 已存在；如需覆盖请勾选 overwrite")
             backup = app.config.data_dir / "skill_versions" / name / f".import-{int(time.time())}"
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(target), str(backup))
-        shutil.copytree(root, target)
+        try:
+            shutil.copytree(result.root, target)
+            signed = sign_skill(
+                target, data_dir=app.config.data_dir, name=name, version=version,
+                builder="import",
+                verification={"status": "quarantined", "ok": False,
+                              "reason": "导入包只完成隔离与完整性扫描，尚未执行案例回归"})
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            if backup and backup.exists() and not target.exists():
+                shutil.move(str(backup), str(target))
+            raise
         app.registry.scan()
         app.db.audit(user["id"], user["username"], "skill.import", name,
-                     {"files": len(files)}, req.ip)
-        return response_json({"ok": True, "skill": _skill_public(_skill_row(app, name))})
+                     {"files": result.limits.get("files"), "bytes": result.total_bytes,
+                      "content_sha256": signed["manifest"]["content_sha256"],
+                      "overwrite": overwrite}, req.ip)
+        return response_json({"ok": True, "skill": _skill_public(_skill_row(app, name)),
+                              "manifest": signed["manifest"],
+                              "quarantine": result.limits})
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def h_recovery_runs(app: App, req, task_id: str):
+    _task_for(app, req, task_id)
+    return response_json({"runs": recovery_list(app.db, task_id)})
+
+
+def h_recovery_create(app: App, req, task_id: str):
+    task = _task_for(app, req, task_id)
+    data = req.json()
+    before = data.get("before") if isinstance(data.get("before"), dict) else {}
+    if not before:
+        before = _loads(task.get("verdict_json"), {}) or _loads(task.get("result_json"), {}) or {}
+    if not before:
+        raise HTTPError(409, "任务尚无基线结论，无法建立恢复验证")
+    user = _auth(app, req)
+    run = recovery_create(app.db, task_id, before, user["username"],
+                          str(data.get("source") or "readonly_receipt"))
+    app.db.audit(user["id"], user["username"], "recovery.create", task_id,
+                 {"run_id": run["id"]}, req.ip)
+    return response_json({"run": run}, status=201)
+
+
+def h_recovery_observe(app: App, req, run_id: str):
+    _auth(app, req)
+    try:
+        run = recovery_get(app.db, run_id)
+    except ValueError as exc:
+        raise HTTPError(404, str(exc)) from exc
+    task = _task_for(app, req, run["task_id"])
+    data = req.json()
+    after = data.get("after") if isinstance(data.get("after"), dict) else data
+    if not after:
+        raise HTTPError(400, "缺少恢复后只读回传内容")
+    user = _auth(app, req)
+    try:
+        run = recovery_observe(app.db, run_id, after, user["username"])
+    except ValueError as exc:
+        raise HTTPError(409, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "recovery.observe", run["task_id"],
+                 {"run_id": run_id, "status": run["comparison"].get("status")}, req.ip)
+    return response_json({"run": run})
+
+
+def h_recovery_review(app: App, req, run_id: str):
+    user = _auth(app, req)
+    if user["role"] not in ("reviewer", "admin"):
+        raise HTTPError(403, "仅专家或管理员可复核恢复验证")
+    try:
+        run = recovery_get(app.db, run_id)
+    except ValueError as exc:
+        raise HTTPError(404, str(exc)) from exc
+    task = _task_for(app, req, run["task_id"])
+    if user["role"] == "reviewer" and task.get("reviewer_id") != user["id"]:
+        raise HTTPError(403, "只能复核分配给自己的任务")
+    data = req.json()
+    try:
+        run = recovery_review(app.db, run_id, user["username"],
+                              str(data.get("decision") or ""), str(data.get("note") or ""))
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "recovery.review", run["task_id"],
+                 {"run_id": run_id, "eligible": run["learning_gate"]["eligible"]}, req.ip)
+    return response_json({"run": run})
+
+
+def h_case_matrix(app: App, req):
+    _auth(app, req, csrf=False)
+    skill = str(req.query.get("skill") or "")
+    snapshot = latest_matrix(app.db, skill)
+    if not snapshot:
+        raise HTTPError(404, "尚无案例矩阵快照")
+    return response_json({"matrix": snapshot, "verify": verify_matrix(app.config.data_dir, snapshot)})
+
+
+def h_case_matrix_rebuild(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    skill = str(data.get("skill") or "")[:120]
+    build_sha = str(data.get("build_sha") or "")[:100]
+    compatibility = data.get("compatibility") if isinstance(data.get("compatibility"), dict) else {}
+    snapshot = build_matrix(app.db, skill, build_sha, compatibility)
+    save_matrix(app.db, app.config.data_dir, snapshot)
+    app.db.audit(user["id"], user["username"], "case_matrix.rebuild", skill,
+                 {"build_sha": build_sha, "cells": snapshot["summary"]["cells"]}, req.ip)
+    return response_json({"matrix": snapshot,
+                          "verify": verify_matrix(app.config.data_dir, snapshot)})
+
+
+def h_experience_candidates(app: App, req):
+    _admin(app, req, csrf=False)
+    status = str(req.query.get("status") or "")
+    rows = app.db.all("SELECT * FROM experience_candidates"
+                      + (" WHERE status=?" if status else "")
+                      + " ORDER BY created_at DESC LIMIT 200", (status,) if status else ())
+    return response_json({"candidates": [dict(x) for x in rows]})
+
+
+def h_candidate_decide(app: App, req, candidate_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = decide_candidate(app.db, candidate_id, str(data.get("status") or ""),
+                                  user["username"], str(data.get("note") or ""))
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "experience_candidate.decide", candidate_id,
+                 {"status": result.get("status")}, req.ip)
+    return response_json({"candidate": result})
+
+
+def h_calibration(app: App, req):
+    _auth(app, req, csrf=False)
+    return response_json({"calibration": CalibrationStore(app.db, app.config).latest()})
+
+
+def h_calibration_fit(app: App, req):
+    user = _admin(app, req)
+    split = str(req.json().get("split") or "dev")
+    try:
+        result = CalibrationStore(app.db, app.config).fit(split)
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "calibration.fit", split,
+                 {"samples": result.get("sample_count"), "status": result.get("status")},
+                 req.ip)
+    return response_json({"calibration": result})
+
+
+def h_agent_trace(app: App, req, task_id: str):
+    _task_for(app, req, task_id)
+    trace = BoundedAgent(app.db, app.config).latest(task_id)
+    if not trace:
+        raise HTTPError(404, "尚无 Agent 轨迹")
+    return response_json({"trace": trace})
+
+
+def h_skill_tool(app: App, req, name: str):
+    _auth(app, req, csrf=False)
+    skill = app.registry.get(name)
+    if not skill:
+        raise HTTPError(404, "技能不存在")
+    return response_json(app.tools.manifest(skill).public())
+
+
+def h_skill_manifest(app: App, req, name: str):
+    _auth(app, req, csrf=False)
+    _skill_row(app, name)
+    try:
+        result = app.registry.manifest(name)
+    except ValueError as exc:
+        raise HTTPError(404, str(exc)) from exc
+    return response_json(result)
+
+
+def h_skill_manifest_sign(app: App, req, name: str):
+    user = _admin(app, req)
+    _skill_row(app, name)
+    try:
+        result = app.registry.sign_manifest(name)
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "skill.manifest.sign", name,
+                 {"content_sha256": (result.get("manifest") or {}).get("content_sha256")},
+                 req.ip)
+    return response_json({"ok": True, "manifest": result.get("manifest"),
+                          "signature": result.get("signature")})
+
+
+def h_tool_calls(app: App, req):
+    user = _auth(app, req, csrf=False)
+    task_id = str(req.query.get("task_id") or "").strip()
+    if task_id:
+        _task_for(app, req, task_id)
+    elif user["role"] != "admin":
+        task_id = ""
+    limit = req.query.get("limit") or "100"
+    try:
+        limit_n = max(1, min(500, int(limit)))
+    except ValueError as exc:
+        raise HTTPError(400, "limit 必须是整数") from exc
+    return response_json({"items": app.tools.list_calls(task_id, limit_n),
+                          "mode": app.tools.mode})
+
+
+def h_tool_approvals(app: App, req):
+    _admin(app, req, csrf=False)
+    status = str(req.query.get("status") or "")
+    return response_json({"items": app.tools.list_approvals(status, 200)})
+
+
+def h_tool_approval_create(app: App, req, task_id: str):
+    task, user = _task_owner_for(app, req, task_id)
+    data = req.json()
+    skill_name = str(data.get("skill") or "").strip()
+    skill = app.registry.get(skill_name) if skill_name else None
+    if not skill:
+        raise HTTPError(404, "技能不存在")
+    inputs = [Path(x["stored_path"]) for x in json.loads(task.get("input_json") or "[]")
+              if x.get("stored_path")]
+    manifest = app.tools.manifest(skill)
+    args = app.tools.arguments(task_id, inputs, task.get("description") or "",
+                               app.tools.current_revision(task_id))
+    approval = app.tools.create_approval(
+        task_id=task_id, manifest=manifest,
+        arguments_hash=app.tools.arguments_hash(args),
+        requested_by=user["username"], reason=str(data.get("reason") or ""),
+        ttl_minutes=int(app.config.get("tool_approval_ttl_min", 120)))
+    app.db.audit(user["id"], user["username"], "tool.approval.request", approval.get("id", ""),
+                 {"task_id": task_id, "skill": skill_name, "risk": manifest.risk}, req.ip)
+    return response_json({"approval": approval, "manifest": manifest.public()})
+
+
+def h_tool_approval_decide(app: App, req, approval_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        approval = app.tools.decide_approval(
+            approval_id, approved=bool(data.get("approved")),
+            actor=user["username"], reason=str(data.get("reason") or ""))
+    except ValueError as exc:
+        raise HTTPError(409, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "tool.approval.decide", approval_id,
+                 {"approved": bool(data.get("approved")), "task_id": approval.get("task_id")},
+                 req.ip)
+    return response_json({"approval": approval})
 
 
 def h_skill_export(app: App, req, name: str):
@@ -1686,12 +2470,61 @@ def _draft_for(app: App, req, draft_id: str) -> dict[str, Any]:
     return row
 
 
+def h_workshop_provenance(app: App, req, draft_id: str):
+    _auth(app, req, csrf=False)
+    _draft_for(app, req, draft_id)
+    draft = app.workshop.get(draft_id)
+    spec = ((draft.get("analysis") or {}).get("intake") or {})
+    if not spec.get("provenance") and str(draft.get("source_text") or "").strip():
+        spec = public_spec(parse_source(draft["source_text"]))
+    return response_json({"provenance": spec.get("provenance") or {},
+                          "source_revision": spec.get("source_revision") or "",
+                          "audit": audit_provenance(spec)})
+
+
+def h_workshop_provenance_lock(app: App, req, draft_id: str):
+    user = _auth(app, req)
+    _draft_for(app, req, draft_id)
+    data = req.json()
+    paths = data.get("paths") if isinstance(data.get("paths"), list) else []
+    paths = [str(p) for p in paths if str(p).startswith("/")][:200]
+    if not paths:
+        raise HTTPError(400, "至少提供一个字段路径")
+    draft = app.workshop.get(draft_id)
+    analysis = draft.get("analysis") or {}
+    spec = analysis.get("intake") or {}
+    if not spec:
+        raise HTTPError(409, "请先完成资料分析")
+    if data.get("source_revision") and str(data["source_revision"]) != str(spec.get("source_revision") or ""):
+        raise HTTPError(409, "原文版本已变化，请重新分析后再锁字段")
+    report = lock_fields(spec, paths, bool(data.get("locked", True)))
+    analysis["intake"] = spec
+    app.db.execute("UPDATE workshop_drafts SET analysis_json=?, updated_at=? WHERE id=?",
+                   (json.dumps(analysis, ensure_ascii=False), iso_now(), draft_id))
+    app.db.execute("INSERT INTO workshop_patches(id,draft_id,path,old_value_json,new_value_json,"
+                   "actor,reason,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                   (new_id("WP"), draft_id, ",".join(paths)[:400],
+                    json.dumps({"locked": False}),
+                    json.dumps({"locked": bool(data.get("locked", True))}),
+                    user["username"], str(data.get("reason") or "")[:500], iso_now()))
+    app.db.audit(user["id"], user["username"], "workshop.provenance.lock", draft_id,
+                 {"paths": paths[:20], "locked": bool(data.get("locked", True))}, req.ip)
+    return response_json({"provenance": spec.get("provenance") or {},
+                          "audit": report})
+
+
+def h_workshop_recipes(app: App, req):
+    user = _auth(app, req, csrf=False)
+    return response_json({"items": app.workshop.recipes()})
+
+
 def h_workshop_list(app: App, req):
     user = _auth(app, req, csrf=False)
     rows = app.workshop.list_drafts(user["id"], user["role"] == "admin")
     return response_json({"items": [{
         "id": r["id"], "name": r["name"], "title": r["title"], "fault_name": r["fault_name"],
         "category": r["category"], "status": r["status"], "skill_version": r["skill_version"],
+        "recipe_id": r.get("recipe_id") or "",
         "created_at": r["created_at"], "updated_at": r["updated_at"],
         "owner_id": r["owner_id"], "last_error": r["last_error"],
     } for r in rows]})
@@ -1728,7 +2561,8 @@ def h_workshop_create(app: App, req):
         except ValueError as exc:
             raise _job_error(exc) from exc
     app.db.audit(user["id"], user["username"], "workshop.create", draft["id"],
-                 {"name": draft["name"], "async": async_mode}, req.ip)
+                 {"name": draft["name"], "recipe_id": draft.get("recipe_id") or "",
+                  "async": async_mode}, req.ip)
     return response_json({"draft": draft, "job": job}, status=202 if async_mode else 201)
 
 
@@ -1750,6 +2584,18 @@ def h_workshop_update(app: App, req, draft_id: str):
         raise HTTPError(400, str(exc)) from exc
     app.db.audit(user["id"], user["username"], "workshop.update", draft_id, {}, req.ip)
     return response_json({"draft": draft})
+
+
+def h_workshop_delete(app: App, req, draft_id: str):
+    user = _auth(app, req)
+    row = _draft_for(app, req, draft_id)
+    try:
+        result = app.workshop.delete_draft(draft_id)
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "workshop.delete", draft_id,
+                 {"title": row.get("title"), "status": row.get("status")}, req.ip)
+    return response_json(result)
 
 
 def h_workshop_logs(app: App, req, draft_id: str):
@@ -1953,7 +2799,6 @@ def h_workshop_jobs(app: App, req, draft_id: str):
 
 
 # ---------------------------- 模型接入 ----------------------------
-MODEL_ROLES = ("default", "planner", "router", "arbiter", "writer", "workshop")
 
 
 def _model_row(app: App, model_id: int) -> dict[str, Any]:
@@ -2110,6 +2955,22 @@ def h_model_test(app: App, req, model_id: str):
     return response_json(result)
 
 
+def h_model_capabilities(app: App, req, model_id: str):
+    user = _admin(app, req)
+    row = _model_row(app, int(model_id))
+    model = dict(row)
+    model["extra"] = _loads(row.get("extra"), {})
+    try:
+        model["api_key"] = app.secret_box.decrypt(row["api_key"]) if row.get("api_key") else ""
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    caps = app.gateway.capabilities.public(model)
+    app.db.audit(user["id"], user["username"], "model.capabilities", str(row["id"]),
+                 {"degraded": caps.get("degraded"), "json_mode": caps.get("json_mode")},
+                 req.ip)
+    return response_json({"capabilities": caps})
+
+
 def h_model_test_draft(app: App, req):
     """Test the current form values without creating or updating a model row."""
     _admin(app, req)
@@ -2153,8 +3014,8 @@ def _user_query(req) -> tuple[list[str], list[Any]]:
     args: list[Any] = []
     q = (req.query.get("q") or "").strip()
     if q:
-        clauses.append("(username LIKE ? OR display_name LIKE ? OR domain LIKE ? OR team LIKE ? OR site LIKE ?)")
-        args.extend([f"%{q}%"] * 5)
+        clauses.append("(username LIKE ? OR display_name LIKE ? OR domain LIKE ?)")
+        args.extend([f"%{q}%"] * 3)
     role = req.query.get("role")
     if role in ROLE_RANK:
         clauses.append("role=?")
@@ -2215,8 +3076,6 @@ def h_user_detail(app: App, req, user_id: str):
         "sessions": [{**s, "current": False} for s in sessions],
         "recent_audits": [{**dict(a), "detail": _loads(a["detail_json"], {})} for a in audits],
         "counts": counts,
-        "teams": [r["team"] for r in app.db.all(
-            "SELECT DISTINCT team FROM users WHERE team<>'' ORDER BY team")],
     })
 
 
@@ -2228,8 +3087,6 @@ def h_user_create(app: App, req):
     role = str(data.get("role") or "engineer")
     display_name = str(data.get("display_name") or username).strip()
     domain = str(data.get("domain") or "").strip()[:64]
-    team = str(data.get("team") or "").strip()[:64]
-    site = str(data.get("site") or "").strip()[:64]
     expires_at = str(data.get("expires_at") or "").strip() or None
     if not re.fullmatch(r"[A-Za-z0-9._-]{3,32}", username):
         raise HTTPError(400, "用户名只能包含字母/数字/._-，3–32 位")
@@ -2246,9 +3103,9 @@ def h_user_create(app: App, req):
     active = 1 if status == "active" else 0
     uid = app.db.execute(
         "INSERT INTO users(username,display_name,role,password_hash,must_change,active,created_at,"
-        "status,team,site,domain,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "status,domain,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (username, display_name, role, hash_password(password), 1, active, now, status,
-         team, site, domain, expires_at, now))
+         domain, expires_at, now))
     app.db.audit(actor["id"], actor["username"], "user.create", username,
                  {"role": role, "domain": domain, "status": status}, req.ip)
     row = app.db.one("SELECT * FROM users WHERE id=?", (uid,))
@@ -2266,8 +3123,6 @@ def h_user_update(app: App, req, user_id: str):
     role = target["role"]
     display_name = str(data.get("display_name", target["display_name"]))
     domain = str(data.get("domain", target.get("domain") or ""))[:64]
-    team = str(data.get("team", target.get("team") or ""))[:64]
-    site = str(data.get("site", target.get("site") or ""))[:64]
     expires_at = data.get("expires_at", target.get("expires_at"))
     if expires_at is not None:
         expires_at = str(expires_at).strip() or None
@@ -2302,9 +3157,9 @@ def h_user_update(app: App, req, user_id: str):
         status = "expired"
         active = 0
     app.db.execute(
-        "UPDATE users SET display_name=?, role=?, active=?, status=?, team=?, site=?, domain=?, "
+        "UPDATE users SET display_name=?, role=?, active=?, status=?, domain=?, "
         "expires_at=?, updated_at=? WHERE id=?",
-        (display_name, role, active, status, team, site, domain, expires_at, iso_now(), target["id"]))
+        (display_name, role, active, status, domain, expires_at, iso_now(), target["id"]))
     revoked = 0
     if password or not active:
         revoked = delete_user_sessions(app.db, target["id"])
@@ -2374,7 +3229,6 @@ def h_invite_create(app: App, req):
         invite, code = create_invite(
             app.db, actor["id"], str(data.get("username") or ""),
             str(data.get("display_name") or ""), str(data.get("role") or "engineer"),
-            str(data.get("team") or ""), str(data.get("site") or ""),
             int(data.get("hours") or 24))
     except ValueError as exc:
         raise HTTPError(409 if "已存在" in str(exc) or "已有" in str(exc) else 400,
@@ -2411,6 +3265,35 @@ def h_activate(app: App, req):
         raise HTTPError(400, str(exc)) from exc
     _clear_login_failures(req.ip, "activate")
     app.db.audit(row["id"], row["username"], "invite.activate", row["username"], {}, req.ip)
+    return response_json({"ok": True, "username": row["username"],
+                          "user": public_user(row)}, status=201)
+
+
+def h_register(app: App, req):
+    """免邀请码自助注册：配置开启后才生效，固定创建工程师账号。"""
+    if not app.config.get("allow_self_register", False):
+        raise HTTPError(403, "管理员未开启自助注册")
+    req.ip = _client_ip(app, req)
+    data = req.json()
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    if not username or not password:
+        raise HTTPError(400, "请输入用户名和密码")
+    # 注册只按 IP 限流，避免攻击者反复提交已存在的用户名而把该账号的登录限流打满。
+    _check_login_rate(app, req.ip, "")
+    try:
+        row = register_user(app.db, username, password,
+                            str(data.get("display_name") or ""),
+                            str(data.get("domain") or ""),
+                            app.config.password_min_length)
+    except ValueError as exc:
+        _record_login_failure(app, req.ip, "")
+        app.db.audit(None, "register", "auth.register_failed", username,
+                     {"reason": str(exc)[:120]}, req.ip)
+        raise HTTPError(409 if "已存在" in str(exc) else 400, str(exc)) from exc
+    _clear_login_failures(req.ip, username)
+    app.db.audit(row["id"], row["username"], "auth.register", row["username"],
+                 {"domain": row.get("domain") or ""}, req.ip)
     return response_json({"ok": True, "username": row["username"],
                           "user": public_user(row)}, status=201)
 
@@ -2599,6 +3482,72 @@ def h_audit_export(app: App, req):
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
         "Cache-Control": "no-store",
     }, body
+
+
+# ---------------------------- 平台助手 / MCP ----------------------------
+def h_assistant_status(app: App, req):
+    user = _auth(app, req, csrf=False)
+    return response_json({"status": app.assistant.status(user),
+                          "suggestions": app.assistant.suggestions(user)})
+
+
+def h_assistant_suggestions(app: App, req):
+    user = _auth(app, req, csrf=False)
+    return response_json({"items": app.assistant.suggestions(user)})
+
+
+def h_assistant_chat(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    try:
+        result = app.assistant.chat(user, data.get("messages"), req.ip)
+    except AssistantError as exc:
+        raise HTTPError(exc.status, str(exc)) from exc
+    return response_json(result)
+
+
+def h_assistant_confirm(app: App, req, action_id: str):
+    user = _auth(app, req)
+    try:
+        action = app.assistant.action_public(user, action_id)
+    except AssistantError as exc:
+        raise HTTPError(exc.status, str(exc)) from exc
+    data = req.json()
+    if action.get("requires_password"):
+        _verify_admin_password(app, req, user, str(data.get("password") or ""),
+                               rate_key="assistant_action")
+    try:
+        result = app.assistant.confirm_action(user, action_id, req.ip)
+    except AssistantError as exc:
+        raise HTTPError(exc.status, str(exc)) from exc
+    return response_json(result)
+
+
+def h_assistant_cancel(app: App, req, action_id: str):
+    user = _auth(app, req)
+    return response_json(app.assistant.cancel_action(user, action_id))
+
+
+def h_mcp_http(app: App, req):
+    # 本机限制与 Bearer Token 在 MCPService 内校验；这里不使用网页会话。
+    return app.mcp.handle_http(req)
+
+
+def h_mcp_info(app: App, req):
+    user = _admin(app, req, csrf=False)
+    return response_json({"mcp": app.mcp.token_info(user)})
+
+
+def h_mcp_token_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    return response_json({"mcp": app.mcp.rotate_token(user, str(data.get("mode") or "read"))},
+                         status=201)
+
+
+def h_mcp_token_delete(app: App, req):
+    user = _admin(app, req)
+    return response_json({"mcp": app.mcp.revoke_token(user)})
 
 
 # ---------------------------- 系统信息 ----------------------------
@@ -2893,7 +3842,8 @@ def h_runtime_config_save(app: App, req):
         raise HTTPError(400, str(exc)) from exc
     app.db.audit(user["id"], user["username"], "system.runtime_config", "",
                  {"keys": list(values)}, req.ip)
-    return response_json({"ok": True, "saved": saved, "restart_required": True})
+    return response_json({"ok": True, "saved": saved,
+                          "restart_required": any(x.get("restart_required") for x in saved)})
 
 
 def h_system_restart(app: App, req):

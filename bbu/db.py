@@ -9,6 +9,8 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
+SCHEMA_VERSION = 17
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -24,8 +26,6 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL,
   last_login_at TEXT,
   status TEXT NOT NULL DEFAULT 'active',
-  team TEXT NOT NULL DEFAULT '',
-  site TEXT NOT NULL DEFAULT '',
   expires_at TEXT,
   invited_by INTEGER,
   invited_at TEXT,
@@ -51,8 +51,6 @@ CREATE TABLE IF NOT EXISTS user_invites (
   username TEXT NOT NULL,
   display_name TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL DEFAULT 'engineer',
-  team TEXT NOT NULL DEFAULT '',
-  site TEXT NOT NULL DEFAULT '',
   code_hash TEXT NOT NULL UNIQUE,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -146,6 +144,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   options_json TEXT NOT NULL DEFAULT '{}',
   stats_json TEXT NOT NULL DEFAULT '{}',
   resume_count INTEGER NOT NULL DEFAULT 0,
+  continuation_count INTEGER NOT NULL DEFAULT 0,
+  session_budget_json TEXT NOT NULL DEFAULT '{}',
   finish_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   started_at TEXT,
@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS task_skills (
   started_at TEXT,
   finished_at TEXT,
   stats_json TEXT NOT NULL DEFAULT '{}',
+  invalidated INTEGER NOT NULL DEFAULT 0,
   UNIQUE(task_id, skill_name)
 );
 CREATE INDEX IF NOT EXISTS idx_task_skills_task ON task_skills(task_id);
@@ -189,6 +190,52 @@ CREATE TABLE IF NOT EXISTS task_events (
   UNIQUE(task_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, seq);
+
+CREATE TABLE IF NOT EXISTS evidence_events (
+  evidence_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  source_json TEXT NOT NULL DEFAULT '{}',
+  entity_json TEXT NOT NULL DEFAULT '{}',
+  event_time_json TEXT NOT NULL DEFAULT '{}',
+  kind TEXT NOT NULL DEFAULT 'log',
+  name TEXT NOT NULL DEFAULT 'log.observation',
+  value_json TEXT NOT NULL DEFAULT '{}',
+  excerpt TEXT NOT NULL DEFAULT '',
+  parser_json TEXT NOT NULL DEFAULT '{}',
+  trust_json TEXT NOT NULL DEFAULT '{}',
+  content_sha256 TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_session ON evidence_events(session_id, created_at, evidence_id);
+
+CREATE TABLE IF NOT EXISTS session_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  event_key TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, revision)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_event_key
+  ON session_events(task_id, event_key) WHERE event_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS task_supplements (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL DEFAULT '',
+  answers_json TEXT NOT NULL DEFAULT '{}',
+  files_json TEXT NOT NULL DEFAULT '[]',
+  invalidated_skills_json TEXT NOT NULL DEFAULT '[]',
+  input_hash TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_task_supplements_task ON task_supplements(task_id, revision);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_supplements_revision ON task_supplements(task_id, revision);
 
 CREATE TABLE IF NOT EXISTS skills (
   name TEXT PRIMARY KEY,
@@ -232,6 +279,7 @@ CREATE TABLE IF NOT EXISTS workshop_drafts (
   profile_yaml TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
   source_text TEXT NOT NULL DEFAULT '',
+  recipe_id TEXT NOT NULL DEFAULT '',
   analysis_json TEXT NOT NULL DEFAULT '{}',
   check_json TEXT NOT NULL DEFAULT '{}',
   build_json TEXT NOT NULL DEFAULT '{}',
@@ -300,6 +348,80 @@ CREATE TABLE IF NOT EXISTS plan_experiences (
 );
 CREATE INDEX IF NOT EXISTS idx_experiences_root ON plan_experiences(root_cause_name);
 CREATE INDEX IF NOT EXISTS idx_experiences_created ON plan_experiences(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS calibration_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  split TEXT NOT NULL,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_calibration_created ON calibration_snapshots(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS case_matrix_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  skill_name TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_matrix_skill ON case_matrix_snapshots(skill_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS workshop_patches (
+  id TEXT PRIMARY KEY,
+  draft_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  old_value_json TEXT NOT NULL DEFAULT 'null',
+  new_value_json TEXT NOT NULL DEFAULT 'null',
+  actor TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workshop_patches_draft ON workshop_patches(draft_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS experience_candidates (
+  id TEXT PRIMARY KEY,
+  input_hash TEXT NOT NULL,
+  skill_name TEXT NOT NULL DEFAULT '',
+  root_cause_name TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'new_variant',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  review_note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT,
+  UNIQUE(input_hash, skill_name, root_cause_name)
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_status ON experience_candidates(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS recovery_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  comparison_json TEXT NOT NULL DEFAULT '{}',
+  source TEXT NOT NULL DEFAULT 'readonly_receipt',
+  requested_by TEXT NOT NULL DEFAULT '',
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  learning_eligible INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  observed_at TEXT,
+  reviewed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_task ON recovery_runs(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_traces (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'shadow',
+  action_count INTEGER NOT NULL DEFAULT 0,
+  stop_reason TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_traces_task ON agent_traces(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,6 +541,58 @@ CREATE TABLE IF NOT EXISTS task_reviews (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  session_revision INTEGER NOT NULL DEFAULT 0,
+  tool_name TEXT NOT NULL,
+  tool_version TEXT NOT NULL DEFAULT '',
+  manifest_hash TEXT NOT NULL DEFAULT '',
+  arguments_json TEXT NOT NULL DEFAULT '{}',
+  arguments_hash TEXT NOT NULL DEFAULT '',
+  decision TEXT NOT NULL DEFAULT '',
+  decision_json TEXT NOT NULL DEFAULT '{}',
+  risk TEXT NOT NULL DEFAULT 'low',
+  approval_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running',
+  output_hash TEXT,
+  resource_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_task ON tool_calls(task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_decision ON tool_calls(decision, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS tool_approvals (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  tool_version TEXT NOT NULL DEFAULT '',
+  arguments_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by TEXT NOT NULL DEFAULT '',
+  approved_by TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_task ON tool_approvals(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_status ON tool_approvals(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_capabilities (
+  endpoint_key TEXT PRIMARY KEY,
+  provider TEXT NOT NULL DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  checked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'probe'
+);
 """
 
 
@@ -468,6 +642,8 @@ class Database:
                 conn.execute("ALTER TABLE workshop_drafts ADD COLUMN source_task_id TEXT")
             if "source_text" not in cols:
                 conn.execute("ALTER TABLE workshop_drafts ADD COLUMN source_text TEXT NOT NULL DEFAULT ''")
+            if "recipe_id" not in cols:
+                conn.execute("ALTER TABLE workshop_drafts ADD COLUMN recipe_id TEXT NOT NULL DEFAULT ''")
             if "name_auto" not in cols:
                 conn.execute("ALTER TABLE workshop_drafts ADD COLUMN name_auto INTEGER NOT NULL DEFAULT 0")
             if "name_locked" not in cols:
@@ -476,6 +652,14 @@ class Database:
             exp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(plan_experiences)")}
             if "trust_level" not in exp_cols:
                 conn.execute("ALTER TABLE plan_experiences ADD COLUMN trust_level TEXT NOT NULL DEFAULT 'unreviewed'")
+            for col, ddl in (
+                ("invalidated", "ALTER TABLE plan_experiences ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0"),
+                ("device_type", "ALTER TABLE plan_experiences ADD COLUMN device_type TEXT NOT NULL DEFAULT ''"),
+                ("software_version", "ALTER TABLE plan_experiences ADD COLUMN software_version TEXT NOT NULL DEFAULT ''"),
+                ("source_revision", "ALTER TABLE plan_experiences ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''"),
+            ):
+                if col not in exp_cols:
+                    conn.execute(ddl)
             if "review_id" not in exp_cols:
                 conn.execute("ALTER TABLE plan_experiences ADD COLUMN review_id TEXT")
             if "corrected_root_name" not in exp_cols:
@@ -506,6 +690,16 @@ class Database:
                 conn.execute("ALTER TABLE tasks ADD COLUMN inputs_state TEXT NOT NULL DEFAULT 'available'")
             if "title_source" not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN title_source TEXT NOT NULL DEFAULT ''")
+            if "continuation_count" not in task_cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN continuation_count INTEGER NOT NULL DEFAULT 0")
+            if "session_budget_json" not in task_cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN session_budget_json TEXT NOT NULL DEFAULT '{}'")
+            task_skill_cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_skills)")}
+            if "invalidated" not in task_skill_cols:
+                conn.execute("ALTER TABLE task_skills ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0")
+            supplement_cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_supplements)")}
+            if "invalidated_skills_json" not in supplement_cols:
+                conn.execute("ALTER TABLE task_supplements ADD COLUMN invalidated_skills_json TEXT NOT NULL DEFAULT '[]'")
             for name, ddl in (
                 ("reviewer_id", "ALTER TABLE tasks ADD COLUMN reviewer_id INTEGER"),
                 ("reviewer_assigned_at", "ALTER TABLE tasks ADD COLUMN reviewer_assigned_at TEXT"),
@@ -516,8 +710,6 @@ class Database:
             user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
             for name, ddl in (
                 ("status", "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"),
-                ("team", "ALTER TABLE users ADD COLUMN team TEXT NOT NULL DEFAULT ''"),
-                ("site", "ALTER TABLE users ADD COLUMN site TEXT NOT NULL DEFAULT ''"),
                 ("expires_at", "ALTER TABLE users ADD COLUMN expires_at TEXT"),
                 ("invited_by", "ALTER TABLE users ADD COLUMN invited_by INTEGER"),
                 ("invited_at", "ALTER TABLE users ADD COLUMN invited_at TEXT"),
@@ -527,6 +719,12 @@ class Database:
             ):
                 if name not in user_cols:
                     conn.execute(ddl)
+            # 1.12.0 彻底移除用户与邀请中的班组/站点；旧库直接删列，保留领域。
+            for table in ("users", "user_invites"):
+                table_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                for name in ("team", "site"):
+                    if name in table_cols:
+                        conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{name}"')
             conn.execute("UPDATE users SET status='disabled' WHERE active=0 AND status='active'")
             conn.execute("UPDATE users SET updated_at=COALESCE(updated_at, created_at)")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_code ON user_invites(code_hash)")
@@ -550,9 +748,10 @@ class Database:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_source_task "
                 "ON workshop_drafts(source_task_id) WHERE source_task_id IS NOT NULL")
             conn.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', '10')")
-            conn.execute(
-                "UPDATE settings SET value='10' WHERE key='schema_version'")
+                "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),))
+            conn.execute("UPDATE settings SET value=? WHERE key='schema_version'",
+                         (str(SCHEMA_VERSION),))
 
     # ---------- 便捷查询 ----------
     def one(self, sql: str, args: tuple = ()) -> dict[str, Any] | None:

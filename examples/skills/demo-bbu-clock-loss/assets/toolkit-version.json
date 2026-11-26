@@ -1,0 +1,25 @@
+{
+  "builder": "bbu-fault-skill-builder",
+  "version": "2.11.0",
+  "digest": "tk-8c5ee4035044",
+  "generated_at": "2026-11-24T09:03:10+00:00",
+  "updated_at": "2026-11-24T09:03:10+00:00",
+  "generation": 1,
+  "files": {
+    "assets/evidence-rules.yaml": "9c85307c6c9bdb2dc37ecc7a1e94a59d3e6f7fb7f4fadba2cf1ba2f762a40c89",
+    "assets/fault-profile.yaml": "62061c137a4b7851b2bb1d8c6eabce5b35deac31134b001418e7ded5de5087c6",
+    "references/fault-profile.md": "c663db2cc70e3d47dd63df034aa5e095071d12aeba8deb184c69ccbe32547cdf",
+    "scripts/unpack_logs.py": "68406fbbc0b38b4790415abec738f386b3a541fc0d39129a4cd20b773f245f98",
+    "scripts/search_evidence.py": "9a7da406355a54726f1b1b4c6a71a42504d94463bcbc9b655a4b66a9720c0815",
+    "scripts/render_report.py": "f8dc9ab46e3944acc6bf9081016cc1123b210281f6ce1370657a2a11cd2a5dd3",
+    "scripts/parse_clock.py": "f3caf6aeaea05e7e15fed381b91d31493ec93a56be97a02497c86677702f8a78",
+    "scripts/log_format.py": "7053417f9525415e3ef3d019432811ad30c470bdc2d1e8d8c26f2f27c06599ef",
+    "scripts/gen_specialized.py": "fcd2605bcff9d1099f5e28115e78cb77973716fbae67d61fce6a388296bad021",
+    "scripts/fm_alarm_align.py": "f807bf90c460e822db2a071477e335d484b41725d75afed242e59956b6ee70e2",
+    "assets/alarm-code-dictionary.yaml": "3600325f3597cc8eac6cbb83cb026e952f3265502bb5b43d5d157ac4fd57672e",
+    "assets/common-rules.yaml": "95e6106b35d5c570aa0b4871546373d66646e9fcdc03471323cfa583adbb2a0f",
+    "assets/clk-field-dictionary.yaml": "04b24298f4d182e06199fbb0fe64f55bc2bbbd20c3a24a0ead71bb06ee2a55bd",
+    "assets/report_template.html": "2ca204022de8dae4b2404a57ae0cf34c723c8fe6eb6710a3534b27403c6d4beb",
+    "assets/report_template.md": "0e466c0b37ff63e1151673fb750e23a5692678be44c91f2c500d838931f7aa1e"
+  }
+}

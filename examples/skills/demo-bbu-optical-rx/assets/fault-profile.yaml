@@ -1,0 +1,82 @@
+skill:
+  name: demo-bbu-optical-rx
+  title: "[示例] 光模块接收光功率异常诊断"
+  version: "1.0.0"
+  execution_mode: script
+category: 光模块
+fault:
+  name: 光模块接收光功率异常
+  aliases: [收光异常, 光功率异常, RX_LOSS, 接收光功率过低]
+  alarm_codes: []
+  domain:
+    device_types: [BBU, ITBBU, SDR]
+    modes: [待补充]
+    boards: [待补充]
+    version_scope: 待补充
+    collection_sources: [device-tar]
+  triggers:
+    - 光口出现 RX_LOSS 或收光功率过低告警
+    - 现场反馈光口闪断、误码
+  exclusions:
+    - 仅有时钟告警且无任何光功率关键字
+symptoms:
+  observable:
+    - 光口 RX_LOSS 告警
+    - 日志出现接收光功率低于门限
+  description_keywords: [光模块, 收光, 光功率, RX_LOSS, 误码, 光口]
+  impact: 光口链路中断或误码，影响业务传输
+  time_pattern: 尾纤脏污、光模块老化或对端发光异常后出现
+  lookalikes:
+    - fault: 时钟失锁
+      differentiator: 无 RX_LOSS/收光功率关键字
+analysis:
+  steps:
+    - id: S1
+      title: 检索收光异常直接证据
+      objective: 确认日志中是否存在 RX_LOSS 或收光功率过低证据
+      targets:
+        - globs: ["**/*.log", "**/*optical*.txt", "**/*.txt"]
+          format: text
+          encoding: auto
+      rules:
+        - id: E1
+          step: S1
+          description: 日志出现 RX_LOSS 或收光功率过低
+          type: text
+          globs: ["**/*.log", "**/*optical*.txt", "**/*.txt"]
+          any_of: ["RX_LOSS", "收光功率过低", "RX power low", "光功率异常"]
+          min_matches: 1
+          context_lines: 2
+          time_extract:
+            pattern: "(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})"
+            group: 1
+            formats: ["%Y-%m-%d %H:%M:%S"]
+          verified: true
+      decision:
+        on_hit: {conclusion: 命中收光异常直接证据, goto: R1}
+        on_miss: {conclusion: 无收光异常证据, goto: EXCLUDE}
+root_causes:
+  - id: R1
+    name: 光模块接收光功率低于门限
+    condition: E1
+    mechanism: 接收光功率低于模块灵敏度门限，导致 RX_LOSS 或误码；常见于尾纤脏污、连接不良、光模块老化或对端发光不足。
+    confidence: medium
+    actions:
+      - 清洁尾纤与光口，检查连接器是否松动
+      - 用光功率计测量收光功率，与模块规格门限比对
+      - 检查对端发光功率与光模块告警
+      - 更换尾纤或光模块后复测误码与 RX_LOSS 是否消失
+    prerequisites:
+      - 具备光功率计与备用尾纤/光模块
+    risks: 拔插尾纤会影响业务，需在变更窗口执行
+    rollback: 恢复原尾纤/模块并保留测量数据
+    verify:
+      - globs: ["**/*optical*.txt", "**/*.log"]
+        patterns: ["RX_LOSS"]
+        expect: absent
+        hold_time: "恢复后观察 1h 无误码与 RX_LOSS"
+    escalation: 更换模块后仍收光不足时，检查对端与光纤链路
+components:
+  unpack: true
+  search: true
+  report: true

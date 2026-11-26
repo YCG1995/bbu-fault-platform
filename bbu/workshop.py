@@ -14,14 +14,16 @@ from typing import Any
 import yaml
 
 from .ai import AIGateway, AIError, Budget, NoModelError
+from .data_egress import DataEgressPolicy
 from .db import Database
 from .prompts import (WORKSHOP_EXTRACT_SYSTEM, WORKSHOP_REVIEW_SCHEMA,
                       WORKSHOP_REVIEW_SYSTEM, WORKSHOP_SPEC_SCHEMA,
                       workshop_extract_user, workshop_repair_user,
-                      workshop_review_user)
+                      workshop_review_final_user, workshop_review_user)
 from .skills import SkillRegistry
 from .workshop_spec import (audit_spec, compile_profile, derive_skill_name,
-                            merge_specs, parse_source, public_spec)
+                            merge_specs, model_spec, parse_source, public_spec)
+from .workshop_recipes import list_recipes
 from .storage import extract_inputs, sample_text_files
 from .util import (env_with_vendor, iso_now, new_id, read_json, safe_filename,
                    unique_path, write_json, write_text)
@@ -155,6 +157,12 @@ class WorkshopService:
             except Exception:  # 进度回报不能影响生成主链
                 pass
 
+    def _invalidate_build(self, draft_id: str) -> None:
+        """分析、规则或案例变化后，旧构建/旧版本结论必须失效。"""
+        self.db.execute(
+            "UPDATE workshop_drafts SET build_json='{}', skill_version=NULL WHERE id=?",
+            (draft_id,))
+
     # ---------- 草稿 ----------
     def create_draft(self, user_id: int, data: dict[str, Any], *,
                      deferred: bool = False, model_override: int | None = None,
@@ -188,6 +196,18 @@ class WorkshopService:
              description, "", now, now))
         return self.get(draft_id)
 
+    @staticmethod
+    def _normalize_recipe_id(value: Any) -> str:
+        rid = str(value or "").strip()
+        if rid in ("", "auto", "none", "generic", "off"):
+            return rid
+        if not any(recipe.get("id") == rid for recipe in list_recipes()):
+            raise ValueError(f"未知领域配方: {rid}")
+        return rid
+
+    def recipes(self) -> list[dict[str, Any]]:
+        return list_recipes()
+
     def _ensure_new_name(self, name: str) -> None:
         if self.db.one("SELECT name FROM skills WHERE name=?", (name,)) or self.db.one(
                 "SELECT id FROM workshop_drafts WHERE name=?", (name,)):
@@ -198,7 +218,8 @@ class WorkshopService:
                           progress: Any = None) -> dict[str, Any]:
         if len(source_text) < 20:
             raise ValueError("请粘贴完整故障资料，至少需要故障名称、日志特征和判断思路")
-        spec = parse_source(source_text)
+        recipe_id = self._normalize_recipe_id(data.get("recipe_id"))
+        spec = parse_source(source_text, recipe_id=recipe_id)
         if data.get("fault_name"):
             spec["fault_name"] = str(data["fault_name"]).strip()
         if data.get("title"):
@@ -210,14 +231,15 @@ class WorkshopService:
         draft_id = new_id("W", with_time=True)
         now = iso_now()
         profile = compile_profile(spec, name)
+        stored_recipe = recipe_id or "auto"
         self.db.execute(
             "INSERT INTO workshop_drafts(id, owner_id, name, title, fault_name, category, status, "
-            "profile_yaml, description, source_text, name_auto, name_locked, created_at, updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "profile_yaml, description, source_text, recipe_id, name_auto, name_locked, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (draft_id, user_id, name, spec["title"], spec["fault_name"], spec.get("category") or "硬件故障",
              "queued" if deferred else "generating",
              yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
-             spec.get("summary") or "", source_text, 1, 0, now, now))
+             spec.get("summary") or "", source_text, stored_recipe, 1, 0, now, now))
         if deferred:
             return self.get(draft_id)
         try:
@@ -348,19 +370,66 @@ class WorkshopService:
             raise ValueError(f"YAML 解析失败: {exc}") from exc
         if not isinstance(parsed, dict) or "skill" not in parsed:
             raise ValueError("profile 必须是对象且含 skill 段")
-        fields = {
+        fields: dict[str, Any] = {
             "title": data.get("title", row["title"]),
             "fault_name": data.get("fault_name", row["fault_name"]),
             "description": data.get("description", row["description"]),
             "profile_yaml": profile_yaml,
             "updated_at": iso_now(),
         }
+        status = "editing"
+        if "recipe_id" in data:
+            recipe_id = self._normalize_recipe_id(data.get("recipe_id"))
+            fields["recipe_id"] = recipe_id
+            if recipe_id != (row.get("recipe_id") or ""):
+                # 换配方等同换领域规则，旧分析/校验/构建结论不可复用。
+                fields["analysis_json"] = "{}"
+                fields["check_json"] = "{}"
+                fields["build_json"] = "{}"
+                fields["skill_version"] = None
+                fields["last_error"] = None
+                status = "editing"
+        if profile_yaml != (row.get("profile_yaml") or ""):
+            fields["check_json"] = "{}"
+            self._invalidate_build(draft_id)
+        if "source_text" in data:
+            source_text = str(data.get("source_text") or "").strip()
+            if len(source_text) < 20:
+                raise ValueError("请粘贴完整故障资料，至少需要故障名称、日志特征和判断思路")
+            fields["source_text"] = source_text
+            if source_text != (row.get("source_text") or "").strip():
+                # 原文变化后，后续规则审查/构建/回归结论都失效，必须重新分析。
+                fields["analysis_json"] = "{}"
+                fields["check_json"] = "{}"
+                fields["build_json"] = "{}"
+                fields["last_error"] = None
+                status = "editing"
+        columns = list(fields)
         self.db.execute(
-            "UPDATE workshop_drafts SET title=?, fault_name=?, description=?, profile_yaml=?, "
-            "updated_at=?, status='editing' WHERE id=?",
-            (fields["title"], fields["fault_name"], fields["description"],
-             fields["profile_yaml"], fields["updated_at"], draft_id))
+            "UPDATE workshop_drafts SET " + ", ".join(f"{name}=?" for name in columns) +
+            ", status=? WHERE id=?",
+            (*(fields[name] for name in columns), status, draft_id))
         return self.get(draft_id)
+
+    def delete_draft(self, draft_id: str) -> dict[str, Any]:
+        """删除草稿记录及其工作目录；已发布技能本身不回滚、不删除。"""
+        row = self.get(draft_id)
+        active = self.db.one(
+            "SELECT id FROM workshop_jobs WHERE draft_id=? AND status IN ('queued','running') "
+            "ORDER BY created_at DESC LIMIT 1", (draft_id,))
+        if active:
+            raise ValueError("草稿有后台任务正在执行，请等待完成或重启服务后再删除")
+        published = row.get("status") == "published"
+        self.db.execute("DELETE FROM workshop_jobs WHERE draft_id=?", (draft_id,))
+        self.db.execute("DELETE FROM workshop_drafts WHERE id=?", (draft_id,))
+        draft_dir = (Path(self.config.data_dir) / "workshop" / draft_id).resolve()
+        try:
+            draft_dir.relative_to((Path(self.config.data_dir) / "workshop").resolve())
+            if draft_dir.is_dir():
+                shutil.rmtree(draft_dir, ignore_errors=True)
+        except (OSError, ValueError):
+            pass
+        return {"ok": True, "id": draft_id, "published_skill_kept": published}
 
     # ---------- 日志与 AI 起草 ----------
     def attach_logs(self, draft_id: str, files: list[dict[str, Any]], *,
@@ -379,6 +448,7 @@ class WorkshopService:
     def analyze(self, draft_id: str, *, progress: Any = None,
                 model_override: int | None = None) -> dict[str, Any]:
         row = self.get(draft_id)
+        self._invalidate_build(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
         log_dir = Path(row["log_path"]) if row.get("log_path") else draft_dir / "logs"
         self.db.execute("UPDATE workshop_drafts SET status='analyzing', updated_at=? WHERE id=?",
@@ -409,12 +479,18 @@ class WorkshopService:
     def _generate(self, draft_id: str, extras: dict[str, Any] | None = None, *,
                   progress: Any = None, model_override: int | None = None) -> dict[str, Any]:
         row = self.get(draft_id)
+        self._invalidate_build(draft_id)
         source_text = str(row.get("source_text") or "").strip()
         analysis: dict[str, Any] = dict(extras or {})
-        analysis.update({"model": "", "source": "deterministic", "notes": [], "attempts": []})
+        analysis.update({"model": "", "source": "deterministic", "notes": [], "attempts": [],
+                         "extract_status": "not_run", "review_status": "not_run",
+                         "repair_status": "not_run"})
         if not source_text:
             # 兼容自学习和手工旧草稿：没有原始需求文本时保留人工 profile，不用空骨架覆盖。
             analysis["ai_status"] = "not_applicable"
+            analysis["extract_status"] = "not_applicable"
+            analysis["review_status"] = "not_applicable"
+            analysis["repair_status"] = "not_applicable"
             analysis["notes"].append("该草稿没有整段需求文本，保留现有人工 profile；可在“补充/纠正”中粘贴资料后重建。")
             self.db.execute("UPDATE workshop_drafts SET analysis_json=?, status='analyzed', updated_at=? WHERE id=?",
                             (json.dumps(analysis, ensure_ascii=False, default=str), iso_now(), draft_id))
@@ -423,78 +499,116 @@ class WorkshopService:
                             (json.dumps(check, ensure_ascii=False), iso_now(), draft_id))
             return self.get(draft_id)
 
-        spec = parse_source(source_text)
+        spec = parse_source(source_text, recipe_id=str(row.get("recipe_id") or ""))
         ai_status = "not_configured"
         budget = Budget(4, int(self.config.get("max_total_tokens", 200000)))
+        egress = DataEgressPolicy.for_workshop(self.config)
+        egress_audit = egress.describe()
+        analysis["data_egress"] = egress_audit
 
-        def record(result: Any, stage: str) -> None:
-            analysis["attempts"].append({
-                "stage": stage, "model": result.model_name, "latency_ms": result.latency_ms,
-                "input_tokens": result.usage.input_tokens, "output_tokens": result.usage.output_tokens,
-            })
+        def safe_spec(value: dict[str, Any]) -> dict[str, Any]:
+            # 模型只看业务字段；provenance/diagnostic_reasoning 等只留给 UI 和审计。
+            return egress.sanitize_structure(model_spec(value))
+
+        def attempt_sink(entry: dict[str, Any]) -> None:
+            analysis["attempts"].append(entry)
+            if entry.get("status") == "success":
+                egress_audit.setdefault("stages", []).append({
+                    "stage": entry.get("stage") or "model",
+                    **egress.signal_audit({"model": entry.get("model") or ""}),
+                })
 
         if self.gateway.has_real_model("workshop") and self.gateway.available("workshop"):
+            source_context, excerpt_audit = egress.excerpt(source_text)
+            egress_audit.update(excerpt_audit)
+            egress_audit["stages"] = []
+            self.db.audit(row.get("owner_id"), None, "workshop_model_egress", draft_id,
+                          egress_audit)
             try:
                 self._progress(progress, "extract", 30, "AI 正在提取故障语义与证据规则")
                 result = self.gateway.complete(
                     "workshop", WORKSHOP_EXTRACT_SYSTEM,
-                    workshop_extract_user(source_text, public_spec(spec)),
+                    workshop_extract_user(source_context, safe_spec(spec)),
                     json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:extract", budget=budget,
                     max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
-                    model_override=model_override)
-                record(result, "extract")
+                    model_override=model_override, stage="extract", stream=True,
+                    attempt_sink=attempt_sink)
                 spec = merge_specs(spec, result.data or {})
                 analysis["model"] = result.model_name
                 analysis["source"] = "ai"
+                analysis["extract_status"] = "success"
                 ai_status = "success"
             except (AIError, NoModelError, ValueError, TypeError) as exc:
                 ai_status = "failed"
+                analysis["extract_status"] = "failed"
                 analysis["notes"].append(f"AI 语义提取失败，当前展示确定性解析结果：{exc}")
         else:
             if self.gateway.configured("workshop"):
                 ai_status = "unavailable"
+                analysis["extract_status"] = "unavailable"
+                analysis["review_status"] = "skipped"
+                analysis["repair_status"] = "skipped"
                 analysis["notes"].append("workshop 模型已配置但暂不可用（可能处于熔断或故障状态），本次使用确定性解析；不会把该结果标记为 AI 生成。")
             else:
+                analysis["extract_status"] = "not_configured"
+                analysis["review_status"] = "skipped"
+                analysis["repair_status"] = "skipped"
                 analysis["notes"].append("未配置 workshop 真实模型，本次使用确定性解析；不会把该结果标记为 AI 生成。")
 
         quality = audit_spec(spec)
         review: dict[str, Any] = {}
+        # 评审只输出问题列表，不需要完整 spec；实测 4k 会在复杂配方上截断，
+        # 5k 足够容纳 6 个问题，同时避免 8k 长响应更容易触发 IncompleteRead。
+        review_budget = min(5000, int(self.config.get("max_tokens", 16384)))
         if ai_status == "success":
             try:
                 self._progress(progress, "review", 58, "AI 正在审查规则与根因一致性")
+                analysis["review_status"] = "failed"
                 result = self.gateway.complete(
                     "workshop", WORKSHOP_REVIEW_SYSTEM,
-                    workshop_review_user(source_text, public_spec(spec), quality),
+                    workshop_review_user(source_context, safe_spec(spec), quality),
                     json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review", budget=budget,
-                    max_tokens=8000, temperature=0.1, model_override=model_override)
-                record(result, "review")
+                    max_tokens=review_budget, temperature=0.1, model_override=model_override,
+                    stage="review", stream=True, attempt_sink=attempt_sink)
                 review = result.data or {}
+                analysis["review_status"] = "success"
                 quality = self._merge_review(quality, review)
                 if any(x.get("severity") == "error" for x in review.get("issues") or []):
                     self._progress(progress, "repair", 70, "根据评审问题自动修复技能规格")
+                    analysis["repair_status"] = "failed"
                     repair = self.gateway.complete(
                         "workshop", WORKSHOP_EXTRACT_SYSTEM,
-                        workshop_repair_user(source_text, public_spec(spec), review),
+                        workshop_repair_user(source_context, safe_spec(spec), review),
                         json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:repair", budget=budget,
                         max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
-                        model_override=model_override)
-                    record(repair, "repair")
+                        model_override=model_override, stage="repair", stream=True,
+                        attempt_sink=attempt_sink)
                     spec = merge_specs(spec, repair.data or {})
+                    analysis["repair_status"] = "success"
                     quality = audit_spec(spec)
                     analysis["source"] = "ai+repair"
                     # 修复后重新评审一次；评审仍有问题就明确请求确认，不静默通过。
                     self._progress(progress, "review-final", 82, "正在做最终质量评审")
+                    analysis["review_status"] = "failed"
                     result = self.gateway.complete(
                         "workshop", WORKSHOP_REVIEW_SYSTEM,
-                        workshop_review_user(source_text, public_spec(spec), quality),
-                        json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review-final", budget=budget,
-                        max_tokens=8000, temperature=0.1, model_override=model_override)
-                    record(result, "review-final")
+                        workshop_review_final_user(safe_spec(spec), quality, review),
+                        json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review-final",
+                        budget=budget, max_tokens=min(3000, review_budget),
+                        temperature=0.1, model_override=model_override, stage="review-final",
+                        stream=True, attempt_sink=attempt_sink)
                     review = result.data or {}
+                    analysis["review_status"] = "success"
                     quality = self._merge_review(quality, review)
+                else:
+                    analysis["repair_status"] = "skipped"
             except (AIError, NoModelError, ValueError, TypeError) as exc:
                 analysis["notes"].append(f"AI 评审/修复未完成，保留当前确定性校验结果：{exc}")
-                quality = audit_spec(spec)
+                # 评审已经给出结论时，修复失败不能把评审 error 丢掉；否则可能误放行。
+                quality = self._merge_review(audit_spec(spec), review) if review else audit_spec(spec)
+        else:
+            analysis["review_status"] = "skipped"
+            analysis["repair_status"] = "skipped"
 
         analysis["intake"] = public_spec(spec)
         analysis["quality"] = quality
@@ -502,6 +616,9 @@ class WorkshopService:
         analysis["ai_status"] = ai_status
         analysis["generation"] = {
             "source": analysis["source"], "model": analysis["model"], "ai_status": ai_status,
+            "extract_status": analysis["extract_status"],
+            "review_status": analysis["review_status"],
+            "repair_status": analysis["repair_status"],
             "attempts": analysis["attempts"], "generated_at": iso_now(),
         }
         spec["title"] = self._clean_title(spec)
@@ -666,6 +783,19 @@ class WorkshopService:
         if quality and not quality.get("ok", True):
             return {"ok": False, "stage": "quality", "error": "技能质量审查未通过，请先处理错误或补充确认",
                     "quality": quality}
+        parsed_profile = yaml.safe_load(row.get("profile_yaml") or "") or {}
+        if not isinstance(parsed_profile, dict):
+            parsed_profile = {}
+        profile_recipe_id = str((parsed_profile.get("recipe") or {}).get("id") or "")
+        stored_recipe = str(row.get("recipe_id") or "")
+        expected_recipe = None
+        if stored_recipe in ("none", "generic", "off"):
+            expected_recipe = ""
+        elif stored_recipe not in ("", "auto"):
+            expected_recipe = stored_recipe
+        if expected_recipe is not None and profile_recipe_id != expected_recipe:
+            return {"ok": False, "stage": "analysis",
+                    "error": "领域配方已变更，当前 profile 仍是旧配方生成的规则；请先重新分析后再构建"}
         draft_dir = self.config.data_dir / "workshop" / draft_id
         profile_path = draft_dir / "profile.yaml"
         write_text(profile_path, row["profile_yaml"])
@@ -686,11 +816,11 @@ class WorkshopService:
         staging.mkdir(parents=True)
         build_json = draft_dir / "build-result.json"
         cases = self.config.cases_dir / name
-        verified_mode = bool(parsed.get("root_causes")) and cases.exists()
+        regression_run = bool(parsed.get("root_causes")) and cases.exists()
         cmd = [sys.executable, str(self.meta / "scripts" / "build_child_skill.py"),
                "--profile", str(profile_path), "--path", str(staging),
                "--json", str(build_json)]
-        if verified_mode:
+        if regression_run:
             cmd += ["--cases-dir", str(self.config.cases_dir)]
         else:
             cmd += ["--skip-regression"]
@@ -705,13 +835,22 @@ class WorkshopService:
         output = (proc.stdout or "") + (proc.stderr or "")
         skill_dir = staging / name
         ok = proc.returncode == 0 and skill_dir.exists()
+        regression = result.get("regression") if isinstance(result.get("regression"), dict) else {}
+        regression_ok = bool(
+            regression_run and result.get("verified")
+            and int(regression.get("total") or 0) > 0
+            and int(regression.get("passed") or 0) == int(regression.get("total") or 0)
+            and int(regression.get("failed") or 0) == 0
+            and int(regression.get("errors") or 0) == 0)
+        verified_mode = bool(ok and regression_ok)
         payload = {
             "ok": ok,
-            "verified": bool(ok and verified_mode),
+            "verified": verified_mode,
             "version": version,
             "exit_code": proc.returncode,
             "output": output[-6000:],
             "result": result,
+            "regression": regression,
             "skill_dir": str(skill_dir) if skill_dir.exists() else "",
         }
         if not ok:
@@ -779,6 +918,14 @@ class WorkshopService:
             write_json(target / ".bbu-workshop.json",
                        {"draft_id": draft_id, "published_at": iso_now(),
                         "published_by": username, "verified": build.get("verified")})
+            from .supply import sign_skill
+            sign_skill(
+                target, data_dir=self.config.data_dir, name=name, version=version,
+                builder="workshop",
+                verification={"status": "case_regression", "ok": bool(build.get("verified")),
+                              "regression": build.get("regression") or
+                              (build.get("result") or {}).get("regression") or {},
+                              "draft_id": draft_id, "published_by": username})
         except Exception:
             if target.exists():
                 shutil.rmtree(target)
@@ -807,6 +954,22 @@ class WorkshopService:
             shutil.move(str(target), str(backup))
         try:
             shutil.copytree(src, target)
+            row = self.db.one(
+                "SELECT build_json FROM skill_versions WHERE skill_name=? AND version=?",
+                (skill_name, version)) or {}
+            try:
+                built = json.loads(row.get("build_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                built = {}
+            regression = built.get("regression") if isinstance(built.get("regression"), dict) else {}
+            verified = bool(built.get("verified") and int(regression.get("total") or 0) > 0
+                            and int(regression.get("passed") or 0) == int(regression.get("total") or 0)
+                            and int(regression.get("failed") or 0) == 0)
+            from .supply import sign_skill
+            sign_skill(target, data_dir=self.config.data_dir, name=skill_name,
+                       version=version, builder="workshop-rollback",
+                       verification={"status": "case_regression" if verified else "rollback_unverified",
+                                     "ok": verified, "regression": regression})
         except Exception:
             if target.exists():
                 shutil.rmtree(target)
@@ -906,6 +1069,7 @@ class WorkshopService:
             "description=excluded.description",
             (name, case_id, kind, str(case_dir), exp["root_cause"],
              data["description"], iso_now()))
+        self._invalidate_build(draft_id)
         self.db.execute("UPDATE workshop_drafts SET case_path=?, name_locked=1, updated_at=? WHERE id=?",
                         (str(case_dir), iso_now(), draft_id))
         unknown = self._unknown_case_refs(row["profile_yaml"], root_cause, hit_rules, not_hit_rules)

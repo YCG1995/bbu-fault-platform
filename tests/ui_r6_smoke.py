@@ -90,7 +90,7 @@ def main() -> int:
             page.wait_for_selector("text=尚未配置可用模型")
             page.locator('[data-act="model-key"]').first.click()
             page.wait_for_selector("text=个人模型配置（企业内网 MaaS）")
-            assert page.locator("text=deepseek-v4-flash").count() >= 1
+            assert page.locator("text=gpt-4o-mini").count() >= 1
             page.fill('input[name="api_key"]', KEY)
             page.screenshot(path="/tmp/r6-personal-key.png", full_page=True)
             page.locator('[data-act="save-key"]').click()
@@ -101,7 +101,7 @@ def main() -> int:
 
             page.locator('[data-act="profile"]').click()
             page.wait_for_selector("text=企业内网模型（个人 Key）")
-            assert page.locator("text=已配置 deepseek-v4-flash").count() >= 1
+            assert page.locator("text=已配置 gpt-4o-mini").count() >= 1
             page.locator('[data-act="close"]').first.click()
 
             # 375px 下个人 Key 弹窗仍可操作，无整页横向滚动

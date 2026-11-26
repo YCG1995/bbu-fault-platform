@@ -10,6 +10,7 @@ import { renderWorkshop } from './page_workshop.js';
 import { renderModels, renderUsers, renderAudit, renderSystem } from './page_admin.js';
 import { renderCases, renderCaseDetail } from './page_cases.js';
 import { openPersonalModelModal } from './personal_model.js';
+import { mountAssistant, unmountAssistant } from './assistant.js';
 
 const NAV = [
   { href: '#/dashboard', label: '总览', icon: 'dashboard' },
@@ -148,6 +149,7 @@ function renderShell() {
     `${state.publicConfig.brand || 'BBU FaultScope'} · v${state.publicConfig.version || '1.0.0'}`;
   bindTopbar();
   updateNav();
+  mountAssistant();
 }
 
 function bindTopbar() {
@@ -165,6 +167,7 @@ function bindTopbar() {
       try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* 已过期也按退出处理 */ }
       state.user = null;
       state.sessionExpires = null;
+      unmountAssistant();
       stopSessionTimer();
       toast('已退出登录', 'ok');
       renderLogin();
@@ -292,6 +295,7 @@ function renderLogin(message = '') {
   if (loginRoot) loginRoot.remove();
   const remembered = rememberedUsername();
   const minLen = minPwdLength();
+  const allowSelfRegister = Boolean(state.publicConfig?.allow_self_register);
   loginRoot = document.createElement('div');
   loginRoot.className = 'login-wrap';
   loginRoot.innerHTML = `
@@ -317,6 +321,7 @@ function renderLogin(message = '') {
         ${message ? `<div class="alert danger login-error">${icon('alert')}<div>${esc(message)}</div></div>` : ''}
         <div class="help" style="margin-top:10px">密码策略：${esc(passwordPolicyHint())}（现有账号不受影响）</div>
         <button type="button" class="btn btn-ghost" id="to-activate" style="width:100%;margin-top:10px">${icon('lock')}使用激活码开户</button>
+        ${allowSelfRegister ? `<button type="button" class="btn btn-ghost" id="to-register" style="width:100%;margin-top:8px">${icon('plus')}自助注册（无需邀请码）</button>` : ''}
       </form>
       <form id="activate-form" hidden>
         <div class="alert info" style="margin-bottom:12px">${icon('info')}<div>输入管理员发放的一次性激活码，自行设置密码。激活码只能使用一次。</div></div>
@@ -331,12 +336,30 @@ function renderLogin(message = '') {
         <button type="button" class="btn btn-ghost" id="back-login" style="width:100%;margin-top:8px">返回登录</button>
         <div class="help" style="margin-top:10px">密码策略：${esc(passwordPolicyHint())}</div>
       </form>
+      <form id="register-form" hidden>
+        <div class="alert info" style="margin-bottom:12px">${icon('info')}<div>管理员已开启自助注册。注册账号为普通工程师，可自行创建诊断任务。</div></div>
+        <div class="form-row"><label class="label" for="register-user">用户名</label>
+          <input class="input mono" id="register-user" name="username" autocomplete="username" pattern="[A-Za-z0-9._-]{3,32}" required placeholder="zhangsan"></div>
+        <div class="form-row"><label class="label" for="register-display">显示名</label>
+          <input class="input" id="register-display" name="display_name" placeholder="可选，默认使用用户名"></div>
+        <div class="form-row"><label class="label" for="register-domain">领域</label>
+          <input class="input" id="register-domain" name="domain" placeholder="可选，如：时钟同步"></div>
+        <div class="form-row"><label class="label" for="register-pass">设置密码</label>
+          <div class="input-affix"><input class="input" id="register-pass" name="password" type="password" minlength="${minLen}" autocomplete="new-password" required>
+            <button type="button" class="affix-btn" data-toggle-pass aria-label="显示密码">显示</button></div></div>
+        <div class="form-row"><label class="label" for="register-pass2">确认密码</label>
+          <input class="input" id="register-pass2" name="confirm" type="password" minlength="${minLen}" autocomplete="new-password" required></div>
+        <button class="btn btn-primary" type="submit" style="width:100%;margin-top:4px" id="register-btn">${icon('check')}注册并返回登录</button>
+        <button type="button" class="btn btn-ghost" id="register-back" style="width:100%;margin-top:8px">返回登录</button>
+        <div class="help" style="margin-top:10px">密码策略：${esc(passwordPolicyHint())}</div>
+      </form>
       <div class="login-note">完全离线部署 · 数据与密钥保存在本机<br>管理员首次登录需修改初始密码</div>
     </div>`;
   document.body.appendChild(loginRoot);
   bindPasswordToggles(loginRoot);
   const form = loginRoot.querySelector('#login-form');
   const activateForm = loginRoot.querySelector('#activate-form');
+  const registerForm = loginRoot.querySelector('#register-form');
   const toggleActivate = (show) => {
     loginRoot.querySelector('#login-title').textContent = show ? '激活账号' : '登录';
     loginRoot.querySelector('#login-sub').textContent = show
@@ -344,12 +367,32 @@ function renderLogin(message = '') {
       : '使用本地账号登录；所有操作会写入审计日志。';
     form.hidden = show;
     activateForm.hidden = !show;
+    if (registerForm) registerForm.hidden = true;
     loginRoot.querySelector('#to-activate').hidden = show;
+    const registerBtn = loginRoot.querySelector('#to-register');
+    if (registerBtn) registerBtn.hidden = show;
     if (show) activateForm.elements.code.focus();
+    else form.elements.username.focus();
+  };
+  const toggleRegister = (show) => {
+    if (!allowSelfRegister || !registerForm) return;
+    loginRoot.querySelector('#login-title').textContent = show ? '注册账号' : '登录';
+    loginRoot.querySelector('#login-sub').textContent = show
+      ? '管理员已开启自助注册，填写账号信息后即可使用。'
+      : '使用本地账号登录；所有操作会写入审计日志。';
+    form.hidden = show;
+    activateForm.hidden = true;
+    registerForm.hidden = !show;
+    loginRoot.querySelector('#to-activate').hidden = show;
+    const registerBtn = loginRoot.querySelector('#to-register');
+    if (registerBtn) registerBtn.hidden = show;
+    if (show) registerForm.elements.username.focus();
     else form.elements.username.focus();
   };
   loginRoot.querySelector('#to-activate').addEventListener('click', () => toggleActivate(true));
   loginRoot.querySelector('#back-login').addEventListener('click', () => toggleActivate(false));
+  loginRoot.querySelector('#to-register')?.addEventListener('click', () => toggleRegister(true));
+  loginRoot.querySelector('#register-back')?.addEventListener('click', () => toggleRegister(false));
   activateForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = loginRoot.querySelector('#activate-btn');
@@ -369,6 +412,36 @@ function renderLogin(message = '') {
       form.elements.password.focus();
     } catch (err) {
       toast(err.message || '激活失败，请检查激活码是否过期或已使用', 'error', 6000);
+    } finally {
+      setBusy(btn, false);
+    }
+  });
+  registerForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = loginRoot.querySelector('#register-btn');
+    const password = registerForm.elements.password.value;
+    if (password !== registerForm.elements.confirm.value) {
+      toast('两次输入的密码不一致', 'warn');
+      return;
+    }
+    setBusy(btn, true, '注册中…');
+    try {
+      const data = await api('/api/auth/register', {
+        method: 'POST',
+        body: {
+          username: registerForm.elements.username.value.trim(),
+          display_name: registerForm.elements.display_name.value.trim(),
+          domain: registerForm.elements.domain.value.trim(),
+          password,
+        },
+      });
+      toast('注册成功，请使用新账号登录', 'ok');
+      form.elements.username.value = data.username || '';
+      registerForm.reset();
+      toggleRegister(false);
+      form.elements.password.focus();
+    } catch (err) {
+      toast(err.message || '注册失败，请检查用户名或密码策略', 'error', 6000);
     } finally {
       setBusy(btn, false);
     }
@@ -537,7 +610,8 @@ async function openProfile() {
       <div class="form-row"><label class="label">用户名</label><input class="input mono" value="${esc(u.username)}" disabled></div>
       <div class="form-row"><label class="label">显示名</label><input class="input" name="display_name" value="${esc(u.display_name || '')}"></div>
       <div class="form-row"><label class="label">角色</label><input class="input" value="${esc(roleLabel(u.role))}" disabled></div>
-      <div class="form-row"><label class="label">班组 / 站点</label><input class="input" value="${esc([u.team, u.site].filter(Boolean).join(' / ') || '—')}" disabled></div>
+      <div class="form-row"><label class="label">领域</label><input class="input" value="${esc(u.domain || '—')}" disabled>
+        <div class="help">由管理员在用户管理中维护；个人中心只读。</div></div>
     </div>
     <div class="card" style="margin-top:14px;box-shadow:none;border-color:#dbe4ee">
       <div class="card-body">
@@ -730,6 +804,7 @@ function denied() {
 
 async function boot() {
   state.onUnauthorized = () => {
+    unmountAssistant();
     stopSessionTimer();
     if (loginRoot) renderLogin('登录已过期，请重新登录');
     else openReauth('登录已过期，请重新登录');

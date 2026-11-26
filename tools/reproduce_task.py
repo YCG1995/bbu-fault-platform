@@ -116,7 +116,8 @@ def main() -> int:
          json.dumps({"mode": task_meta.get("mode") or "fast",
                      "include_canary": bool(task_meta.get("include_canary"))},
                     ensure_ascii=False), iso_now()))
-    registry = SkillRegistry(db, config.skills_dir)
+    registry = SkillRegistry(db, config.skills_dir, data_dir=config.data_dir,
+                             manifest_mode=str(config.get("skill_manifest_mode", "shadow")))
     registry.scan()
     gateway = AIGateway(db, config)
     runner = SkillRunner(config)

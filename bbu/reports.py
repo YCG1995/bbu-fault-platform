@@ -51,6 +51,33 @@ def compose_markdown(task: dict[str, Any], results: list[dict[str, Any]],
                         f"证据质量 {item.get('quality_score', 0)}/100，{item.get('confidence')}）")
         lines.append(f"- **判定**：{verdict_label}")
         lines.append(f"- **置信度**：{confidence}")
+        cal = arbitration.get("calibration") or {}
+        if cal:
+            acc = cal.get("accuracy")
+            line = f"- **置信度校准**：{cal.get('status')}"
+            if acc is not None:
+                ci = cal.get("accuracy_ci95") or []
+                line += (f"（{cal.get('level')} 档 dev 准确率 {acc}"
+                         + (f"，95% CI {ci[0]}–{ci[1]}" if len(ci) == 2 else "")
+                         + f"，n={cal.get('sample_count', 0)}）")
+            else:
+                line += f"（{cal.get('note') or '样本不足，不显示伪精确概率'}）"
+            lines.append(line)
+        cards = arbitration.get("decision_cards") or []
+        if cards:
+            lines.append("")
+            lines.append("### 根因决策卡")
+            for card in cards[:4]:
+                lines.append(f"- **{card.get('root_cause')}**（{card.get('state')}，"
+                             f"必要条件 {len(card.get('necessary_evidence') or [])} 条，"
+                             f"反证 {len(card.get('counter_evidence') or [])} 条）")
+                for item in (card.get("necessary_evidence") or [])[:4]:
+                    lines.append(f"  - {item.get('rule')}：{'已命中' if item.get('present') else '未命中'} "
+                                 f"{item.get('description') or ''}")
+                for item in card.get("near_miss") or []:
+                    lines.append(f"  - 近邻：{item.get('fault')} — {item.get('differentiator')}")
+                if card.get("missing_evidence"):
+                    lines.append("  - 缺口：" + "、".join(card.get("missing_evidence") or []))
         lines.append(f"- **一句话**：{narrative.get('headline') if narrative else _default_headline(chosen_result, root)}")
         if arbitration.get("reason"):
             lines.append(f"- **仲裁依据**：{arbitration['reason']}")

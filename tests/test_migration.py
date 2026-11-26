@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
 from bbu.config import Config  # noqa: E402
-from bbu.db import Database  # noqa: E402
+from bbu.db import Database, SCHEMA_VERSION  # noqa: E402
 from bbu.migration import (  # noqa: E402
     WORKDIR_TOKEN,
     MaintenanceGate,
@@ -81,6 +81,31 @@ class WorkDirConfigTests(unittest.TestCase):
             self.assertEqual(loaded.data_dir, work.resolve() / "data")
             self.assertEqual(loaded.work_dir, work.resolve())
 
+    def test_disjoint_data_and_skills_fall_back_to_data_parent(self):
+        # 选一个与默认临时目录不同的顶层目录，模拟三个路径分处不同挂载点。
+        external_base = Path("/var/tmp")
+        if not (external_base.is_dir() and os.access(external_base, os.W_OK)):
+            external_base = ROOT
+        with tempfile.TemporaryDirectory() as tmp, \
+                tempfile.TemporaryDirectory(dir=external_base) as external:
+            root = Path(tmp)
+            data = root / "runtime" / "data"
+            skills = Path(external) / "skills"
+            cases = Path(external) / "cases"
+            with patch.dict(os.environ, {
+                "BBU_DATA_DIR": str(data),
+                "BBU_SKILLS_DIR": str(skills),
+                "BBU_CASES_DIR": str(cases),
+            }, clear=True):
+                loaded = Config(root)
+            common = Path(os.path.commonpath(
+                [str(data), str(skills), str(cases)]))
+            if common.name in ("data", "skills", "cases"):
+                common = common.parent
+            expected = data.parent if common == Path(common.anchor) else common
+            self.assertEqual(loaded.work_dir, expected.resolve())
+            self.assertTrue((loaded.work_dir / "updates").is_dir())
+
 
 class MigrationRoundTripTests(unittest.TestCase):
     def setUp(self):
@@ -141,7 +166,7 @@ class MigrationRoundTripTests(unittest.TestCase):
         self.assertNotIn("stored_path", input_json)
         self.assertNotIn("logs/a.log", input_json)
         self.assertIn(WORKDIR_TOKEN, report)
-        self.assertEqual(settings["schema_version"], "10")
+        self.assertEqual(settings["schema_version"], str(SCHEMA_VERSION))
         self.assertEqual(settings["migration_inputs_excluded"], "1")
 
     def test_encrypted_import_roundtrip_and_tamper_rejected(self):
@@ -162,7 +187,7 @@ class MigrationRoundTripTests(unittest.TestCase):
         result = import_package(job, source, phrase, target, 32 * 1024 * 1024)
         workspace = result["workspace"]
         self.assertEqual(result["integrity"]["integrity"], "ok")
-        self.assertEqual(result["integrity"]["schema_version"], 10)
+        self.assertEqual(result["integrity"]["schema_version"], SCHEMA_VERSION)
         self.assertFalse(any((workspace / "data").rglob("raw.zip")))
         with sqlite3.connect(workspace / "data" / "bbu.db") as conn:
             report = conn.execute("SELECT report_md FROM tasks WHERE id='T1'").fetchone()[0]

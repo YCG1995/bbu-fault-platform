@@ -8,6 +8,10 @@ import hashlib
 import re
 from typing import Any
 
+from .provenance import (attach_provenance, audit_provenance, locked_values,
+                         restore_locked)
+from . import workshop_recipes as recipes_module
+
 
 def _clean(text: Any) -> str:
     return str(text or "").replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
@@ -30,8 +34,8 @@ def _list(value: Any) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # 同一行常见的“1、… 2、…”也拆开。
-        parts = re.split(r"(?=\d+\s*[、.]\s*)", line)
+        # 同一行常见的“1、… 2、…”也拆开；小数点不是列表标记（10.5 不能拆成 10 和 5）。
+        parts = re.split(r"(?=\d+\s*[、.](?!\d)\s*)", line)
         for part in parts:
             part = re.sub(r"^\d+\s*[、.]\s*", "", part).strip(" \t;；")
             if part:
@@ -147,10 +151,12 @@ def _lit(text: str) -> str:
 
 
 def _rule(rid: str, description: str, globs: list[str], any_of: list[str],
-          *, all_of: list[str] | None = None, source: str = "") -> dict[str, Any]:
+          *, all_of: list[str] | None = None, source: str = "",
+          verified: bool = False) -> dict[str, Any]:
     return {"id": rid, "description": description, "globs": globs,
             "all_of": all_of or [], "any_of": any_of, "none_of": [],
-            "min_matches": 1, "verified": True, "source_excerpt": source or any_of[0]}
+            "min_matches": 1, "verified": bool(verified),
+            "source_excerpt": source or (any_of[0] if any_of else "")}
 
 
 def _root(name: str, condition: str, actions: list[str], mechanism: str = "",
@@ -160,118 +166,33 @@ def _root(name: str, condition: str, actions: list[str], mechanism: str = "",
             "rollback": "待补充", "verify": [], "escalation": "待补充"}
 
 
-def _domain_spec(text: str, sources: list[dict[str, Any]], actions: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """对资料中语义明确的常见寄存器/存储字段做确定性编译，避免模型改写阈值。"""
-    low = text.lower()
-    by_name = {s["name"]: s["globs"] for s in sources}
-    kernel = by_name.get("内核日志") or ["**/*kernel*"]
-    board = by_name.get("BoardInit 启动日志") or ["**/*BoardInit.log*"]
-    reset = by_name.get("复位日志") or ["**/*Simplelog*"]
-    rules: list[dict[str, Any]] = []
-    roots: list[dict[str, Any]] = []
-    if "watch dog underflow" in low:
-        rules.append(_rule("E1", "复位日志记录看门狗复位", reset,
-                           [_lit("(07)Watch Dog Underflow")], source="(07)Watch Dog Underflow"))
-        next_id = 2
-        mce_id = ""
-        interrupt_id = ""
-        if "hardware error" in low or "kernel panic" in low:
-            pats = []
-            if "hardware error" in low:
-                pats.append(_lit("mce: [Hardware Error]"))
-            if "kernel panic" in low:
-                pats.append("Kernel panic")
-            mce_id = f"E{next_id}"
-            rules.append(_rule(mce_id, "内核记录 MCE 或 Kernel panic", kernel, pats,
-                               source="mce: [Hardware Error] / Kernel panic"))
-            roots.append(_root("MCE/Kernel panic 导致看门狗复位", f"E1 and {mce_id}", actions,
-                               "CPU 机器检查异常或内核 panic 触发主控板看门狗复位"))
-            next_id += 1
-        if "0x630" in low and "0x634" in low:
-            pattern = r"0x(?:630|634)=0x(?!0+(?:\s|$))[0-9a-fA-F]+"
-            interrupt_id = f"E{next_id}"
-            rules.append(_rule(interrupt_id, "EPLD 中断状态/事件寄存器非零", board, [pattern],
-                               source="0x630/0x634 任意一个非 0"))
-            condition = interrupt_id + (f" and not {mce_id}" if mce_id else "")
-            roots.append(_root("CPU 中断异常导致看门狗复位", condition, actions,
-                               "EPLD 中断状态或事件寄存器非零，说明 CPU 上报过中断；该证据可独立判定，不要求案例必须同时包含 Simplelog"))
-            next_id += 1
-        if "0x664" in low and "0x674" in low:
-            pattern = r"0x(?:664|674)=0x(?!0+(?:\s|$))[0-9a-fA-F]+"
-            power_id = f"E{next_id}"
-            rules.append(_rule(power_id, "EPLD 电源 PG 时间寄存器非零", board, [pattern],
-                               source="0x664/0x674 任意一个非 0"))
-            exclusions = [x for x in (mce_id, interrupt_id) if x]
-            condition = power_id + "".join(f" and not {x}" for x in exclusions)
-            roots.append(_root("板内电源跌落导致看门狗复位", condition, actions,
-                               "电源 PG 时间寄存器非零，说明板内电源出现过跌落；该证据可独立判定，不要求案例必须同时包含 Simplelog"))
-    elif "ssd" in low and ("remain life percentage" in low or "comreset failed" in low):
-        io_patterns = ["blk_update_request: I/O error", "Buffer I/O error on dev sda",
-                       "READ LOG DMA EXT failed", "failed command: READ FPDMA QUEUED",
-                       "failed command: WRITE FPDMA QUEUED"]
-        sata_patterns = ["COMRESET failed", "ATA bus error", "softreset failed", "SError:"]
-        next_id = 1
-        io_id = sata_id = ""
-        if any(x.lower() in low for x in io_patterns):
-            io_id = f"E{next_id}"
-            rules.append(_rule(io_id, "内核记录 SSD 直接 I/O 错误", kernel,
-                               [_lit(x) for x in io_patterns if x.lower() in low], source="SSD I/O error"))
-            roots.append(_root("SSD I/O error", io_id, actions, "SSD 读写或命令执行失败"))
-            next_id += 1
-        if any(x.lower() in low for x in sata_patterns):
-            sata_id = f"E{next_id}"
-            rules.append(_rule(sata_id, "内核记录 SSD SATA 链路异常", kernel,
-                               [_lit(x) for x in sata_patterns if x.lower() in low], source="COMRESET failed"))
-            roots.append(_root("SSD SATA 链路异常", sata_id + (f" and not {io_id}" if io_id else ""),
-                               actions, "SSD SATA 链路协商或复位失败"))
-            next_id += 1
-        if "remain life percentage" in low:
-            rid = f"E{next_id}"
-            pattern = r"169\s+\d+\s+(?:[0-9]|[12][0-9])\s+Remain Life Percentage"
-            rules.append(_rule(rid, "SMART 剩余寿命低于 30%", board, [pattern],
-                               source="Remain Life Percentage 当前值低于 30"))
-            exclusion = "".join(f" and not {x}" for x in (io_id, sata_id) if x)
-            roots.append(_root("SSD 寿命耗尽", rid + exclusion, actions,
-                               "SMART Remain Life Percentage 原始值低于 30，SSD 剩余寿命不足"))
-            next_id += 1
-        smart_rules = []
-        if "uncorrectable sector count" in low:
-            rid = f"E{next_id}"
-            pattern = r"160\s+\d+\s+[1-9]\d*\s+Uncorrectable Sector Count"
-            rules.append(_rule(rid, "SMART 存在不可修复扇区", board, [pattern],
-                               source="Uncorrectable Sector Count 当前值高于 0"))
-            smart_rules.append(rid)
-            next_id += 1
-        if "reallocated sectors count" in low:
-            rid = f"E{next_id}"
-            pattern = r"5\s+\d+\s+[1-9]\d*\s+Reallocated Sectors Count"
-            rules.append(_rule(rid, "SMART 存在重映射扇区", board, [pattern],
-                               source="Reallocated Sectors Count 当前值高于 0"))
-            smart_rules.append(rid)
-        if smart_rules:
-            exclusion = "".join(f" and not {x}" for x in (io_id, sata_id) if x)
-            roots.append(_root("SSD 扇区介质异常", "(" + " or ".join(smart_rules) + ")" + exclusion,
-                               actions, "SMART 报告不可修复或重映射扇区"))
-    elif "usb" in low and "flash" in low and "protect_status" in low:
-        health = by_name.get("BoardHealth/SMART 日志") or board
-        rules.extend([
-            _rule("E1", "USB FLASH 设备断开或块设备 I/O 错误", kernel,
-                  [_lit("usb 1-1: USB disconnect"), _lit("blk_update_request: critical medium error"),
-                   _lit("Buffer I/O error on dev sdb")], source="USB FLASH I/O error"),
-            _rule("E2", "USB FLASH 写保护状态非零", health,
-                  [r"protect_status\s*[:=]\s*(?!0+(?:\s|$))\d+"], source="protect_status 非 0"),
-            _rule("E3", "USB FLASH SMART/识别信息异常", health,
-                  [_lit("this flash not support"), _lit("idVendor = 0"), _lit("Manufacturer:(null)")],
-                  source="this flash not support / idVendor = 0"),
-        ])
-        roots.extend([
-            _root("USB FLASH 写保护", "E2", actions, "protect_status 非零，介质处于写保护状态"),
-            _root("USB FLASH 器件或 I/O 故障", "E1 and not E2", actions,
-                  "USB FLASH 断开或块设备出现介质/I/O 错误"),
-            _root("USB FLASH SMART 信息获取失败", "E3 and not E2 and not E1", actions,
-                  "设备识别或 SMART 信息异常，无法取得有效健康状态"),
-        ])
-    return rules, roots
+def _recipe_spec(text: str, sources: list[dict[str, Any]], actions: list[str],
+                 recipe_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[str]]:
+    """按显式配方或自动候选加载领域规则。
+
+    配方规则一律 verified=False；领域知识不再以 if-else 形式硬编码在编译器里。
+    """
+    recipe_id = _one_line(recipe_id)
+    candidates = recipes_module.detect_recipes(text) if recipe_id in ("", "auto") else []
+    candidates_ids = [str(x.get("id") or "") for x in candidates]
+    if recipe_id in ("", "auto"):
+        recipe = candidates[0] if candidates else None
+        selection = "auto" if recipe else "none"
+    elif recipe_id in ("none", "generic", "off"):
+        recipe = None
+        selection = "none"
+    else:
+        recipe = recipes_module.get_recipe(recipe_id)
+        if not recipe:
+            raise recipes_module.RecipeError(f"未知配方: {recipe_id}")
+        selection = "explicit"
+    if not recipe:
+        return [], [], {}, candidates_ids
+    rules, roots, meta = recipes_module.apply_recipe(recipe, text, sources, actions, selection)
+    meta["auto_selected"] = selection == "auto"
+    meta["trigger_matched"] = recipes_module.recipe_matches(recipe, text)
+    meta["candidates"] = candidates_ids
+    return rules, roots, meta, candidates_ids
 
 
 def _generic_rules(fields: dict[str, str], sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -329,24 +250,17 @@ def _refs(condition: str) -> tuple[list[str], list[str]]:
 
 
 def _reasoning_order(spec: dict[str, Any], logic_lines: list[str]) -> list[dict[str, Any]]:
-    """把资料里的“判断思路”映射到已编译规则；无法映射时按日志源分批。"""
+    """把资料里的“判断思路”映射到已编译规则；配方提供关键词映射，编译器不再按故障名分支。"""
     rules = spec.get("evidence_rules") or []
-    fault = str(spec.get("fault_name") or "")
-    hints: list[tuple[str, list[str]]]
-    if "看门狗" in fault:
-        hints = [("复位日志", ["E1"]), ("simplelog", ["E1"]), ("watch dog", ["E1"]),
-                 ("频率", ["E1"]), ("内核", ["E2"]), ("mce", ["E2"]), ("panic", ["E2"]),
-                 ("boardinit", ["E3", "E4"]), ("0x630", ["E3"]), ("0x634", ["E3"]),
-                 ("caterr", ["E3"]), ("中断", ["E3"]), ("0x664", ["E4"]),
-                 ("0x674", ["E4"]), ("电源", ["E4"]), ("寄存器", ["E3", "E4"])]
-    elif re.search(r"SSD", fault, re.I):
-        hints = [("内核", ["E1", "E2"]), ("i/o", ["E1"]), ("sata", ["E2"]),
-                 ("smart", ["E3", "E4", "E5"]), ("寿命", ["E3"]), ("扇区", ["E4", "E5"])]
-    elif re.search(r"USB\s*FLASH", fault, re.I):
-        hints = [("写保护", ["E2"]), ("protect_status", ["E2"]),
-                 ("i/o", ["E1"]), ("断开", ["E1"]), ("smart", ["E3"])]
-    else:
-        hints = []
+    recipe = spec.get("recipe") or {}
+    hints: list[tuple[str, list[str]]] = []
+    reasoning = recipe.get("reasoning") if isinstance(recipe.get("reasoning"), dict) else {}
+    for item in (reasoning or {}).get("hints") or []:
+        if isinstance(item, dict):
+            keyword = _one_line(item.get("keyword"))
+            ids = _list(item.get("rule_ids"))
+            if keyword and ids:
+                hints.append((keyword, ids))
     valid = {str(r.get("id")) for r in rules}
     steps = []
     used: set[str] = set()
@@ -390,10 +304,46 @@ def _reasoning_order(spec: dict[str, Any], logic_lines: list[str]) -> list[dict[
     return steps
 
 
+_THRESHOLD_RE = re.compile(
+    r"^(?P<metric>.+?)\s*(?:当前值|值|数值)?\s*"
+    r"(?P<op>低于|小于|高于|大于|不超过|至少|>=|<=|>|<)\s*"
+    r"(?P<value>[-+]?\d+(?:\.\d+)?)\s*(?P<unit>%|MB|GB|KB|℃|ms|s|次|分钟|小时)?"
+    r"(?:\s*(?:->|→|：|:)\s*(?P<meaning>.*))?$")
+
+
+def parse_thresholds(text: str) -> list[dict[str, Any]]:
+    """把“指标 当前值低于30%”拆成指标/比较符/数值/单位/时间窗/来源。"""
+    rows: list[dict[str, Any]] = []
+    for raw in _list(text):
+        line = _one_line(raw)
+        match = _THRESHOLD_RE.match(line)
+        if not match:
+            continue
+        metric = _one_line(match.group("metric")).strip(" ：:，,。")
+        if len(metric) < 2:
+            continue
+        op_raw = match.group("op")
+        op = {"低于": "<", "小于": "<", "高于": ">", "大于": ">",
+              "不超过": "<=", "至少": ">="}.get(op_raw, op_raw)
+        rows.append({
+            "metric": metric, "operator": op,
+            "value": float(match.group("value")),
+            "unit": match.group("unit") or "",
+            "window": next((m.group(0) for m in re.finditer(
+                r"\d+\s*(?:分钟|小时|秒|天)", line)), ""),
+            # 版本号必须有 V/v 前缀或“版本”上下文，不能把阈值 10.5 误当成版本。
+            "version_scope": next((m.group(0) for m in re.finditer(
+                r"(?:版本\s*)?(?:V|v)\d+(?:\.\d+){1,3}", line)), ""),
+            "meaning": _one_line(match.group("meaning")),
+            "source_excerpt": line, "status": "parsed",
+            "source_revision": "",
+        })
+    return rows
+
+
 def _build_reasoning(spec: dict[str, Any], logic_text: str, threshold_text: str,
                      field_notes: str) -> dict[str, Any]:
     """生成可执行的诊断推理数据：竞争假设、检查顺序、鉴别点、误判陷阱和停止条件。"""
-    fault = str(spec.get("fault_name") or "")
     rules = {str(r.get("id")): r for r in spec.get("evidence_rules") or []}
     roots = spec.get("root_causes") or []
     logic_lines = _list(logic_text)
@@ -420,47 +370,19 @@ def _build_reasoning(spec: dict[str, Any], logic_text: str, threshold_text: str,
                 "supports": pos_roots, "excludes": neg_roots,
                 "use": f"先看 {rid}；命中时优先验证{'、'.join(pos_roots)}，并排除{'、'.join(neg_roots)}",
             })
-    if re.search(r"看门狗", fault):
-        strategy = "先由 Simplelog 确认确实发生看门狗复位，再用 kernel 判断 MCE/panic，最后用 BoardInit 的 EPLD 寄存器区分 CPU 中断与电源跌落；MCE 优先于寄存器异常，中断优先于电源。"
-        domain_pitfalls = [
-            "只有告警名或单次复位记录，不能直接判定根因；必须先看复位频率和可用日志源。",
-            "0x630/0x634、0x664/0x674 全 0 表示无对应异常，不能把“寄存器存在”当成“寄存器异常”。",
-            "caterr 与电源寄存器同时非 0 时，按证据优先级先判 CPU 中断；只有 BoardInit 时也可独立判定，但仍应在报告中提示缺少 Simplelog。",
-            "MCE/Kernel panic 若与寄存器异常并存，优先由内核直接证据解释复位。",
-        ]
-        stop = ["E1+E2 成立：优先判 MCE/Kernel panic，停止再扩根因。",
-                "E3 成立且 E2 不成立：判 CPU 中断，停止。",
-                "E4 成立且 E2/E3 均不成立：判电源跌落，停止。",
-                "所有根因条件不成立：输出 unmatched，不猜测。"]
-    elif re.search(r"SSD", fault, re.I):
-        strategy = "先找内核里的 I/O 与 SATA 直接错误，再看 BoardInit 的 SMART 退化；直接 I/O/SATA 优先于 SMART，寿命耗尽优先于扇区介质异常。"
-        domain_pitfalls = [
-            "SATA link down 可能是未使用端口，不能单独当 SSD 故障；要看 COMRESET failed、ATA bus error 等直接错误。",
-            "SMART 的 raw_value 是每行第三个数值，不能把 current 值或序号当阈值。",
-            "Remain Life Percentage 等于 30 不算低于 30；只有小于 30 才判寿命耗尽。",
-            "Uncorrectable/Reallocated 必须大于 0；0 是正常。寿命与扇区同时异常时，优先寿命耗尽。",
-        ]
-        stop = ["E1 成立：直接判 SSD I/O error，停止扩根因。",
-                "E2 成立且 E1 不成立：判 SATA 链路异常，停止。",
-                "E3 成立且 E1/E2 不成立：判寿命耗尽，停止。",
-                "E4 或 E5 成立且 E1/E2/E3 不成立：判扇区介质异常，停止。"]
-    elif re.search(r"USB\s*FLASH", fault, re.I):
-        strategy = "先看 protect_status 是否非 0，再看内核是否有该 USB 设备的断开/介质 I/O 错误，最后看 SMART/识别信息是否可取；写保护优先于器件 I/O，器件 I/O 优先于 SMART 获取失败。"
-        domain_pitfalls = [
-            "protect_status=0 是正常，不能因为字段存在就判写保护。",
-            "其他 USB 口（如 usb 1-2）的断开不能直接归因到本 USB FLASH，必须对齐设备实例。",
-            "SMART 不支持不等于器件损坏；需结合是否可读写、是否有 I/O 错误判断。",
-            "写保护与 I/O 错误同时存在时，先处理写保护，因为它会阻止所有写入。",
-        ]
-        stop = ["E2 成立：先判写保护；E1 同时成立时在报告中并列提示。",
-                "E1 成立且 E2 不成立：判器件或 I/O 故障，停止。",
-                "E3 成立且 E1/E2 不成立：判 SMART/识别异常，停止。"]
-    else:
-        strategy = "先确认现象对应的直接证据，再检查支持规则；只有证据能够区分竞争假设时才下结论，否则输出证据不足。"
-        domain_pitfalls = ["告警和文件名只用于路由，不能替代日志证据。",
-                           "缺少某个日志源时，不能把未检查当成阴性证据。"]
-        stop = ["某一根因条件成立且优先级更高者不成立：停止继续扩展。",
-                "所有条件不成立：输出 unmatched，不猜根因。"]
+    recipe_reasoning = (spec.get("recipe") or {}).get("reasoning")
+    if not isinstance(recipe_reasoning, dict):
+        recipe_reasoning = {}
+    strategy = _one_line(recipe_reasoning.get("strategy")) or (
+        "先确认现象对应的直接证据，再检查支持规则；只有证据能够区分竞争假设时才下结论，否则输出证据不足。")
+    domain_pitfalls = _list(recipe_reasoning.get("pitfalls")) or [
+        "告警和文件名只用于路由，不能替代日志证据。",
+        "缺少某个日志源时，不能把未检查当成阴性证据。",
+    ]
+    stop = _list(recipe_reasoning.get("stop_conditions")) or [
+        "某一根因条件成立且优先级更高者不成立：停止继续扩展。",
+        "所有条件不成立：输出 unmatched，不猜根因。",
+    ]
     pitfalls = list(dict.fromkeys(domain_pitfalls))
     data_needed = [str(s.get("name") or "") for s in spec.get("log_sources") or []]
     return {
@@ -469,13 +391,14 @@ def _build_reasoning(spec: dict[str, Any], logic_text: str, threshold_text: str,
         "hypotheses": hypotheses,
         "discriminators": discriminators,
         "checks": thresholds,
+        "thresholds": parse_thresholds(threshold_text),
         "pitfalls": pitfalls,
         "stop_conditions": stop,
         "data_needed": [x for x in data_needed if x],
     }
 
 
-def parse_source(source_text: str) -> dict[str, Any]:
+def parse_source(source_text: str, *, recipe_id: str = "") -> dict[str, Any]:
     text = _clean(source_text)
     fields = _extract_fields(text)
     fault_name = _one_line(fields.get("fault_name")) or "未命名故障"
@@ -484,17 +407,24 @@ def parse_source(source_text: str) -> dict[str, Any]:
     domain_text = _one_line(fields.get("domain"))
     log_types = _one_line(fields.get("log_types"))
     sources = _log_sources(fields.get("paths", ""), text)
-    rules, roots = _domain_spec(text, sources, _list(fields.get("actions")))
-    compiler = "domain" if rules else "generic"
+    actions = _list(fields.get("actions"))
+    rules, roots, recipe, recipe_candidates = _recipe_spec(
+        text, sources, actions, recipe_id)
+    compiler = "recipe" if recipe else "generic"
     if not rules:
         rules = _generic_rules(fields, sources)
     if not roots and rules:
         causes = _list(fields.get("root_text")) or [fault_name]
         condition = " or ".join(rule["id"] for rule in rules)
-        roots = [_root(causes[0], condition, _list(fields.get("actions")), confidence="low")]
+        roots = [_root(causes[0], condition, actions, confidence="low")]
+    if recipe:
+        aliases = list(dict.fromkeys(aliases + list(recipe.get("aliases") or [])))
+        fault_name = fault_name if fault_name != "未命名故障" else str(recipe.get("name") or fault_name)
     symptoms = {
         "observable": _list(fields.get("observable")),
-        "keywords": list(dict.fromkeys(_list(fields.get("keywords")) + [fault_name] + aliases)),
+        "keywords": list(dict.fromkeys(
+            _list(fields.get("keywords")) + [fault_name] + aliases
+            + list((recipe or {}).get("keywords") or []))),
         "lookalikes": [{"fault": _one_line(fields.get("lookalikes")), "differentiator": "待确认"}]
         if _one_line(fields.get("lookalikes")) and _one_line(fields.get("lookalikes")) not in ("无", "无，故障明确") else [],
         "impact": _one_line(fields.get("impact")) or "待补充",
@@ -502,21 +432,6 @@ def parse_source(source_text: str) -> dict[str, Any]:
         "triggers": _list(fields.get("observable")),
         "exclusions": [],
     }
-    # 别名/关键词补全：资料里常写“SSD 故障”，现场却只说 SSD；不补会让目录检索漏掉整个技能。
-    extra_aliases: list[str] = []
-    extra_keywords: list[str] = []
-    joined = fault_name + " " + " ".join(symptoms["keywords"])
-    if re.search(r"SSD|固态硬盘", joined, re.I):
-        extra_aliases += ["SSD 故障", "SSD故障"]
-        extra_keywords += ["SSD", "固态硬盘", "寿命", "SATA"]
-    if re.search(r"USB\s*FLASH|USBFLASH", joined, re.I):
-        extra_aliases += ["USB FLASH 故障", "USBFLASH 故障"]
-        extra_keywords += ["USB FLASH", "USBFLASH", "U盘", "写保护"]
-    if "看门狗" in joined:
-        extra_aliases += ["看门狗", "看门狗复位"]
-        extra_keywords += ["看门狗", "watchdog", "EPLD", "MCE"]
-    aliases = list(dict.fromkeys(aliases + extra_aliases))
-    symptoms["keywords"] = list(dict.fromkeys(symptoms["keywords"] + extra_keywords))
     device_types = ["BBU/OSS"] if re.search(r"VSW|V9200|BBU|ITRAN", domain_text + fault_name, re.I) else []
     if "SDR" in (domain_text + log_types).upper():
         device_types.append("SDR")
@@ -531,13 +446,12 @@ def parse_source(source_text: str) -> dict[str, Any]:
         "fault_name": fault_name,
         "title": f"{fault_name}分析",
         "skill_name": "",
-        "category": "单板存储类" if re.search(r"SSD|USB\s*FLASH", fault_name, re.I)
-        else ("复位类" if re.search(r"复位|看门狗", fault_name) else "硬件故障"),
+        "category": (recipe or {}).get("category") or "硬件故障",
         "aliases": aliases,
         "summary": summary,
         "domain": {"device_types": device_types or ["BBU/OSS"], "modes": "待补充",
                    "boards": domain_text or "待补充",
-                   "version_scope": domain_text or "待补充",
+                   "version_scope": (recipe or {}).get("version_scope") or domain_text or "待补充",
                    "collection_sources": collection or ["device-tar"]},
         "symptoms": symptoms,
         "log_sources": sources,
@@ -546,8 +460,11 @@ def parse_source(source_text: str) -> dict[str, Any]:
         "cases": _parse_cases(text),
         "questions": [],
         "compiler": compiler,
+        "recipe": recipe or {},
+        "recipe_candidates": recipe_candidates,
         "recovery": _one_line(fields.get("recovery")),
         "risks": _one_line(fields.get("risks")),
+        "thresholds": parse_thresholds(fields.get("thresholds", "")),
         "raw_fields": fields,
     }
     spec["diagnostic_reasoning"] = _build_reasoning(
@@ -560,6 +477,9 @@ def parse_source(source_text: str) -> dict[str, Any]:
         if spec["recovery"]:
             root["escalation"] = "恢复确认：" + spec["recovery"]
     _map_cases(spec)
+    spec["_source_text"] = text
+    attach_provenance(spec, text)
+    _mark_recipe_provenance(spec)
     return spec
 
 
@@ -570,25 +490,51 @@ def _map_cases(spec: dict[str, Any]) -> None:
             case["expected_root_cause"] = "NONE"
             continue
         text = (case.get("expected_text", "") + " " + case.get("description", "")).lower()
-        chosen = ""
-        priorities = [
-            (("mce", "machine check", "kernel panic"), ("mce", "kernel")),
-            (("caterr", "cpu报", "中断"), ("cpu", "中断", "caterr")),
-            (("vcc", "电源", "跌落"), ("电源", "vcc")),
-            (("sata", "comreset"), ("sata",)),
-            (("i/o", "io error"), ("i/o",)),
-            (("寿命",), ("寿命",)), (("写保护",), ("写保护",)),
-            (("smart",), ("smart",)), (("扇区",), ("扇区",)),
-        ]
-        for needles, root_needles in priorities:
-            if any(x in text for x in needles):
-                chosen = next((r["id"] for r in roots
-                               if any(x in r.get("name", "").lower() for x in root_needles)), "")
-                if chosen:
-                    break
-        if not chosen:
-            chosen = next((r["id"] for r in roots if r.get("name", "").lower() in text), "")
-        case["expected_root_cause"] = chosen or (roots[0]["id"] if roots else "")
+        scored: list[tuple[int, str]] = []
+        for root in roots:
+            hints = [str(x).lower() for x in (root.get("case_keywords") or []) if str(x).strip()]
+            score = sum(3 for hint in hints if hint in text)
+            if not hints:
+                # 无配方提示时，用根因名与案例文本的字面重叠做保守匹配。
+                name = str(root.get("name") or "").lower().replace("/", "")
+                score = sum(1 for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", name)
+                            if len(token) >= 2 and token in text)
+            scored.append((score, str(root.get("id") or "")))
+        best = max(scored, default=(0, ""))
+        case["expected_root_cause"] = best[1] if best[0] > 0 else (roots[0]["id"] if roots else "")
+
+
+def _mark_recipe_provenance(spec: dict[str, Any]) -> None:
+    """配方规则不是用户原文直引，标注为 recipe 派生来源，避免被当成 missing_source。"""
+    provenance = spec.get("provenance") or {}
+    for i, rule in enumerate(spec.get("evidence_rules") or []):
+        recipe_id = str((rule or {}).get("recipe_id") or "")
+        if not recipe_id:
+            continue
+        prefix = f"/evidence_rules/{i}/"
+        for path, item in provenance.items():
+            if path.startswith(prefix):
+                item["origin"] = "recipe"
+                item["validation_status"] = "derived"
+                item["derivation"] = f"recipe:{recipe_id}"
+    for i, root in enumerate(spec.get("root_causes") or []):
+        recipe_id = str((root or {}).get("recipe_id") or "")
+        if not recipe_id:
+            continue
+        prefix = f"/root_causes/{i}/"
+        for path, item in provenance.items():
+            if path.startswith(prefix):
+                item["origin"] = "recipe"
+                item["validation_status"] = "derived"
+                item["derivation"] = f"recipe:{recipe_id}"
+    if spec.get("recipe"):
+        spec["recipe"]["provenance"] = "derived_from_recipe_file"
+        for path in ("/domain/version_scope", "/category", "/fault/aliases"):
+            item = provenance.get(path)
+            if item:
+                item["origin"] = "recipe"
+                item["validation_status"] = "derived"
+                item["derivation"] = f"recipe:{spec['recipe'].get('id')}"
 
 
 def derive_skill_name(spec: dict[str, Any], explicit: str = "") -> str:
@@ -598,6 +544,10 @@ def derive_skill_name(spec: dict[str, Any], explicit: str = "") -> str:
             and "--" not in candidate
             and re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", candidate[len(prefix):])):
         return candidate
+    recipe_slug = _one_line((spec.get("recipe") or {}).get("skill_slug"))
+    if recipe_slug and re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", recipe_slug) \
+            and len(prefix + recipe_slug) <= 64:
+        return prefix + recipe_slug
     fault = spec.get("fault_name", "")
     low = fault.lower()
     parts = []
@@ -625,7 +575,11 @@ def derive_skill_name(spec: dict[str, Any], explicit: str = "") -> str:
 
 
 def merge_specs(base: dict[str, Any], ai: dict[str, Any]) -> dict[str, Any]:
-    """AI 只补充语义；空值不覆盖确定性解析结果，规则与根因经归一后再编译。"""
+    """AI 只补充语义；空值不覆盖确定性解析结果，规则与根因经归一后再编译。
+
+    人工锁定的字段在合并前后取原值，模型重写只能改未锁字段。
+    """
+    locked = locked_values(base)
     merged = dict(base)
     for key in ("fault_name", "title", "category", "summary", "skill_name", "recovery", "risks"):
         if _one_line(ai.get(key)):
@@ -639,15 +593,34 @@ def merge_specs(base: dict[str, Any], ai: dict[str, Any]) -> dict[str, Any]:
             if item not in (None, "", [], {}):
                 value[key] = item
         merged[section] = value
-    protected = base.get("compiler") == "domain"
+    protected = base.get("compiler") in ("domain", "recipe")
     for key in ("log_sources", "evidence_rules", "root_causes", "cases"):
         if protected and key in ("log_sources", "evidence_rules", "root_causes"):
             continue
         if isinstance(ai.get(key), list) and ai[key]:
             merged[key] = ai[key]
+    if protected:
+        # 配方的类别、版本范围、别名和关键词是配方契约的一部分，不允许 AI 语义改写覆盖。
+        recipe = base.get("recipe") or {}
+        if recipe.get("category"):
+            merged["category"] = recipe["category"]
+        if recipe.get("version_scope"):
+            merged.setdefault("domain", {})["version_scope"] = recipe["version_scope"]
+        if recipe.get("aliases"):
+            merged["aliases"] = list(dict.fromkeys(
+                list(recipe.get("aliases") or []) + list(merged.get("aliases") or [])))
+        if recipe.get("keywords"):
+            symptoms = merged.setdefault("symptoms", {})
+            symptoms["keywords"] = list(dict.fromkeys(
+                list(recipe.get("keywords") or []) + list(symptoms.get("keywords") or [])))
     merged["questions"] = ai.get("questions") if isinstance(ai.get("questions"), list) else []
     _normalize_spec(merged)
     _map_cases(merged)
+    if locked:
+        merged["locked_restored"] = restore_locked(merged, locked)
+    source_text = str(merged.get("_source_text") or base.get("_source_text") or "")
+    attach_provenance(merged, source_text)
+    _mark_recipe_provenance(merged)
     return merged
 
 
@@ -681,28 +654,33 @@ def _normalize_spec(spec: dict[str, Any]) -> None:
     default_globs = [g for s in sources for g in s["globs"]] or ["**/*.log*", "**/*.txt"]
     rules = []
     used = set()
-    for idx, item in enumerate(spec.get("evidence_rules") or [], 1):
+    next_id = 1
+    for item in spec.get("evidence_rules") or []:
         if not isinstance(item, dict):
             continue
-        rid = f"E{idx}"
-        used.add(rid)
         any_of = _list(item.get("any_of"))
         all_of = _list(item.get("all_of"))
         if not any_of and not all_of:
             continue
+        candidate = _one_line(item.get("id"))
+        rid = candidate if re.fullmatch(r"E\d+", candidate) and candidate not in used else ""
+        while not rid or rid in used:
+            rid = f"E{next_id}"
+            next_id += 1
+        used.add(rid)
         rules.append({"id": rid, "description": _one_line(item.get("description")) or "故障证据",
                       "globs": _list(item.get("globs")) or default_globs,
                       "all_of": all_of, "any_of": any_of, "none_of": _list(item.get("none_of")),
                       "min_matches": max(1, int(item.get("min_matches") or 1)),
-                      "verified": bool(item.get("verified", True)),
-                      "source_excerpt": _one_line(item.get("source_excerpt"))})
-    # 保留模型条件中的旧 E 编号；仅在 ID 本来就重复/非法时重排。
-    original = [x for x in (spec.get("evidence_rules") or []) if isinstance(x, dict)]
-    if original and all(re.fullmatch(r"E\d+", str(x.get("id") or "")) for x in original) \
-            and len({str(x.get("id")) for x in original}) == len(original):
-        for rule, item in zip(rules, original):
-            rule["id"] = str(item["id"])
+                      "verified": bool(item.get("verified", False)),
+                      "source_excerpt": _one_line(item.get("source_excerpt")),
+                      "recipe_id": _one_line(item.get("recipe_id")),
+                      "sample_cases": dict(item.get("sample_cases") or {}),
+                      "version_scope": _one_line(item.get("version_scope")),
+                      "provenance": item.get("provenance"),
+                      "locked": bool(item.get("locked") or False)})
     spec["evidence_rules"] = rules
+    spec["thresholds"] = [x for x in (spec.get("thresholds") or []) if isinstance(x, dict)]
     valid_ids = {r["id"] for r in rules}
     roots = []
     for idx, item in enumerate(spec.get("root_causes") or [], 1):
@@ -720,7 +698,13 @@ def _normalize_spec(spec: dict[str, Any]) -> None:
                       "risks": _one_line(item.get("risks")) or "待补充",
                       "rollback": _one_line(item.get("rollback")) or "待补充",
                       "verify": item.get("verify") if isinstance(item.get("verify"), list) else [],
-                      "escalation": _one_line(item.get("escalation")) or "待补充"})
+                      "escalation": _one_line(item.get("escalation")) or "待补充",
+                      "recipe_id": _one_line(item.get("recipe_id")),
+                      "sample_cases": dict(item.get("sample_cases") or {}),
+                      "version_scope": _one_line(item.get("version_scope")),
+                      "case_keywords": _list(item.get("case_keywords")),
+                      "provenance": item.get("provenance"),
+                      "locked": bool(item.get("locked") or False)})
     spec["root_causes"] = roots
     cases = []
     for idx, item in enumerate(spec.get("cases") or [], 1):
@@ -732,12 +716,15 @@ def _normalize_spec(spec: dict[str, Any]) -> None:
                       "expected_root_cause": _one_line(item.get("expected_root_cause")),
                       "expected_text": _one_line(item.get("expected_text")),
                       "evidence": _list(item.get("evidence")),
-                      "packages": _list(item.get("packages"))})
+                      "packages": _list(item.get("packages")),
+                      "locked": bool(item.get("locked") or False)})
     spec["cases"] = cases
 
 
 def compile_profile(spec: dict[str, Any], skill_name: str) -> dict[str, Any]:
     _normalize_spec(spec)
+    if spec.get("_source_text"):
+        attach_provenance(spec, str(spec.get("_source_text") or ""))
     steps = []
     rules = spec["evidence_rules"]
     # 按日志路径分组，避免一个宽泛步骤掩盖各证据源。
@@ -769,6 +756,9 @@ def compile_profile(spec: dict[str, Any], skill_name: str) -> dict[str, Any]:
                      "impact": spec["symptoms"].get("impact") or "待补充",
                      "time_pattern": spec["symptoms"].get("time_pattern") or "待补充"},
         "diagnostic_reasoning": spec.get("diagnostic_reasoning") or {},
+        "provenance": spec.get("provenance") or {},
+        "thresholds": spec.get("thresholds") or [],
+        "recipe": spec.get("recipe") or {},
         "analysis": {"steps": steps},
         "components": {"unpack": True, "search": True, "report": True},
     }
@@ -805,7 +795,7 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             issue(errors, rule["id"], "不能把日志时间戳当成故障规则")
         if any(len(p.strip()) < 3 for p in patterns):
             issue(warnings, rule["id"], "存在过短匹配词，容易误命中")
-        if not rule.get("verified", True):
+        if not rule.get("verified", False):
             issue(warnings, rule["id"], "规则未经确认，不会进入根因条件")
     if not spec["root_causes"]:
         issue(warnings, "root_causes", "尚未形成可判定的根因分支，只能作为分诊草稿")
@@ -830,7 +820,22 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             questions.append({"field": _one_line(item.get("field")) or "general",
                               "question": _one_line(item.get("question")),
                               "blocking": bool(item.get("blocking"))})
+    recipe = spec.get("recipe") or {}
+    if recipe:
+        issue(warnings, "recipe",
+              f"领域配方“{recipe.get('name') or recipe.get('id')}”的规则默认未验证；"
+              "需人工确认或真实正例/反例回归后才能进入根因条件")
+        if recipe.get("auto_selected"):
+            issue(warnings, "recipe",
+                  "配方为自动匹配；请确认设备/单板/版本范围与本案例一致，避免套用错配方")
+        if not (recipe.get("sample_cases") or {}).get("positive"):
+            issue(warnings, "recipe", "配方未登记正例样本，不能据此声称已验证")
+        if recipe.get("trigger_matched") is False:
+            issue(warnings, "recipe", "所选配方的触发词未在资料中出现；请确认设备/单板/版本范围，避免套用不适用规则")
     # 去重，限制一次最多四个问题。
+    prov = audit_provenance(spec)
+    for path in prov.get("missing") or []:
+        issue(warnings, path, "字段来源未在原文中定位，不能视为已验证")
     unique_questions = []
     seen = set()
     for item in questions:
@@ -842,10 +847,41 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
     return {"ok": not errors, "score": score, "errors": errors, "warnings": warnings,
             "questions": unique_questions[:4],
             "counts": {"rules": len(spec["evidence_rules"]), "root_causes": len(spec["root_causes"]),
-                       "cases": len(spec.get("cases") or []), "log_sources": len(spec["log_sources"])}}
+                       "cases": len(spec.get("cases") or []), "log_sources": len(spec["log_sources"]),
+                       "provenance_coverage": prov.get("coverage"),
+                       "provenance_missing": len(prov.get("missing") or [])},
+            "provenance": prov}
 
 
 def public_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """返回给 UI 的规格，避免重复发送大段 raw_fields/source_text。"""
     _normalize_spec(spec)
-    return {key: value for key, value in spec.items() if key not in ("raw_fields", "questions")}
+    return {key: value for key, value in spec.items()
+            if key not in ("raw_fields", "questions", "_source_text")}
+
+
+# 模型只需要业务语义，不需要 UI 溯源、诊断路径和配方候选等内部元数据。
+# public_spec 仍保留这些字段供页面展示；prompt 必须走 model_spec，避免把
+# provenance（单场景可达 1.8 万字符）等大对象反复发给模型。
+MODEL_SPEC_KEYS = (
+    "fault_name", "title", "skill_name", "category", "summary", "aliases",
+    "domain", "symptoms", "log_sources", "evidence_rules", "root_causes",
+    "cases", "recovery", "risks", "thresholds",
+)
+_MODEL_INTERNAL_KEYS = ("provenance", "locked")
+
+
+def _strip_model_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _strip_model_metadata(item)
+                for key, item in value.items() if key not in _MODEL_INTERNAL_KEYS}
+    if isinstance(value, list):
+        return [_strip_model_metadata(item) for item in value]
+    return value
+
+
+def model_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """裁剪为模型提示词专用的 FaultSpec，去掉内部溯源和诊断元数据。"""
+    public = public_spec(spec)
+    compact = {key: public[key] for key in MODEL_SPEC_KEYS if key in public}
+    return _strip_model_metadata(compact)

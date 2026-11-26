@@ -54,6 +54,19 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(BudgetExceeded):
             budget.check()
 
+    def test_atomic_reservation_prevents_parallel_overrun(self):
+        budget = Budget(max_calls=1, max_tokens=100)
+        reservation = budget.reserve(10)
+        with self.assertRaises(BudgetExceeded):
+            budget.reserve(10)
+        budget.release(reservation)
+        reservation = budget.reserve(10)
+        budget.settle(reservation, Usage(total_tokens=10))
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.snapshot()["pending_calls"], 0)
+        with self.assertRaises(BudgetExceeded):
+            budget.reserve(10)
+
 
 class MatcherTests(unittest.TestCase):
     def test_example_clock_skill_scores(self):

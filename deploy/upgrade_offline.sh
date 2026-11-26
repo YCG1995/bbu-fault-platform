@@ -81,6 +81,7 @@ trap on_exit EXIT
 
 if [ -z "$PYTHON_BIN" ]; then
   for candidate in /opt/bbu-python313/bin/python3.13 /opt/bbu-python313/bin/python3 \
+                   /opt/python3.13/bin/python3.13 /opt/python3.13/bin/python3 \
                    "$PREFIX/../bbu-python313/bin/python3.13"; do
     if [ -x "$candidate" ]; then PYTHON_BIN="$candidate"; break; fi
   done
@@ -166,7 +167,7 @@ mkdir -p "$BACKUP_DIR"
 
 if [ "$DO_BACKUP" -eq 1 ]; then
   log "备份数据库、密钥、技能与案例到 $BACKUP_DIR/state.tar.gz"
-  bash "$ROOT_DIR/deploy/backup.sh" --state-dir "$STATE_DIR" --out "$BACKUP_DIR/state.tar.gz"
+  PYTHON_BIN="$PYTHON_BIN" bash "$ROOT_DIR/deploy/backup.sh" --state-dir "$STATE_DIR" --out "$BACKUP_DIR/state.tar.gz"
   log "备份旧代码与 config.json 到 $BACKUP_DIR/code.tar.gz"
   tar -C "$(dirname "$PREFIX")" -czf "$BACKUP_DIR/code.tar.gz" "$(basename "$PREFIX")"
 else
@@ -192,7 +193,8 @@ STAGE_DIR="$(mktemp -d "$(dirname "$PREFIX")/.${APP_NAME}.new.XXXXXX")"
 log "复制新代码到临时目录"
 tar -C "$ROOT_DIR" \
   --exclude='./data' --exclude='./skills' --exclude='./cases' \
-  --exclude='./dist' --exclude='./config.json' --exclude='__pycache__' \
+  --exclude='./evaluations' --exclude='./testlab' \
+  --exclude='./dist' --exclude='./config.json*' --exclude='__pycache__' \
   --exclude='*.pyc' --exclude='./.git' --exclude='./.pytest_cache' \
   -cf - . | tar -C "$STAGE_DIR" -xf -
 cp -p "$PREFIX/config.json" "$STAGE_DIR/config.json"

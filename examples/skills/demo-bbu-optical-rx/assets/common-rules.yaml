@@ -1,0 +1,44 @@
+# 公共规则库 — 所有 BBU 故障子 Skill 复用的前置检查
+rules:
+  - id: C1
+    step: "预检"
+    description: "采集完整性：collectinfo.log 中无采集失败"
+    globs: ["**/collectinfo.log", "**/collect_info*.log"]
+    extract_globs: ["**/collectinfo.log", "**/collect_info*.log"]
+    any_of: ["succ", "success", "完成", "成功"]
+    none_of: ["fail", "失败", "error", "超时"]
+    min_matches: 1
+
+  - id: C2
+    step: "预检"
+    description: "设备在线：心跳正常"
+    globs: ["**/OamLog/*.log"]
+    any_of: ["heartbeat ok", "在线", "online"]
+    none_of: ["offline", "断链", "离线"]
+
+  - id: C3
+    step: "预检"
+    description: "版本信息可识别"
+    globs: ["**/version*.txt", "**/BSP/version*"]
+    extract_globs: ["**/version*.txt", "**/BSP/version*", "**/*running_version*",
+                    "**/*software_package_version*", "**/summary.json"]
+    any_of: ["version", "版本", "V[0-9]"]
+
+  - id: C4
+    step: "预检"
+    description: "存在活动告警文件"
+    globs: ["**/fm-active_*.csv"]
+    min_matches: 1
+
+  - id: C5
+    step: "预检"
+    description: "存在复位历史"
+    globs: ["**/BSP/reboot_history"]
+    min_matches: 1
+
+  - id: C6
+    step: "预检"
+    description: "版本/采集辅助文件可识别（running_version / software_package_version / summary.json）"
+    globs: ["**/*running_version*", "**/*software_package_version*", "**/summary.json"]
+    extract_globs: ["**/*running_version*", "**/*software_package_version*", "**/summary.json"]
+    min_matches: 1

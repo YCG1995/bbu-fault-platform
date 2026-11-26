@@ -72,6 +72,32 @@ class TaskStorageTests(unittest.TestCase):
         self.assertEqual(self.db.one("SELECT inputs_state FROM tasks WHERE id='T2'")["inputs_state"],
                          "released")
 
+    def test_release_extracted_keeps_reports_and_raw_inputs(self):
+        src = self.cfg.data_dir / "uploads" / "T5" / "a.log"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"raw-input")
+        self._task("T5", src)
+        task_dir = self.cfg.data_dir / "tasks" / "T5"
+        unpacked = task_dir / "skills" / "vsw" / "unpacked" / "logs"
+        unpacked.mkdir(parents=True)
+        (unpacked / "huge.log").write_bytes(b"z" * 4096)
+        report = task_dir / "report.md"
+        report.write_text("report", encoding="utf-8")
+        detail = self.service.overview(1, False)["items"][0]
+        self.assertGreaterEqual(detail["extracted_bytes"], 4096)
+        self.assertEqual(detail["extracted_dirs"], 1)
+        self.assertTrue(detail["can_release_extracted"])
+
+        job = self._wait(self.service.create("T5", 1, mode="extracted")["id"])
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["mode"], "extracted")
+        self.assertGreaterEqual(job["summary"]["extracted_freed_bytes"], 4096)
+        self.assertFalse(unpacked.exists())
+        self.assertTrue(report.exists())
+        self.assertTrue(src.exists())
+        self.assertEqual(self.db.one("SELECT inputs_state FROM tasks WHERE id='T5'")["inputs_state"],
+                         "available")
+
     def test_artifacts_are_kept_and_running_task_is_rejected(self):
         src = self.cfg.data_dir / "uploads" / "T3" / "a.log"
         src.parent.mkdir(parents=True)

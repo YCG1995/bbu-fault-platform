@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bbu.db import SCHEMA_VERSION
+
 ROOT = Path(__file__).resolve().parent.parent
 CURRENT_VERSION = re.search(
     r'__version__\s*=\s*"([^"]+)"',
@@ -67,7 +69,7 @@ class OfflineUpgradeTests(unittest.TestCase):
             with sqlite3.connect(state / "data" / "bbu.db") as conn:
                 schema = conn.execute(
                     "SELECT value FROM settings WHERE key='schema_version'").fetchone()[0]
-            self.assertEqual(schema, "10")
+            self.assertEqual(schema, str(SCHEMA_VERSION))
 
             backups = list((state / "backups").iterdir())
             self.assertEqual(len(backups), 1)

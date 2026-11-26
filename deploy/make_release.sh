@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生成可拷贝到内网的离线发布包；不包含 data、skills、cases、config.json。
+# 生成可拷贝到内网的离线发布包；不包含 data、skills、cases、config.json、开发评测与临时测试目录。
 set -euo pipefail
 
 APP_NAME="bbu-fault-platform"
@@ -14,12 +14,15 @@ mkdir -p "$STAGE/${APP_NAME}" "$DIST_DIR"
 
 tar -C "$ROOT_DIR" \
   --exclude='./data' \
+  --exclude='./evaluations' \
+  --exclude='./testlab' \
   --exclude='./skills' \
   --exclude='./cases' \
   --exclude='./updates' \
   --exclude='./backups' \
   --exclude='./dist' \
-  --exclude='./config.json' \
+  --exclude='./build' \
+  --exclude='./config.json*' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   --exclude='./.git' \

@@ -98,10 +98,12 @@ fi
 log "复制程序到 $PREFIX"
 tar -C "$ROOT_DIR" \
   --exclude='./data' \
+  --exclude='./evaluations' \
+  --exclude='./testlab' \
   --exclude='./skills' \
   --exclude='./cases' \
   --exclude='./dist' \
-  --exclude='./config.json' \
+  --exclude='./config.json*' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   --exclude='./.git' \

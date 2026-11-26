@@ -47,8 +47,8 @@ class _Config:
         self.data_dir = root
         self.values = {
             "personal_model_base_url": "https://maas.example.com/v1",
-            "personal_model_default": "deepseek-v4-flash",
-            "personal_model_models": ["deepseek-v4-flash", "enterprise-lite-v7.0"],
+            "personal_model_default": "gpt-4o-mini",
+            "personal_model_models": ["gpt-4o-mini", "enterprise-lite-v7.0"],
             "personal_api_key_url": "https://maas.example.com/personal-api-key",
         }
 
@@ -97,7 +97,7 @@ class PersonalModelTests(unittest.TestCase):
             (name, provider, f"http://127.0.0.1:{self.port}/v1", self.box.encrypt("admin-key"),
              "admin-model", json.dumps(["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
 
-    def _personal_model(self, uid, model="deepseek-v4-flash", key="personal-secret-key"):
+    def _personal_model(self, uid, model="gpt-4o-mini", key="personal-secret-key"):
         now = "2026-11-25T00:00:00Z"
         self.db.execute(
             "INSERT INTO user_model_configs(user_id,name,provider,base_url,api_key,model,"
@@ -113,7 +113,7 @@ class PersonalModelTests(unittest.TestCase):
         self.assertNotIn("personal-secret-key", row["api_key"])
         chosen = self.gateway.choose("default", user_id=self.uid)
         self.assertEqual(chosen[0]["source"], "personal")
-        self.assertEqual(chosen[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(chosen[0]["model"], "gpt-4o-mini")
         self.assertIn("api_key", chosen[0])
         # 其他成员不会串用该 Key
         self.assertEqual(self.gateway.choose("default", user_id=self.other)[0]["source"], "admin")
@@ -185,7 +185,7 @@ class PersonalModelTests(unittest.TestCase):
             "max_tokens,temperature,timeout_sec,enabled,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.uid, "个人 MaaS", "openai", "https://maas.example.com/v1",
-             "enc:v1:broken", "deepseek-v4-flash", 4096, 0.2, 180, 1, "{}", now, now))
+             "enc:v1:broken", "gpt-4o-mini", 4096, 0.2, 180, 1, "{}", now, now))
         status = self.gateway.model_status(self.uid)
         self.assertTrue(status["personal"]["configured"])
         self.assertFalse(status["personal"]["available"])

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .curated import seed_curated_experiences
+from .case_matrix import record_candidate
 from .db import Database
 from .planner import compact_plan
 from .util import iso_now, unique_path
@@ -51,11 +52,51 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
+def _vector(text: str, dim: int = 64) -> dict[int, float]:
+    """本地稀疏向量：词 + 字符三元组哈希，避免引入外部 embedding 依赖。"""
+    values: dict[int, float] = {}
+    tokens = _tokens(text)
+    for token in tokens:
+        bucket = int(hashlib.sha1(token.encode("utf-8")).hexdigest()[:8], 16) % dim
+        values[bucket] = values.get(bucket, 0.0) + 1.0
+    clean = re.sub(r"\s+", "", (text or "").lower())
+    for i in range(max(0, len(clean) - 2)):
+        gram = clean[i:i + 3]
+        bucket = int(hashlib.sha1(gram.encode("utf-8")).hexdigest()[:8], 16) % dim
+        values[bucket] = values.get(bucket, 0.0) + 0.35
+    return values
+
+
+def _cosine(left: dict[int, float], right: dict[int, float]) -> float:
+    if not left or not right:
+        return 0.0
+    dot = sum(v * right.get(k, 0.0) for k, v in left.items())
+    norm = ((sum(v * v for v in left.values()) ** 0.5) *
+            (sum(v * v for v in right.values()) ** 0.5))
+    return dot / norm if norm else 0.0
+
+
 def _loads(value: Any, default: Any) -> Any:
     try:
         return json.loads(value) if isinstance(value, str) else (value if value is not None else default)
     except (TypeError, json.JSONDecodeError):
         return default
+
+
+def _input_digest(task: dict[str, Any]) -> str:
+    try:
+        inputs = json.loads(task.get("input_json") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        inputs = []
+    files = []
+    if isinstance(inputs, list):
+        for item in inputs:
+            if isinstance(item, dict):
+                files.append({k: item.get(k) for k in ("sha256", "name", "size")})
+            else:
+                files.append(str(item))
+    return hashlib.sha256(
+        json.dumps(files, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 class ExperienceStore:
@@ -81,8 +122,17 @@ class ExperienceStore:
                 "evidence": item.get("evidence"),
                 "error": item.get("error"),
             })
+        try:
+            options = json.loads(task.get("options_json") or "{}")
+        except json.JSONDecodeError:
+            options = {}
+        device_type = str(options.get("device_type") or options.get("device") or "")
+        software_version = str(options.get("software_version") or options.get("version") or "")
+        source_revision = str((result.get("trace") or {}).get("session_revision") or "")
         outcome = {
             "status": verdict.get("status") or task.get("status"),
+            "device_type": device_type,
+            "software_version": software_version,
             "confidence": confidence,
             "chosen_skill": skill_name,
             "root_cause": root_name,
@@ -97,8 +147,9 @@ class ExperienceStore:
             plan["replan"] = result["replan"].get("summary")
         self.db.execute(
             "INSERT INTO plan_experiences(task_id,skill_name,root_cause_name,status,confidence,"
-            "description,hints_json,plan_json,outcome_json,created_at,trust_level) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "description,hints_json,plan_json,outcome_json,created_at,trust_level,"
+            "device_type,software_version,source_revision,invalidated) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) "
             "ON CONFLICT(task_id) DO UPDATE SET skill_name=excluded.skill_name,"
             "root_cause_name=excluded.root_cause_name,status=excluded.status,"
             "confidence=excluded.confidence,description=excluded.description,"
@@ -109,35 +160,52 @@ class ExperienceStore:
              json.dumps(hints, ensure_ascii=False),
              json.dumps(plan, ensure_ascii=False, default=str),
              json.dumps(outcome, ensure_ascii=False, default=str), iso_now(),
-             "unreviewed"))
+             "unreviewed", device_type, software_version, source_revision))
 
     def search(self, description: str, hints: list[str] | None = None,
                skill_name: str = "", limit: int = 3,
-               include_unreviewed: bool = False) -> list[dict[str, Any]]:
-        query = _tokens((description or "") + " " + " ".join(hints or []) + " " + (skill_name or ""))
+               include_unreviewed: bool = False, *, device_type: str = "",
+               software_version: str = "", fault_domain: str = "",
+               exclude_task: str = "", with_counterexamples: bool = False) -> list[dict[str, Any]]:
+        query_text = (description or "") + " " + " ".join(hints or []) + " " + (skill_name or "")
+        query_tokens = _tokens(query_text)
+        query_vec = _vector(query_text)
         trust_sql = "" if include_unreviewed else \
             " AND trust_level IN ('verified','golden','curated') "
         rows = self.db.all(
-            "SELECT * FROM plan_experiences WHERE status IN ('done','needs_data','matched','unmatched','temporal_conflict','insufficient') "
-            + trust_sql +
-            "ORDER BY id DESC LIMIT 200")
+            "SELECT * FROM plan_experiences WHERE status IN "
+            "('done','needs_data','matched','unmatched','temporal_conflict','insufficient') "
+            "AND invalidated=0 " + trust_sql +
+            "ORDER BY id DESC LIMIT 300")
         ranked: list[tuple[float, dict[str, Any]]] = []
+        all_docs: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
-            doc = _tokens((row.get("description") or "") + " " +
-                          (row.get("root_cause_name") or "") + " " +
-                          (row.get("skill_name") or "") + " " +
-                          " ".join(_loads(row.get("hints_json"), [])))
-            if not query or not doc:
+            if exclude_task and row.get("task_id") == exclude_task:
                 continue
-            overlap = query & doc
-            score = len(overlap) / max(1, len(query))
+            outcome = _loads(row.get("outcome_json"), {})
+            if device_type and str(outcome.get("device_type") or "") \
+                    and str(outcome.get("device_type")) != device_type:
+                continue
+            if software_version and str(outcome.get("software_version") or "") \
+                    and str(outcome.get("software_version")) != software_version:
+                continue
+            if fault_domain and fault_domain not in str(row.get("root_cause_name") or ""):
+                continue
+            doc_text = " ".join([
+                row.get("description") or "", row.get("root_cause_name") or "",
+                row.get("skill_name") or "", " ".join(_loads(row.get("hints_json"), []))])
+            doc_tokens = _tokens(doc_text)
+            lexical = len(query_tokens & doc_tokens) / max(1, len(query_tokens)) \
+                if query_tokens else 0.0
+            vector = _cosine(query_vec, _vector(doc_text))
+            score = 0.55 * lexical + 0.35 * vector
             if row.get("skill_name") and row["skill_name"] == skill_name:
-                score += 0.12
-            if row.get("root_cause_name") and row["root_cause_name"] in (description or ""):
                 score += 0.08
+            if row.get("root_cause_name") and row["root_cause_name"] in (description or ""):
+                score += 0.04
             if score < 0.06:
                 continue
-            ranked.append((score, {
+            item = {
                 "task_id": row["task_id"],
                 "fault": (row.get("description") or "")[:220],
                 "root_cause": row.get("root_cause_name") or "",
@@ -145,12 +213,41 @@ class ExperienceStore:
                 "status": row.get("status") or "",
                 "confidence": row.get("confidence") or "",
                 "trust_level": row.get("trust_level") or "unreviewed",
+                "device_type": outcome.get("device_type") or "",
+                "software_version": outcome.get("software_version") or "",
                 "plan": _loads(row.get("plan_json"), {}),
-                "outcome": _loads(row.get("outcome_json"), {}),
+                "outcome": outcome,
                 "match_score": round(score, 3),
-            }))
+                "match": {"lexical": round(lexical, 3), "vector": round(vector, 3),
+                          "structured": bool(device_type or software_version)},
+            }
+            ranked.append((score, item))
+            all_docs.append((score, item))
         ranked.sort(key=lambda x: x[0], reverse=True)
-        return [item for _, item in ranked[:max(0, min(limit, 10))]]
+        result = [item for _, item in ranked[:max(0, min(limit, 10))]]
+        if with_counterexamples:
+            for item in result:
+                candidates = [
+                    other for score, other in all_docs
+                    if other.get("skill") == item.get("skill")
+                    and other.get("root_cause") and other.get("root_cause") != item.get("root_cause")
+                    and score >= 0.06
+                ]
+                item["counterexamples"] = [
+                    {"task_id": x["task_id"], "root_cause": x["root_cause"],
+                     "match_score": x["match_score"]} for x in candidates[:3]]
+        return result
+
+    def invalidate(self, task_ids: list[str], reason: str = "") -> int:
+        ids = [str(x) for x in task_ids if x]
+        if not ids:
+            return 0
+        changed = 0
+        for task_id in ids:
+            self.db.execute(
+                "UPDATE plan_experiences SET invalidated=1 WHERE task_id=?", (task_id,))
+            changed += 1
+        return changed
 
     def stats(self) -> dict[str, Any]:
         rows = self.db.all(
@@ -241,13 +338,32 @@ class LearningService:
         if existing:
             return self._mark(task, {"status": "existing", "draft_id": existing["id"],
                                       "reason": "该任务已沉淀过草稿"})
-        # 同一根因只保留一份自学习草稿，避免每个任务都刷一份重复技能
+        # 同一根因不重复建技能；但新日志变体必须进入候选池，供专家补例/合并。
         same_root = self.db.one(
-            "SELECT id, name FROM workshop_drafts WHERE fault_name=? AND category='自学习' "
-            "ORDER BY id DESC LIMIT 1", (str(root_name)[:80],))
+            "SELECT id, name, source_task_id FROM workshop_drafts "
+            "WHERE fault_name=? AND category='自学习' ORDER BY id DESC LIMIT 1",
+            (str(root_name)[:80],))
         if same_root:
-            return self._mark(task, {"status": "duplicate_root", "draft_id": same_root["id"],
-                                      "reason": f"已有同根因自学习草稿 {same_root['name']}，不再重复创建"})
+            source_task = self.db.one(
+                "SELECT * FROM tasks WHERE id=?", (same_root.get("source_task_id"),)) \
+                if same_root.get("source_task_id") else None
+            if source_task and _input_digest(source_task) == _input_digest(task):
+                return self._mark(task, {
+                    "status": "duplicate_root", "draft_id": same_root["id"],
+                    "reason": f"同根因且输入完全相同：已有草稿 {same_root['name']}"})
+            candidate = record_candidate(
+                self.db, task_id=task_id, skill_name=skill_name or same_root["name"],
+                root_cause=str(root_name)[:80], old_root=str(root_name)[:80],
+                decision="variant", kind="same_root_variant",
+                note="同根因新日志变体，等待专家确认是否补例或合并",
+                payload={"draft_id": same_root["id"], "source_task_id": task_id,
+                         "input_digest": _input_digest(task),
+                         "description": (task.get("description") or "")[:1200],
+                         "files": (task.get("input_json") or "")[:1200]})
+            return self._mark(task, {
+                "status": "candidate_recorded", "draft_id": same_root["id"],
+                "candidate_id": candidate["id"],
+                "reason": "同根因新变体已写入经验候选，未丢弃"})
         if not task.get("input_json") or not _loads(task["input_json"], []):
             return self._mark(task, {"status": "skipped", "reason": "任务没有可复用的日志包"})
         digest = hashlib.sha1(f"{task_id}|{root_name}|{skill_name}".encode("utf-8")).hexdigest()[:10]

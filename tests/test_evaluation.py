@@ -49,8 +49,72 @@ class EvaluationInfrastructureTests(unittest.TestCase):
             self.assertEqual(summary["errors"], 0)
             self.assertEqual({c["case"]["name"] for c in result["cases"]},
                              {"selftest-clock", "selftest-normal"})
+            self.assertIsInstance(summary["exact_rate_ci95"], list)
+            self.assertEqual(summary["llm_mode"], "off")
+            self.assertEqual(summary["llm"]["calls"], 0)
+            self.assertTrue(summary["leakage"]["ok"])
+            self.assertFalse(summary["hidden_gate"]["applied"])
             self.assertTrue((tmp / "evaluations" / result["id"] / "summary.json").exists())
             self.assertTrue((tmp / "evaluations" / result["id"] / "report.md").exists())
+
+            with self.assertRaisesRegex(ValueError, "llm_mode"):
+                service.evaluate(split="test", llm_mode="bogus")
+            with self.assertRaisesRegex(ValueError, "真实模型"):
+                service.evaluate(split="test", llm_mode="full")
+
+    def test_llm_usage_counts_narrative_and_model_calls(self):
+        items = [
+            {"result": {"stats": {"llm_calls": 2, "total_tokens": 300,
+                                  "models": ["model-a"]},
+                        "narrative": {"headline": "ok"},
+                        "narrative_check": {"ok": True, "skipped": False, "errors": []}}},
+            {"result": {"stats": {"llm_calls": 1, "total_tokens": 100,
+                                  "models": ["model-a"]},
+                        "narrative": None,
+                        "narrative_check": {"ok": False, "skipped": False, "errors": [{"code": "x"}]}}},
+        ]
+        self.assertEqual(EvaluationService._llm_usage(items), {
+            "calls": 3, "tokens": 400, "models": ["model-a"], "used_cases": 2,
+            "narrative_used": 1, "narrative_fallback": 1})
+
+    def test_cross_split_leakage_is_detected_and_hidden_gate_blocks_sparse_sets(self):
+        with tempfile.TemporaryDirectory(prefix="bbu-eval-leak-") as tmp:
+            tmp = Path(tmp)
+            db = Database(tmp / "bbu.db")
+            config = Config(ROOT)
+            config.values.update({"skills_dir": str(tmp / "skills"), "cases_dir": str(tmp / "cases"),
+                                  "evaluation_hidden_min_cases": 2,
+                                  "evaluation_hidden_min_f1": 0.9})
+            store = RealCaseStore(db, tmp)
+            store.ingest([ROOT / "tests/fixtures/logs/clock-demo.zip"],
+                         name="clock-dev", title="时钟样例 A",
+                         description="NE_A 上报 CLK032 时钟失锁，PLL 无法锁定。",
+                         split="dev", status="golden", expected_roots=["参考时钟源失锁"])
+            store.ingest([ROOT / "tests/fixtures/logs/clock-demo.zip"],
+                         name="clock-hidden", title="时钟样例 A",
+                         description="NE_A 上报 CLK032 时钟失锁，PLL 无法锁定。",
+                         split="hidden", status="golden", expected_roots=["参考时钟源失锁"])
+            store.ingest([ROOT / "tests/fixtures/logs/normal-demo.zip"],
+                         name="normal-test", title="时钟样例 A",
+                         description="NE_A 上报 CLK032 时钟失锁，PLL 无法锁定。",
+                         split="test", status="golden", expected_roots=["__unknown__"])
+            service = EvaluationService(db, config, data_dir=tmp, case_store=store)
+            audit = service.audit_splits()
+            self.assertFalse(audit["ok"])
+            kinds = {item["kind"] for item in audit["leaks"]}
+            self.assertIn("exact_input", kinds)
+            self.assertIn("near_description", kinds)
+            with self.assertRaisesRegex(ValueError, "泄漏"):
+                service.evaluate(split="hidden")
+
+            clean_db = Database(tmp / "clean" / "bbu.db")
+            clean = RealCaseStore(clean_db, tmp / "clean")
+            clean.ingest([ROOT / "tests/fixtures/logs/normal-demo.zip"],
+                         name="only-hidden", title="normal", description="设备运行正常，无告警。",
+                         split="hidden", status="golden", expected_roots=["__unknown__"])
+            sparse = EvaluationService(clean_db, config, data_dir=tmp / "clean", case_store=clean)
+            with self.assertRaisesRegex(ValueError, "至少需要"):
+                sparse.evaluate(split="hidden")
 
     def test_case_review_assignment_label_history_and_queue_filters(self):
         with tempfile.TemporaryDirectory(prefix="bbu-case-review-") as tmp:

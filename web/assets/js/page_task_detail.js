@@ -251,7 +251,7 @@ async function openAssignReviewer(task, onDone) {
     body: `<div class="alert info" style="margin-bottom:12px">${icon('shield')}<div>专家只能查看被分配的任务并提交复核，不能创建任务或管理平台。</div></div>
       <form id="assign-form"><div class="form-row"><label class="label">复核专家</label>
         <select class="select" name="reviewer_id"><option value="">不分配</option>
-          ${users.map((u) => `<option value="${u.id}" ${task.reviewer_id === u.id ? 'selected' : ''}>${esc(u.display_name || u.username)} (${esc(u.username)})${u.team ? ' · ' + esc(u.team) : ''}</option>`).join('')}
+          ${users.map((u) => `<option value="${u.id}" ${task.reviewer_id === u.id ? 'selected' : ''}>${esc(u.display_name || u.username)} (${esc(u.username)})</option>`).join('')}
         </select></div></form>
       ${users.length ? '' : '<div class="alert warn">暂无启用的专家账号，请先在用户管理中邀请或创建 reviewer。</div>'}`,
     footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="save">保存</button>`,
@@ -269,6 +269,34 @@ async function openAssignReviewer(task, onDone) {
       } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
     }
   });
+}
+
+
+function recoveryPanel(task) {
+  if (task.status !== 'done') return '';
+  const runs = task.recovery_runs || [];
+  const canReview = ['admin', 'reviewer'].includes(state.user?.role);
+  const statusLabel = { pending: '待回传', observed: '已回传', reviewed: '已复核', rejected: '已驳回' };
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-head"><h2>恢复验证</h2><span class="sub">只读回传，不在设备上执行命令</span></div>
+    <div class="card-body">
+      ${runs.length ? `<div class="stack">${runs.map((r) => {
+        const c = r.comparison || {};
+        return `<div class="suggestion">
+          <div class="between"><strong>${esc(statusLabel[r.status] || r.status)} · ${esc(r.id)}</strong>
+            <span class="badge ${r.status === 'reviewed' ? 'ok' : r.status === 'rejected' ? 'bad' : 'warn'}">${esc(c.status || '待对照')}</span></div>
+          <div class="tiny muted" style="margin-top:4px">前：${esc(c.before_root || '—')} · 后：${esc(c.after_root || '—')} · 独立文件 ${Number(c.after_independent_evidence || 0)}</div>
+          ${r.learning_eligible ? `<div class="tiny" style="margin-top:4px;color:#166534">已通过学习门禁：恢复状态 + 独立证据 + 专家复核</div>` : ''}
+          <div class="inline" style="margin-top:7px">
+            ${r.status === 'pending' ? `<button class="btn btn-sm" data-act="recovery-observe" data-id="${esc(r.id)}">${icon('upload')}回传恢复后证据</button>` : ''}
+            ${r.status === 'observed' && canReview ? `<button class="btn btn-sm" data-act="recovery-review" data-id="${esc(r.id)}" data-decision="confirmed">${icon('check')}确认恢复</button>
+              <button class="btn btn-sm" data-act="recovery-review" data-id="${esc(r.id)}" data-decision="rejected">${icon('x')}驳回</button>` : ''}
+          </div>
+        </div>`;
+      }).join('')}</div>` : `<div class="muted small">还没有恢复验证记录。处置完成后可回传只读证据，系统只做前后对照，不连接设备。</div>`}
+      <div style="margin-top:12px"><button class="btn btn-sm" data-act="recovery-create" ${runs.some((r) => r.status === 'pending') ? 'disabled' : ''}>${icon('plus')}登记恢复验证</button></div>
+    </div>
+  </div>`;
 }
 
 function reviewPanel(task) {
@@ -470,6 +498,43 @@ const DETAIL_TABS = [
   ['runtime', '运行详情'],
 ];
 
+function supplementPanel(task) {
+  if (!task.supplement_enabled || task.status !== 'needs_data') return '';
+  const session = task.session || {};
+  const pending = task.pending_supplement;
+  const round = (session.supplement_round || 0) + 1;
+  if (pending) {
+    return `<div class="card" style="margin-top:16px">
+      <div class="card-head"><h2>补充数据已保存</h2><span class="sub">第 ${pending.revision} 版会话 · 尚未开始诊断</span></div>
+      <div class="card-body">
+        <div class="alert warn">${icon('alert')}<div>已保存 ${pending.files_count} 个文件、${pending.answers_count} 条回答。点击下方按钮在同一任务 ID 下重新排队，不会创建新任务。</div></div>
+        <div class="inline" style="margin-top:12px">
+          <button class="btn btn-primary" data-act="continue-task">${icon('play')}继续诊断</button>
+          <span class="help">技能会重新执行并复用未失效的历史结果。</span>
+        </div>
+      </div>
+    </div>`;
+  }
+  const questions = (task.questions || []).slice(0, 3);
+  return `<div class="card" style="margin-top:16px" data-supplement-form>
+    <div class="card-head"><h2>补充现场数据</h2><span class="sub">第 ${round} 轮 · 同一任务内续跑</span></div>
+    <div class="card-body">
+      <div class="help" style="margin-bottom:10px">补充独立日志或回答阻塞问题；原始日志与历史结论都会保留，不会新建任务。</div>
+      ${questions.length ? `<div class="stack" style="margin-bottom:12px">${questions.map((q, i) => `
+        <label class="field"><span>${esc(q.question || q)}</span>
+          <textarea class="input" rows="2" data-answer-id="${esc(q.question_id || `Q${i + 1}`)}" placeholder="可选；填写后作为现场回答参与重新诊断"></textarea>
+        </label>`).join('')}</div>` : ''}
+      <label class="field"><span>补充日志文件（最多 10 个）</span>
+        <input class="input" type="file" multiple data-supplement-files>
+      </label>
+      <div class="inline" style="margin-top:12px">
+        <button class="btn btn-primary" data-act="supplement">${icon('upload')}保存补证并继续</button>
+        <span class="help">文件会先独立落盘，再事务写入会话；重复点击由服务端幂等键保护。</span>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderBody(task, activeTab = 'overview') {
   const inventory = task.result?.inventory || {};
   const hints = inventory.detected_hints || [];
@@ -494,7 +559,9 @@ function renderBody(task, activeTab = 'overview') {
       </div>
     </div>
     ${verdictPanel(task)}
+    ${supplementPanel(task)}
     ${planPanel(task)}
+    ${recoveryPanel(task)}
     ${reviewPanel(task)}
   </section>
 
@@ -620,12 +687,127 @@ export async function renderTaskDetail(taskId) {
         try { await api(`/api/tasks/${encodeURIComponent(task.id)}/cancel`, { method: 'POST' }); toast('已提交取消请求', 'warn'); }
         catch (err) { toast(err.message, 'error'); }
       },
+      'recovery-create': async (btn) => {
+        setBusy(btn, true, '登记中…');
+        try {
+          await api(`/api/tasks/${encodeURIComponent(task.id)}/recovery-runs`,
+            { method: 'POST', body: { source: 'readonly_receipt' } });
+          toast('已登记恢复验证，等待现场回传', 'ok');
+          task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(task.id)}/recovery-runs`)).runs;
+          render();
+        } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      },
+      'recovery-observe': async (btn) => {
+        const runId = btn.dataset.id;
+        const form = modal({
+          title: '回传恢复后只读证据',
+          body: `<form id="recovery-form" class="stack" style="gap:12px">
+            <div class="alert info">${icon('info')}<div>只填写现场只读采集结果；根因留空表示本次未再命中该故障。</div></div>
+            <div class="form-row"><label class="label">恢复后根因（留空=已恢复）</label>
+              <input class="input" name="root_cause_name" placeholder="例如：SSD寿命耗尽"></div>
+            <div class="form-row"><label class="label">独立证据文件</label>
+              <input class="input" name="file" placeholder="例如：after-smart.log" required></div>
+            <div class="form-row"><label class="label">证据规则 ID</label>
+              <input class="input" name="rule_id" placeholder="例如：E1"></div>
+            <div class="form-row"><label class="label">证据摘要</label>
+              <textarea class="input" name="text" rows="3" placeholder="恢复后的关键日志行；不要粘贴账号密码。"></textarea></div>
+          </form>`,
+          footer: `<button class="btn" data-act="cancel-modal">取消</button>
+            <button class="btn btn-primary" id="recovery-submit">提交回传</button>`,
+        });
+        form.foot.querySelector('#recovery-submit').addEventListener('click', async () => {
+          const f = new FormData(form.body.querySelector('#recovery-form'));
+          const file = String(f.get('file') || '').trim();
+          if (!file) { toast('请填写独立证据文件', 'warn'); return; }
+          setBusy(btn, true, '回传中…');
+          try {
+            await api(`/api/recovery-runs/${encodeURIComponent(runId)}/observe`, {
+              method: 'POST', body: { after: {
+                verdict: { status: 'matched', root_cause_name: String(f.get('root_cause_name') || '').trim() },
+                evidence: [{ rule_id: String(f.get('rule_id') || '').trim(), file,
+                  text: String(f.get('text') || '').trim(), hit: true }],
+              } },
+            });
+            form.close(); toast('已回传，系统完成前后对照', 'ok');
+            task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(task.id)}/recovery-runs`)).runs;
+            render();
+          } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+        });
+      },
+      'recovery-review': async (btn) => {
+        const runId = btn.dataset.id;
+        const decision = btn.dataset.decision;
+        const ok = await confirmDialog(decision === 'confirmed'
+          ? '确认现场已恢复，且证据独立可信？通过后才允许进入学习。'
+          : '驳回这次恢复结论？驳回后不会进入学习。',
+          { title: '复核恢复验证', danger: decision === 'rejected' });
+        if (!ok) return;
+        setBusy(btn, true, '复核中…');
+        try {
+          const res = await api(`/api/recovery-runs/${encodeURIComponent(runId)}/review`,
+            { method: 'POST', body: { decision, note: '' } });
+          toast(res.run.learning_gate?.eligible ? '已确认恢复，学习门禁通过' : '已记录复核，未通过学习门禁',
+            res.run.learning_gate?.eligible ? 'ok' : 'warn');
+          task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(task.id)}/recovery-runs`)).runs;
+          render();
+        } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      },
       retry: async () => {
         try {
           const data = await api(`/api/tasks/${encodeURIComponent(task.id)}/retry`, { method: 'POST' });
           toast('已创建重跑任务', 'ok');
           location.hash = `#/tasks/${encodeURIComponent(data.id)}`;
         } catch (err) { toast(err.message, 'error'); }
+      },
+      supplement: async (el) => {
+        const form = el.closest('[data-supplement-form]');
+        const answers = {};
+        form.querySelectorAll('[data-answer-id]').forEach((input) => {
+          const value = input.value.trim();
+          if (value) answers[input.dataset.answerId] = value;
+        });
+        const fileInput = form.querySelector('[data-supplement-files]');
+        const chosen = Array.from(fileInput?.files || []);
+        if (!Object.keys(answers).length && !chosen.length) {
+          toast('请补充至少一个日志文件或回答一个问题', 'warn');
+          return;
+        }
+        const idem = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const body = new FormData();
+        body.append('expected_revision', String((task.session || {}).revision || 0));
+        if (Object.keys(answers).length) body.append('answers', JSON.stringify(answers));
+        chosen.forEach((file) => body.append('files', file, file.name));
+        setBusy(el, true, '正在保存补证…');
+        try {
+          const data = await api(`/api/tasks/${encodeURIComponent(task.id)}/inputs`, {
+            method: 'POST', body, headers: { 'Idempotency-Key': idem },
+          });
+          try {
+            await api(`/api/tasks/${encodeURIComponent(task.id)}/continue`, {
+              method: 'POST', body: { expected_revision: data.revision },
+            });
+            toast('补证已保存，诊断已重新排队', 'ok');
+          } catch (continueErr) {
+            toast(`补证已保存，但诊断未排队：${continueErr.message}`, 'warn', 6500);
+          }
+          await renderTaskDetail(task.id);
+        } catch (err) {
+          setBusy(el, false);
+          toast(err.message, 'error', 6000);
+        }
+      },
+      'continue-task': async (el) => {
+        setBusy(el, true, '正在排队…');
+        try {
+          await api(`/api/tasks/${encodeURIComponent(task.id)}/continue`, {
+            method: 'POST', body: { expected_revision: (task.session || {}).revision || 0 },
+          });
+          toast('诊断已重新排队', 'ok');
+          await renderTaskDetail(task.id);
+        } catch (err) {
+          setBusy(el, false);
+          toast(err.message, 'error', 6000);
+        }
       },
       review: (el) => openReviewModal(task, el.dataset.decision || 'confirm'),
       'assign-reviewer': () => openAssignReviewer(task, () => renderTaskDetail(task.id)),
@@ -662,6 +844,10 @@ export async function renderTaskDetail(taskId) {
     try {
       const data = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
       task = data;
+      if (data.status === 'done') {
+        try { task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(taskId)}/recovery-runs`)).runs; }
+        catch { task.recovery_runs = []; }
+      }
       const maxSeq = Math.max(0, ...(data.events || []).map((e) => e.seq));
       lastSeq = Math.max(lastSeq, maxSeq);
       (data.events || []).forEach((e) => seen.add(e.seq));

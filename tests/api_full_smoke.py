@@ -40,6 +40,7 @@ EXPECTED_ROUTES = {
     "GET /api/auth/me",
     "POST /api/auth/password",
     "POST /api/auth/activate",
+    "POST /api/auth/register",
     "POST /api/auth/refresh",
     "GET /api/auth/sessions",
     "POST /api/auth/sessions/revoke-others",
@@ -70,12 +71,25 @@ EXPECTED_ROUTES = {
     "POST /api/tasks",
     "GET /api/tasks/{id}",
     "GET /api/tasks/{id}/events",
+    "GET /api/tasks/{id}/questions",
+    "GET /api/tasks/{id}/session",
+    "GET /api/tasks/{id}/evidence",
+    "GET /api/tasks/{id}/agent-trace",
+    "GET /api/tasks/{id}/recovery-runs",
+    "POST /api/tasks/{id}/recovery-runs",
+    "POST /api/recovery-runs/{id}/observe",
+    "POST /api/recovery-runs/{id}/review",
+    "POST /api/tasks/{id}/tool-approvals",
+    "POST /api/tasks/{id}/inputs",
+    "POST /api/tasks/{id}/continue",
     "GET /api/tasks/{id}/stream",
     "POST /api/tasks/{id}/cancel",
     "POST /api/tasks/{id}/retry",
     "POST /api/tasks/{id}/release",
     "GET /api/tasks/{id}/storage-jobs",
     "GET /api/storage/overview",
+    "GET /api/backups",
+    "DELETE /api/backups/{name}",
     "GET /api/storage/jobs/{id}",
     "POST /api/tasks/{id}/assign-reviewer",
     "GET /api/tasks/{id}/report",
@@ -87,12 +101,18 @@ EXPECTED_ROUTES = {
     "POST /api/skills/{name}/enable",
     "POST /api/skills/import",
     "GET /api/skills/{name}/export",
+    "GET /api/skills/{name}/manifest",
+    "POST /api/skills/{name}/manifest/sign",
     "POST /api/skills/{name}/rollback",
     "POST /api/skills/{name}/channel",
+    "GET /api/workshop/recipes",
     "GET /api/workshop/drafts",
     "POST /api/workshop/drafts",
     "GET /api/workshop/drafts/{id}",
+    "GET /api/workshop/drafts/{id}/provenance",
+    "POST /api/workshop/drafts/{id}/provenance/lock",
     "PUT /api/workshop/drafts/{id}",
+    "DELETE /api/workshop/drafts/{id}",
     "POST /api/workshop/drafts/{id}/logs",
     "POST /api/workshop/drafts/{id}/analyze",
     "POST /api/workshop/drafts/{id}/refine",
@@ -104,12 +124,19 @@ EXPECTED_ROUTES = {
     "GET /api/workshop/drafts/{id}/cases",
     "GET /api/workshop/drafts/{id}/jobs",
     "GET /api/workshop/jobs/{id}",
+    "GET /api/calibration",
+    "POST /api/calibration/fit",
+    "GET /api/case-matrix",
+    "POST /api/case-matrix/rebuild",
+    "GET /api/experience-candidates",
+    "POST /api/experience-candidates/{id}/decide",
     "GET /api/skill-versions",
     "GET /api/models",
     "POST /api/models",
     "PUT /api/models/{id}",
     "DELETE /api/models/{id}",
     "POST /api/models/{id}/test",
+    "POST /api/models/{id}/capabilities",
     "POST /api/models/test",
     "GET /api/users",
     "POST /api/users",
@@ -128,6 +155,10 @@ EXPECTED_ROUTES = {
     "POST /api/profile/model-key/test",
     "GET /api/audit",
     "GET /api/audit/export",
+    "GET /api/tool-calls",
+    "GET /api/tool-approvals",
+    "POST /api/tool-approvals/{id}/decide",
+    "GET /api/skills/{name}/tool",
     "GET /api/system/info",
     "GET /api/system/runtime-config",
     "PUT /api/system/runtime-config",
@@ -138,6 +169,16 @@ EXPECTED_ROUTES = {
     "POST /api/system/updates/{id}/verify",
     "POST /api/system/updates/{id}/apply",
     "POST /api/system/updates/rollback",
+    "GET /mcp",
+    "POST /mcp",
+    "GET /api/assistant/status",
+    "GET /api/assistant/suggestions",
+    "POST /api/assistant/chat",
+    "POST /api/assistant/actions/{id}/confirm",
+    "POST /api/assistant/actions/{id}/cancel",
+    "GET /api/mcp/info",
+    "POST /api/mcp/token",
+    "DELETE /api/mcp/token",
 }
 
 
@@ -465,6 +506,9 @@ def main() -> int:
         _, tested = admin_client.json("POST", f"/api/models/{model_id}/test")
         assert tested["ok"], tested
         hit("POST /api/models/{id}/test")
+        _, caps = admin_client.json("POST", f"/api/models/{model_id}/capabilities")
+        assert caps["capabilities"]["json_mode"] is True, caps
+        hit("POST /api/models/{id}/capabilities")
         _, draft_tested = admin_client.json("POST", "/api/models/test", {
             "name": "draft-test", "provider": "openai",
             "base_url": f"http://127.0.0.1:{openai_port}/v1",
@@ -499,8 +543,98 @@ def main() -> int:
         hit("GET /api/tasks")
         clock_task = wait_task(admin_client, clock)
         assert clock_task["status"] == "done" and clock_task["verdict"]["status"] == "matched"
+        _, calls = admin_client.json("GET", f"/api/tool-calls?task_id={clock}")
+        assert any(x["tool_name"] == "demo-bbu-clock-loss" for x in calls["items"]), calls
+        hit("GET /api/tool-calls")
+        _, approvals = admin_client.json("GET", "/api/tool-approvals")
+        assert isinstance(approvals["items"], list)
+        hit("GET /api/tool-approvals")
+        _, approval = admin_client.json("POST", f"/api/tasks/{clock}/tool-approvals", {
+            "skill": "demo-bbu-clock-loss", "reason": "API 冒烟审批"})
+        approval_id = approval["approval"]["id"]
+        assert approval["approval"]["status"] == "pending"
+        hit("POST /api/tasks/{id}/tool-approvals")
+        _, decided = admin_client.json("POST", f"/api/tool-approvals/{approval_id}/decide",
+                                       {"approved": True, "reason": "API 冒烟通过"})
+        assert decided["approval"]["status"] == "approved"
+        hit("POST /api/tool-approvals/{id}/decide")
+        _, trace = admin_client.json("GET", f"/api/tasks/{clock}/agent-trace")
+        assert trace["trace"]["task_id"] == clock
+        hit("GET /api/tasks/{id}/agent-trace")
+        _, cal = admin_client.json("GET", "/api/calibration")
+        assert "calibration" in cal
+        hit("GET /api/calibration")
+        _, cal_fit = admin_client.json("POST", "/api/calibration/fit", {"split": "dev"})
+        assert cal_fit["calibration"]["status"] in ("uncalibrated", "calibrated")
+        hit("POST /api/calibration/fit")
+        _, matrix = admin_client.json("POST", "/api/case-matrix/rebuild",
+                                      {"skill": "demo-bbu-clock-loss", "build_sha": "smoke"})
+        assert matrix["matrix"]["summary"]["cells"] >= 1, matrix
+        hit("POST /api/case-matrix/rebuild")
+        _, matrix_get = admin_client.json("GET", "/api/case-matrix?skill=demo-bbu-clock-loss")
+        assert matrix_get["verify"]["ok"], matrix_get
+        hit("GET /api/case-matrix")
+        admin_client.json("POST", f"/api/tasks/{clock}/review", {
+            "decision": "correct", "corrected_root": "参考时钟源抖动",
+            "action_result": "unknown", "comment": "冒烟：验证增量候选"})
+        _, candidates = admin_client.json("GET", "/api/experience-candidates?status=pending")
+        assert candidates["candidates"], candidates
+        candidate_id = candidates["candidates"][0]["id"]
+        hit("GET /api/experience-candidates")
+        _, decided_candidate = admin_client.json(
+            "POST", f"/api/experience-candidates/{candidate_id}/decide",
+            {"status": "approved", "note": "冒烟通过"})
+        assert decided_candidate["candidate"]["status"] == "approved"
+        hit("POST /api/experience-candidates/{id}/decide")
+        _, recovery = admin_client.json("POST", f"/api/tasks/{clock}/recovery-runs",
+                                        {"source": "readonly_receipt"}, expected=201)
+        run_id = recovery["run"]["id"]
+        assert recovery["run"]["before"], recovery
+        hit("POST /api/tasks/{id}/recovery-runs")
+        _, observed = admin_client.json("POST", f"/api/recovery-runs/{run_id}/observe", {
+            "after": {"verdict": {"status": "matched", "root_cause_name": ""},
+                      "evidence": [{"rule_id": "E1", "file": "after-clock.log",
+                                    "line_no": 3, "text": "clock stable"}]}})
+        assert observed["run"]["comparison"]["status"] == "recovered", observed
+        hit("POST /api/recovery-runs/{id}/observe")
+        _, recovery_review = admin_client.json("POST", f"/api/recovery-runs/{run_id}/review",
+                                               {"decision": "confirmed", "note": "现场已恢复"})
+        assert recovery_review["run"]["learning_gate"]["eligible"] is True, recovery_review
+        hit("POST /api/recovery-runs/{id}/review")
+        _, runs = admin_client.json("GET", f"/api/tasks/{clock}/recovery-runs")
+        assert runs["runs"], runs
+        hit("GET /api/tasks/{id}/recovery-runs")
         assert clock_task["result"]["plan"]["source"] == "ai"
         hit("GET /api/tasks/{id}")
+        _, questions = admin_client.json("GET", f"/api/tasks/{clock}/questions")
+        assert questions["task_id"] == clock
+        hit("GET /api/tasks/{id}/questions")
+        _, session = admin_client.json("GET", f"/api/tasks/{clock}/session")
+        assert session["task_id"] == clock
+        hit("GET /api/tasks/{id}/session")
+        _, evidence = admin_client.json("GET", f"/api/tasks/{clock}/evidence")
+        assert evidence["total"] >= 1
+        hit("GET /api/tasks/{id}/evidence")
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("INSERT INTO tasks(id,user_id,title,description,status,stage,progress,mode,"
+                     "input_json,options_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     ("TAPI-SUPP-1", admin_id, "补证测试", "帮助需要补证的任务",
+                      "needs_data", "done", 100, "fast", "[]", "{}", utc_now()))
+        conn.commit()
+        conn.close()
+        _, supp_session = admin_client.json("GET", "/api/tasks/TAPI-SUPP-1/session")
+        _, saved = admin_client.json("POST", "/api/tasks/TAPI-SUPP-1/inputs", {
+            "expected_revision": supp_session["revision"],
+            "answers": {"Q1": "补充 CLK032 现场信息"},
+            "idempotency_key": "api-smoke-supp-1",
+        }, expected=201)
+        assert saved["revision"] == supp_session["revision"] + 1
+        hit("POST /api/tasks/{id}/inputs")
+        _, continued = admin_client.json("POST", "/api/tasks/TAPI-SUPP-1/continue", {
+            "expected_revision": saved["revision"],
+        }, expected=202)
+        assert continued["task"]["id"] == "TAPI-SUPP-1"
+        hit("POST /api/tasks/{id}/continue")
         # 复核、案例回流、质量门禁、指标与新技能治理接口
         clock_root = clock_task["verdict"].get("root_cause_name") or ""
         _, reviewed = admin_client.json("POST", f"/api/tasks/{clock}/review", {
@@ -539,6 +673,9 @@ def main() -> int:
         })
         assert run["summary"]["cases"] == 1 and run["report"]
         hit("POST /api/evaluations/run")
+        admin_client.json("POST", "/api/evaluations/run", {
+            "split": "test", "limit": 1, "llm_mode": "bogus",
+        }, expected=400)
         _, evals = admin_client.json("GET", "/api/evaluations")
         assert isinstance(evals["items"], list)
         hit("GET /api/evaluations")
@@ -604,6 +741,15 @@ def main() -> int:
         _, detail = admin_client.json("GET", "/api/skills/demo-bbu-clock-loss")
         assert detail["name"] == "demo-bbu-clock-loss"
         hit("GET /api/skills/{name}")
+        _, manifest = admin_client.json("GET", "/api/skills/demo-bbu-clock-loss/manifest")
+        assert manifest["status"] in ("missing", "verified", "unsigned"), manifest
+        hit("GET /api/skills/{name}/manifest")
+        _, signed = admin_client.json("POST", "/api/skills/demo-bbu-clock-loss/manifest/sign")
+        assert signed["manifest"]["content_sha256"]
+        hit("POST /api/skills/{name}/manifest/sign")
+        _, tool = admin_client.json("GET", "/api/skills/demo-bbu-clock-loss/tool")
+        assert tool["tool_name"] == "demo-bbu-clock-loss"
+        hit("GET /api/skills/{name}/tool")
         _, scan = admin_client.json("POST", "/api/skills/scan")
         assert scan["ok"]
         hit("POST /api/skills/scan")
@@ -685,18 +831,38 @@ def main() -> int:
         }, expected=201)
         valid_id = new_draft["draft"]["id"]
         hit("POST /api/workshop/drafts")
+        _, trash_draft = admin_client.json("POST", "/api/workshop/drafts", {
+            "name": "bbu-fault-api-trash", "title": "API 删除演示",
+            "fault_name": "API 删除演示", "category": "测试",
+        }, expected=201)
+        admin_client.json("DELETE", f"/api/workshop/drafts/{trash_draft['draft']['id']}")
+        hit("DELETE /api/workshop/drafts/{id}")
         # 整段文本建草稿 + 自由文本补充确认
+        _, recipes = admin_client.json("GET", "/api/workshop/recipes")
+        assert any(r["id"] == "vsw-ssd" and r["verified"] is False for r in recipes["items"])
+        hit("GET /api/workshop/recipes")
         intake_text = (ROOT / "tests/fixtures/intake/vsw-ssd.txt").read_text(encoding="utf-8")
         _, intake_draft = admin_client.json("POST", "/api/workshop/drafts", {
-            "source_text": intake_text, "name": "bbu-fault-api-intake",
+            "source_text": intake_text, "name": "bbu-fault-api-intake", "recipe_id": "vsw-ssd",
         }, expected=201)
         intake_id = intake_draft["draft"]["id"]
+        assert intake_draft["draft"]["recipe_id"] == "vsw-ssd"
+        assert intake_draft["draft"]["analysis"]["intake"]["recipe"]["id"] == "vsw-ssd"
+        assert intake_draft["draft"]["analysis"]["intake"]["recipe"]["verified"] is False
         assert intake_draft["draft"]["analysis"]["quality"]["counts"]["rules"] == 5
         _, refined = admin_client.json("POST", f"/api/workshop/drafts/{intake_id}/refine", {
             "text": "补充确认：C1 为正常反例，SSD 寿命阈值 30 保持不变。",
         })
         assert refined["draft"]["analysis"]["quality"]["counts"]["root_causes"] == 4
         hit("POST /api/workshop/drafts/{id}/refine")
+        _, prov = admin_client.json("GET", f"/api/workshop/drafts/{intake_id}/provenance")
+        assert prov["provenance"], prov
+        hit("GET /api/workshop/drafts/{id}/provenance")
+        _, locked = admin_client.json(
+            "POST", f"/api/workshop/drafts/{intake_id}/provenance/lock",
+            {"paths": ["/fault_name"], "source_revision": prov["source_revision"]})
+        assert locked["audit"]["locked"], locked
+        hit("POST /api/workshop/drafts/{id}/provenance/lock")
         profile = (ROOT / "examples/profiles/demo-optical-rx.yaml").read_text(encoding="utf-8")
         profile = profile.replace("name: demo-bbu-optical-rx", "name: bbu-fault-api-demo", 1)
         profile = profile.replace("title: \"[示例] 光模块接收光功率异常诊断\"", "title: \"API 演示技能\"", 1)
@@ -792,7 +958,7 @@ def main() -> int:
         assert "personal-api-key" in key0["maas_url"]
         hit("GET /api/profile/model-key")
         _, key1 = admin_client.json("PUT", "/api/profile/model-key", {
-            "api_key": "maas-test-secret-key", "model": "deepseek-v4-flash",
+            "api_key": "maas-test-secret-key", "model": "gpt-4o-mini",
         })
         assert key1["configured"] is True
         assert "maas-test-secret-key" not in json.dumps(key1, ensure_ascii=False)
@@ -802,7 +968,7 @@ def main() -> int:
         assert key_test["ok"] is False and key_test["error"]
         hit("POST /api/profile/model-key/test")
         _, key2 = admin_client.json("GET", "/api/profile/model-key")
-        assert key2["configured"] is True and key2["model"] == "deepseek-v4-flash"
+        assert key2["configured"] is True and key2["model"] == "gpt-4o-mini"
         _, deleted_key = admin_client.json("DELETE", "/api/profile/model-key")
         assert deleted_key["ok"] is True
         hit("DELETE /api/profile/model-key")
@@ -812,7 +978,7 @@ def main() -> int:
         hit("GET /api/users/invites")
         _, invite = admin_client.json("POST", "/api/users/invites", {
             "username": "api_reviewer", "display_name": "API 复核专家",
-            "role": "reviewer", "team": "无线", "hours": 24,
+            "role": "reviewer", "hours": 24,
         }, expected=201)
         reviewer_code = invite["code"]
         hit("POST /api/users/invites")
@@ -1000,6 +1166,17 @@ def main() -> int:
         assert rolled["update"]["phase"] == "rolled_back", rolled
         hit("POST /api/system/updates/rollback")
 
+        # 历史备份：扫描升级快照并安全删除
+        _, backups = admin_client.json("GET", "/api/backups")
+        assert backups["items"], "升级助手未生成备份快照"
+        hit("GET /api/backups")
+        target_backup = next((x for x in backups["items"] if not x["in_use"]), None)
+        assert target_backup, backups
+        _, deleted_backup = admin_client.json(
+            "DELETE", f"/api/backups/{target_backup['name']}")
+        assert deleted_backup["ok"] and deleted_backup["size_bytes"] >= 0
+        hit("DELETE /api/backups/{name}")
+
         # 任务空间：统计、共享引用释放、报告保留
         _, storage_before = admin_client.json("GET", "/api/storage/overview")
         assert storage_before["summary"]["task_count"] >= 2
@@ -1091,7 +1268,7 @@ def main() -> int:
         admin_client.multipart("/api/skills/import",
                                {"overwrite": "1"},
                                [("files", "bad.zip", bad_zip.getvalue(), "application/zip")],
-                               expected=400)
+                               expected=422)
         admin_client.multipart("/api/skills/import", {},
                                [("files", "demo-bbu-clock-loss.zip", exported, "application/zip")],
                                expected=409)
@@ -1114,6 +1291,25 @@ def main() -> int:
         engineer.json("GET", "/api/stats", expected=200)
         engineer.json("GET", "/api/system/info", expected=200)
         engineer.json("GET", "/api/models", expected=200)
+
+        # 自助注册：默认关闭，开启后固定创建工程师账号
+        _, closed = Client(host, port).json("POST", "/api/auth/register", {
+            "username": "selfreg_off", "password": "SelfReg!2026x",
+        }, expected=403)
+        assert closed["error"]
+        _, saved_register = admin_client.json("PUT", "/api/system/runtime-config", {
+            "values": {"allow_self_register": True},
+        })
+        assert saved_register["restart_required"] is False
+        _, public_cfg = Client(host, port).json("GET", "/api/public/config")
+        assert public_cfg["allow_self_register"] is True
+        _, registered = Client(host, port).json("POST", "/api/auth/register", {
+            "username": "selfreg_api", "display_name": "自助注册",
+            "domain": "时钟同步", "password": "SelfReg!2026x",
+        }, expected=201)
+        assert registered["user"]["role"] == "engineer"
+        assert registered["user"]["domain"] == "时钟同步"
+        hit("POST /api/auth/register")
 
         # 运行参数保存、环境变量提示和网页重启后生效
         _, runtime = admin_client.json("GET", "/api/system/runtime-config")
@@ -1142,6 +1338,56 @@ def main() -> int:
                 effective = True
                 break
         assert effective, "网页重启后新配置未生效"
+
+        # 悬浮助手与 MCP：状态、降级问答、待确认动作、Token 与本机 HTTP
+        _, assistant = admin_client.json("GET", "/api/assistant/status")
+        assert assistant["status"]["enabled"] is True
+        assert assistant["status"]["tools"] >= 10
+        hit("GET /api/assistant/status")
+        _, suggestions = admin_client.json("GET", "/api/assistant/suggestions")
+        assert suggestions["items"]
+        hit("GET /api/assistant/suggestions")
+        _, chat = admin_client.json("POST", "/api/assistant/chat", {
+            "messages": [{"role": "user", "content": "平台怎么新建诊断任务？"}],
+        })
+        assert chat["message"]
+        hit("POST /api/assistant/chat")
+        admin_client.json("POST", "/api/assistant/actions/not-a-real-action/confirm",
+                          {}, expected=404)
+        hit("POST /api/assistant/actions/{id}/confirm")
+        _, cancelled = admin_client.json("POST", "/api/assistant/actions/not-a-real-action/cancel",
+                                         {})
+        assert cancelled["cancelled"]
+        hit("POST /api/assistant/actions/{id}/cancel")
+        _, mcp_info = admin_client.json("GET", "/api/mcp/info")
+        assert mcp_info["mcp"]["configured"] is False
+        hit("GET /api/mcp/info")
+        _, created_token = admin_client.json("POST", "/api/mcp/token", {"mode": "read"},
+                                             expected=201)
+        token = created_token["mcp"]["token"]
+        assert token.startswith("bbu_mcp_")
+        hit("POST /api/mcp/token")
+        status, raw, _ = admin_client.request("GET", "/mcp")
+        assert status == 405, raw[:200]
+        hit("GET /mcp")
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                           "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                      "clientInfo": {"name": "api-smoke", "version": "1"}}})
+        status, raw, _ = admin_client.request("POST", "/mcp", body.encode(),
+            {"Content-Type": "application/json",
+             "Authorization": f"Bearer {token}"})
+        assert status == 200, raw[:300]
+        payload = json.loads(raw)
+        assert payload["result"]["serverInfo"]["name"] == "bbu-faultscope"
+        hit("POST /mcp")
+        body = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        status, raw, _ = admin_client.request("POST", "/mcp", body.encode(),
+            {"Content-Type": "application/json",
+             "Authorization": f"Bearer {token}"})
+        assert status == 200 and len(json.loads(raw)["result"]["tools"]) >= 10
+        _, revoked = admin_client.json("DELETE", "/api/mcp/token")
+        assert revoked["mcp"]["configured"] is False
+        hit("DELETE /api/mcp/token")
 
         missing = EXPECTED_ROUTES - hits
         assert not missing, f"未覆盖路由: {sorted(missing)}"

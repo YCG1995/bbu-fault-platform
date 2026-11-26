@@ -145,7 +145,8 @@ def build(args: argparse.Namespace) -> Path:
         config.values["data_dir"] = str(Path(args.data_dir).resolve())
         config.ensure_dirs()
     db = Database(config.db_path)
-    registry = SkillRegistry(db, config.skills_dir)
+    registry = SkillRegistry(db, config.skills_dir, data_dir=config.data_dir,
+                             manifest_mode=str(config.get("skill_manifest_mode", "shadow")))
     registry.scan()
     gateway = AIGateway(db, config)
     experiences = ExperienceStore(db)
