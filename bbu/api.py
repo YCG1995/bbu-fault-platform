@@ -45,7 +45,7 @@ from .migration import (
 from .mcp_server import MCPService
 from .metrics import collect as collect_metrics, prometheus as prometheus_metrics
 from .model_roles import MODEL_ROLES
-from .netguard import OutboundPolicyError
+from .netguard import OutboundPolicyError, endpoint_target
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
@@ -3226,7 +3226,7 @@ def h_model_delete(app: App, req, model_id: str):
 
 
 def h_model_test(app: App, req, model_id: str):
-    _admin(app, req)
+    user = _admin(app, req)
     row = _model_row(app, int(model_id))
     model = dict(row)
     try:
@@ -3236,7 +3236,12 @@ def h_model_test(app: App, req, model_id: str):
     model["roles"] = _loads(row["roles"], [])
     model["extra"] = _loads(row["extra"], {})
     model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     result = app.gateway.test_model(model)
+    host, path = endpoint_target(str(model.get("base_url") or ""))
+    app.db.audit(user["id"], user["username"], "model.test", str(row["id"]),
+                 {"provider": model.get("provider"), "endpoint_host": host,
+                  "endpoint_path": path[:300], "ok": bool(result.get("ok"))}, req.ip)
     return response_json(result)
 
 
@@ -3246,6 +3251,7 @@ def h_model_capabilities(app: App, req, model_id: str):
     model = dict(row)
     model["extra"] = _loads(row.get("extra"), {})
     model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"]) if row.get("api_key") else ""
     except ValueError as exc:
@@ -3305,6 +3311,7 @@ def h_model_discover(app: App, req):
         "provider": provider, "base_url": base_url, "api_key": api_key,
         "extra": extra, "timeout_sec": timeout_sec,
         "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+        "private_allowlist": app.config.get("model_private_allowlist", ""),
     }
     try:
         names = list_models(model, timeout=timeout_sec)
@@ -3330,12 +3337,16 @@ def h_model_discover(app: App, req):
     parsed = urlparse(base_url)
     app.db.audit(user["id"], user["username"], "model.discover", "",
                  {"provider": provider, "base_url_host": parsed.hostname or "",
-                  "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
+                  "base_url_path": parsed.path[:300], "count": len(names),
+                  "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+                  "private_allowlist_count": len([
+                      x for x in str(app.config.get("model_private_allowlist", "")).split(",")
+                      if x.strip()])}, req.ip)
     return response_json({"models": names, "count": len(names)})
 
 def h_model_test_draft(app: App, req):
     """Test the current form values without creating or updating a model row."""
-    _admin(app, req)
+    user = _admin(app, req)
     data = req.json()
     existing = None
     if data.get("model_id"):
@@ -3360,6 +3371,7 @@ def h_model_test_draft(app: App, req):
         "priority": payload["priority"],
         "extra": _loads(payload["extra"], {}),
         "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+        "private_allowlist": app.config.get("model_private_allowlist", ""),
     }
     try:
         if payload["provider"] == "mock":
@@ -3368,7 +3380,13 @@ def h_model_test_draft(app: App, req):
             model["api_key"] = app.secret_box.decrypt(payload["api_key"])
     except ValueError as exc:
         raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
-    return response_json(app.gateway.test_model(model))
+    result = app.gateway.test_model(model)
+    host, path = endpoint_target(str(model.get("base_url") or ""))
+    app.db.audit(user["id"], user["username"], "model.test_draft",
+                 str(existing["id"] if existing else ""),
+                 {"provider": model.get("provider"), "endpoint_host": host,
+                  "endpoint_path": path[:300], "ok": bool(result.get("ok"))}, req.ip)
+    return response_json(result)
 
 
 # ---------------------------- 用户与审计 ----------------------------
@@ -3751,6 +3769,7 @@ def h_profile_model_key_test(app: App, req):
     model["roles"] = ["default"]
     model["extra"] = _loads(row.get("extra"), {}) or {}
     model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"])
     except ValueError as exc:

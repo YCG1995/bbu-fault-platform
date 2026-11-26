@@ -1338,6 +1338,13 @@ function runtimeFieldHtml(item) {
         data-runtime-type="enum" ${disabled}>${options}</select>
       <div class="help">默认 ${esc((item.choice_labels || {})[item.default] || item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
   }
+  if (item.type === 'str') {
+    return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
+        ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
+      <input class="input mono" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
+        data-runtime-type="str" type="text" value="${esc(item.value ?? '')}" ${disabled}>
+      <div class="help">默认 ${esc(item.default || '（空）')} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+  }
   const step = item.type === 'float' ? '0.1' : '1';
   return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
       ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>

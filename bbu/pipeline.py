@@ -441,15 +441,23 @@ class TaskPipeline:
             if replan:
                 # 任务结果只保留可展示的计划摘要，避免把完整 results 重复写进 plan
                 plan["replan"] = {k: v for k, v in replan.items()
-                                  if k not in ("results", "executed", "plan")}
+                                  if k not in ("results", "executed", "plan",
+                                               "agent_trace")}
                 results = replan.get("results", results)
                 executed = replan.get("executed", executed)
                 routing["replan"] = {k: replan.get(k) for k in (
                     "status", "reason", "summary", "steps", "candidates")}
+                routing["replan"]["agent"] = {
+                    "mode": (replan.get("agent_trace") or {}).get("mode"),
+                    "violations": (replan.get("agent_trace") or {}).get("violations") or [],
+                    "action_count": (replan.get("agent_trace") or {}).get("action_count")}
                 routing["candidates"] = self._merge_candidates(
                     routing.get("candidates") or [], replan.get("candidates") or [])
                 write_json(task_dir / "plan.json", plan)
                 write_json(task_dir / "replan.json", replan.get("plan") or {})
+                if replan.get("agent_trace"):
+                    write_json(task_dir / "replan-agent-trace.json",
+                               replan["agent_trace"])
                 write_json(task_dir / "routing.json", routing)
             if cancel_event.is_set():
                 return self._finish_cancelled(task, task_dir, results)
@@ -1120,6 +1128,29 @@ class TaskPipeline:
             new_plan["experience_refs"] = [
                 {"task_id": e.get("task_id"), "root_cause": e.get("root_cause"),
                  "skill": e.get("skill")} for e in experiences]
+            # 补规划同样必须经过固定动作空间门禁。bounded 模式下新增步骤
+            # 若引用未注册技能/开放动作，立即拒绝，不得绕过初始计划门禁。
+            replan_trace = self.agent.review_plan(
+                task, new_plan, catalog, results, replan_count=1)
+            write_json(task_dir / "replan-agent-trace.json", replan_trace)
+            if task.get("_trace"):
+                try:
+                    task["_trace"].validation(
+                        phase="replanning", name="bounded_agent_replan",
+                        ok=not replan_trace.get("violations"),
+                        errors=(replan_trace.get("violations") or [])[:20],
+                        details={"mode": replan_trace.get("mode"),
+                                 "action_count": replan_trace.get("action_count")})
+                except Exception:
+                    pass
+            if replan_trace.get("violations") and replan_trace.get("mode") == "bounded":
+                reason = ("补规划被有界 Agent 拒绝："
+                          + "；".join(replan_trace["violations"][:4]))
+                self._emit(task["id"], "warning",
+                           reason + "，保留已有结果继续仲裁", "replanning")
+                return {"status": "rejected", "reason": reason,
+                        "steps": [], "results": results, "executed": executed,
+                        "plan": new_plan, "agent_trace": replan_trace}
             next_results, next_executed = self._execute_plan(
                 task, new_plan, inputs, task_dir, cancel_event, budget,
                 models_used, results, scores=scores, stage="replanning")
@@ -1140,6 +1171,7 @@ class TaskPipeline:
                 "results": next_results,
                 "executed": next_executed,
                 "notes": warnings,
+                "agent_trace": replan_trace,
             }
         except (AIError, NoModelError) as exc:
             self._emit(task["id"], "warning", f"补规划失败，不再追加：{exc}", "replanning")

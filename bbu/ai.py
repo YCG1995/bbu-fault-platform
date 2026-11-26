@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import random
 import re
 import socket
 import threading
@@ -21,16 +22,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .db import Database
-from .model_capabilities import ModelCapabilityStore
+from .model_capabilities import ModelCapabilityStore, endpoint_key
 from .netguard import (
     OutboundContentTypeError,
     OutboundPolicy,
     OutboundPolicyError,
     OutboundResponseTooLarge,
+    endpoint_target,
     error_body,
     iter_limited,
     open_url,
-    policy_from_config,
     read_limited,
     require_json_content_type,
 )
@@ -42,11 +43,13 @@ class AIError(RuntimeError):
     """模型错误保留结构化 HTTP 信息，轨迹页需要原始响应体定位网关问题。"""
 
     def __init__(self, message: str, *, http_status: int = 0,
-                 response_body: str = "", retryable: bool = True) -> None:
+                 response_body: str = "", retryable: bool = True,
+                 circuit_break: bool = True) -> None:
         super().__init__(message)
         self.http_status = int(http_status or 0)
         self.response_body = str(response_body or "")
         self.retryable = bool(retryable)
+        self.circuit_break = bool(circuit_break)
 
 
 class NoModelError(AIError):
@@ -80,6 +83,123 @@ class AIResult:
     latency_ms: int = 0
     purpose: str = ""
     stream_used: bool = False
+    context_trimmed_chars: int = 0
+    context_window: int = 0
+
+
+_CJK_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+_CONTEXT_TRIM_MARKER = "\n\n…[已按模型上下文窗口裁剪]…\n\n"
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate without third-party tokenizers.
+
+    CJK characters are counted as one token each (the common tokenizer
+    behaviour); the remaining ASCII/Unicode text is counted at four characters
+    per token.  This deliberately over-estimates Chinese prompts compared with
+    the old ``len(text)//3`` heuristic, so budget and context checks no longer
+    silently undercount.
+    """
+    text = str(text or "")
+    if not text:
+        return 0
+    cjk = len(_CJK_RE.findall(text))
+    rest = len(text) - cjk
+    return max(1, cjk + (rest + 3) // 4)
+
+
+def _take_prefix_tokens(text: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    if estimate_tokens(text) <= budget:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if estimate_tokens(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low]
+
+
+def _take_suffix_tokens(text: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    if estimate_tokens(text) <= budget:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if estimate_tokens(text[len(text) - mid:]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[len(text) - low:] if low else ""
+
+
+def trim_text_to_tokens(text: str, budget: int) -> str:
+    """Trim the middle of a prompt, preserving its head and schema-bearing tail."""
+    text = str(text or "")
+    budget = max(0, int(budget or 0))
+    if estimate_tokens(text) <= budget:
+        return text
+    marker_tokens = estimate_tokens(_CONTEXT_TRIM_MARKER)
+    if budget <= marker_tokens + 8:
+        return _take_prefix_tokens(text, budget)
+    remaining = budget - marker_tokens
+    head_budget = max(1, int(remaining * 0.55))
+    tail_budget = max(1, remaining - head_budget)
+    return (_take_prefix_tokens(text, head_budget) + _CONTEXT_TRIM_MARKER
+            + _take_suffix_tokens(text, tail_budget))
+
+
+def fit_prompt_to_context(system: str, user: str, *,
+                          context_window: int | None,
+                          max_output: int | None,
+                          requested_max_tokens: int | None = None,
+                          max_output_declared: bool = True,
+                          margin_tokens: int = 256) -> dict[str, Any]:
+    """Fit a prompt + output request into the model's declared context.
+
+    Returns a dict with the possibly-trimmed prompt, the effective output cap
+    and the number of prompt characters removed.  The caller still owns budget
+    reservation and must use ``max_tokens`` from this result for the request.
+    """
+    context = max(1024, int(context_window or 32768))
+    margin = max(0, min(int(margin_tokens or 0), context // 4))
+    output_limit = max(64, int(max_output or 4096))
+    # DB ``max_tokens`` is a default, while workshop/assistant callers may
+    # deliberately request a larger output.  Only an explicitly declared
+    # ``extra.capabilities.max_output`` is a hard cap.
+    if requested_max_tokens is None:
+        requested = output_limit
+        cap_by_declared = True
+    else:
+        requested = max(1, int(requested_max_tokens))
+        cap_by_declared = bool(max_output_declared)
+    output_cap = output_limit if cap_by_declared else requested
+    # Never ask for more output than the context can hold after reserving
+    # room for at least a tiny prompt.
+    output = min(requested, output_cap, max(64, context - margin - 64))
+    input_budget = max(64, context - margin - output)
+    original_system, original_user = str(system or ""), str(user or "")
+    current_system = original_system
+    system_budget = max(32, min(input_budget, max(64, input_budget // 3)))
+    if estimate_tokens(current_system) > system_budget:
+        current_system = trim_text_to_tokens(current_system, system_budget)
+    user_budget = max(1, input_budget - estimate_tokens(current_system))
+    current_user = trim_text_to_tokens(original_user, user_budget)
+    return {
+        "system": current_system,
+        "user": current_user,
+        "max_tokens": output,
+        "context_window": context,
+        "input_tokens": estimate_tokens(current_system) + estimate_tokens(current_user),
+        "trimmed_chars": (len(original_system) - len(current_system)
+                          + len(original_user) - len(current_user)),
+    }
 
 
 class Budget:
@@ -102,6 +222,8 @@ class Budget:
         self.on_event = on_event
         self._pending_calls = 0
         self._pending_tokens = 0
+        self.over_budget = bool(
+            max_tokens > 0 and self.usage.total_tokens > max_tokens)
 
     def _reserve_locked(self, estimated_tokens: int) -> dict[str, int]:
         est = max(0, int(estimated_tokens or 0))
@@ -129,12 +251,37 @@ class Budget:
             self._pending_tokens = max(0, self._pending_tokens - est)
             self.calls += 1
             self.usage.add(usage)
+            if self.max_tokens > 0 and self.usage.total_tokens > self.max_tokens:
+                self.over_budget = True
             if self.on_event:
                 self.on_event("model_usage", "模型调用完成", {
                     "calls": self.calls,
                     "input_tokens": self.usage.input_tokens,
                     "output_tokens": self.usage.output_tokens,
                     "total_tokens": self.usage.total_tokens,
+                    "over_budget": self.over_budget,
+                })
+
+    def settle_failed(self, reservation: dict[str, int]) -> None:
+        """Count a failed provider attempt against the call budget.
+
+        Failed attempts were previously released without incrementing ``calls``,
+        which let an unreachable/401 endpoint run forever despite
+        ``max_llm_calls``.  They consume a call but no tokens because no usage
+        was reported.
+        """
+        with self._lock:
+            est = int((reservation or {}).get("estimated_tokens") or 0)
+            self._pending_calls = max(0, self._pending_calls - 1)
+            self._pending_tokens = max(0, self._pending_tokens - est)
+            self.calls += 1
+            if self.on_event:
+                self.on_event("model_usage", "模型调用失败", {
+                    "calls": self.calls,
+                    "input_tokens": self.usage.input_tokens,
+                    "output_tokens": self.usage.output_tokens,
+                    "total_tokens": self.usage.total_tokens,
+                    "status": "error",
                 })
 
     def release(self, reservation: dict[str, int]) -> None:
@@ -157,6 +304,8 @@ class Budget:
         with self._lock:
             self.calls += 1
             self.usage.add(usage)
+            if self.max_tokens > 0 and self.usage.total_tokens > self.max_tokens:
+                self.over_budget = True
             if self.on_event:
                 self.on_event("model_usage", "模型调用完成", {
                     "calls": self.calls,
@@ -175,6 +324,7 @@ class Budget:
             "max_tokens": self.max_tokens,
             "pending_calls": self._pending_calls,
             "pending_tokens": self._pending_tokens,
+            "over_budget": self.over_budget,
         }
 
     @property
@@ -262,6 +412,87 @@ class CircuitBreaker:
                     if count >= self.threshold and now - opened_at < self.cooldown]
 
 
+class EndpointGate:
+    """Per-endpoint concurrency + bounded queue.
+
+    The semaphore protects the upstream provider from a thundering herd.  The
+    queue counter bounds the number of waiters so a slow endpoint cannot grow an
+    unbounded thread pile; refusal is non-retryable so ``complete`` immediately
+    falls through to the next model instead of sleeping on the same endpoint.
+    """
+
+    def __init__(self, concurrency: int = 4, queue_limit: int = 32,
+                 queue_timeout_sec: float = 30.0) -> None:
+        self.concurrency = max(1, int(concurrency or 1))
+        self.queue_limit = max(1, int(queue_limit or 1))
+        self.queue_timeout_sec = max(0.1, float(queue_timeout_sec or 30.0))
+        self._sem = threading.BoundedSemaphore(self.concurrency)
+        self._lock = threading.Lock()
+        self._waiting = 0
+
+    @property
+    def waiting(self) -> int:
+        with self._lock:
+            return self._waiting
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self._waiting >= self.queue_limit:
+                raise AIError(
+                    f"模型端点排队已满（{self.queue_limit}），本次请求转下一个模型",
+                    retryable=False, circuit_break=False)
+            self._waiting += 1
+        try:
+            acquired = self._sem.acquire(timeout=self.queue_timeout_sec)
+        finally:
+            with self._lock:
+                self._waiting = max(0, self._waiting - 1)
+        if not acquired:
+            raise AIError(
+                f"模型端点繁忙，排队超过 {self.queue_timeout_sec:g} 秒，本次请求转下一个模型",
+                retryable=False, circuit_break=False)
+
+    def release(self) -> None:
+        try:
+            self._sem.release()
+        except ValueError:
+            pass
+
+
+def endpoint_limit_key(model: dict[str, Any]) -> str:
+    """Limit by provider + base URL, shared across model aliases on one host."""
+    return (f"{str(model.get('provider') or '')}|"
+            f"{str(model.get('base_url') or '').rstrip('/')}")
+
+
+class EndpointLimiter:
+    def __init__(self, concurrency: int = 4, queue_limit: int = 32,
+                 queue_timeout_sec: float = 30.0) -> None:
+        self.concurrency = max(1, int(concurrency or 1))
+        self.queue_limit = max(1, int(queue_limit or 1))
+        self.queue_timeout_sec = max(0.1, float(queue_timeout_sec or 30.0))
+        self._lock = threading.Lock()
+        self._gates: dict[str, EndpointGate] = {}
+
+    def gate(self, key: str) -> EndpointGate:
+        with self._lock:
+            gate = self._gates.get(key)
+            if gate is None:
+                gate = EndpointGate(self.concurrency, self.queue_limit,
+                                    self.queue_timeout_sec)
+                self._gates[key] = gate
+            return gate
+
+    @contextmanager
+    def slot(self, key: str):
+        gate = self.gate(key)
+        gate.acquire()
+        try:
+            yield
+        finally:
+            gate.release()
+
+
 class AIGateway:
     def __init__(self, db: Database, config: Any,
                  on_event: Callable[[str, str, dict], None] | None = None,
@@ -271,7 +502,22 @@ class AIGateway:
         self.on_event = on_event
         self.on_usage: Callable[[dict[str, Any]], None] | None = None
         self.breaker = CircuitBreaker()
+        self.schema_breaker = CircuitBreaker(
+            threshold=max(1, int(config.get("llm_schema_fail_threshold", 2)
+                                if config is not None else 2)),
+            cooldown=max(10, int(config.get("llm_schema_cooldown_sec", 300)
+                               if config is not None else 300)))
+        self.endpoint_limiter = EndpointLimiter(
+            concurrency=max(1, int(config.get("llm_endpoint_concurrency", 4)
+                                  if config is not None else 4)),
+            queue_limit=max(1, int(config.get("llm_endpoint_queue_limit", 32)
+                                  if config is not None else 32)),
+            queue_timeout_sec=max(0.1, float(
+                config.get("llm_endpoint_queue_timeout_sec", 30)
+                if config is not None else 30)))
         self._cache: dict[int, dict[str, Any]] = {}
+        self._rr_lock = threading.Lock()
+        self._rr_index: dict[str, int] = {}
         self._metrics_lock = threading.Lock()
         self._metrics: dict[str, Any] = {"calls": 0, "failures": 0, "recent": [],
                                          "by_model": {}}
@@ -325,6 +571,7 @@ class AIGateway:
         if self.on_usage is None:
             return
         meta = dict(getattr(self._local, "usage_meta", {}) or {})
+        host, path = endpoint_target(str(model.get("base_url") or ""))
         event = {
             "user_id": self._uid(),
             "task_id": str(meta.get("task_id") or ""),
@@ -344,6 +591,8 @@ class AIGateway:
             "estimated_input_tokens": int(item.get("estimated_input_tokens") or 0),
             "latency_ms": int(item.get("latency_ms") or 0),
             "error": str(item.get("error") or ""),
+            "endpoint_host": host,
+            "endpoint_path": path[:300],
         }
         try:
             self.on_usage(event)
@@ -365,12 +614,19 @@ class AIGateway:
             except json.JSONDecodeError:
                 row["extra"] = {}
             if self.secret_box and row.get("api_key"):
-                row["api_key"] = self.secret_box.decrypt(row["api_key"])
+                try:
+                    row["api_key"] = self.secret_box.decrypt(row["api_key"])
+                except ValueError as exc:
+                    row["api_key"] = ""
+                    row["key_error"] = str(exc)
             row["source"] = "admin"
             row["personal"] = False
             row["allow_private"] = (
                 bool(self.config.get("model_discovery_allow_private", True))
                 if self.config is not None else True)
+            row["private_allowlist"] = (
+                self.config.get("model_private_allowlist", "")
+                if self.config is not None else "")
         return rows
 
     def _personal_model(self, user_id: int | None = None) -> dict[str, Any] | None:
@@ -393,6 +649,9 @@ class AIGateway:
             "allow_private": (
                 bool(self.config.get("model_discovery_allow_private", True))
                 if self.config is not None else True),
+            "private_allowlist": (
+                self.config.get("model_private_allowlist", "")
+                if self.config is not None else ""),
         })
         try:
             model["api_key"] = self.secret_box.decrypt(row["api_key"]) if self.secret_box else row["api_key"]
@@ -406,6 +665,43 @@ class AIGateway:
         personal = self._personal_model(user_id)
         return ([personal] if personal else []) + self._global_models()
 
+    @staticmethod
+    def _model_breaker_key(model: dict[str, Any]) -> str:
+        return f"{model['id']}:{model['name']}"
+
+    def _model_skipped(self, model: dict[str, Any]) -> bool:
+        key = self._model_breaker_key(model)
+        return self.breaker.is_open(key) or self.schema_breaker.is_open(key)
+
+    def _round_robin_priority(self, rows: list[dict[str, Any]],
+                              group: str) -> list[dict[str, Any]]:
+        """Round-robin inside each equal-priority group.
+
+        Priority remains the primary ordering signal; only ties rotate, so
+        several identical-priority deployments share load instead of always
+        hitting the lowest id.
+        """
+        if len(rows) <= 1:
+            return list(rows)
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for model in rows:
+            try:
+                priority = int(model.get("priority") or 0)
+            except (TypeError, ValueError):
+                priority = 0
+            grouped.setdefault(priority, []).append(model)
+        ordered: list[dict[str, Any]] = []
+        for priority in sorted(grouped):
+            items = grouped[priority]
+            if len(items) == 1:
+                ordered.extend(items)
+                continue
+            with self._rr_lock:
+                start = self._rr_index.get(group, 0) % len(items)
+                self._rr_index[group] = start + 1
+            ordered.extend(items[start:] + items[:start])
+        return ordered
+
     def choose(self, role: str, override_id: int | None = None,
                user_id: int | None = None) -> list[dict[str, Any]]:
         models = self._models(user_id)
@@ -417,8 +713,18 @@ class AIGateway:
         exact = [m for m in models if role in m["roles"] and not m.get("key_error")]
         rest = [m for m in models if role not in m["roles"]
                 and (not m["roles"] or "default" in m["roles"]) and not m.get("key_error")]
-        ordered = exact + [m for m in rest if m not in exact]
-        return [m for m in ordered if not self.breaker.is_open(f"{m['id']}:{m['name']}")]
+        personal = [m for m in exact if m.get("personal")]
+        exact_global = [m for m in exact if not m.get("personal")]
+        rest_unique = [m for m in rest if m not in exact]
+        rest_personal = [m for m in rest_unique if m.get("personal")]
+        rest_global = [m for m in rest_unique if not m.get("personal")]
+        # Personal models retain their existing priority: they stay first.
+        # Global candidates rotate within equal priority groups.
+        ordered = (personal
+                   + self._round_robin_priority(exact_global, f"{role}:exact")
+                   + rest_personal
+                   + self._round_robin_priority(rest_global, f"{role}:fallback"))
+        return [m for m in ordered if not self._model_skipped(m)]
 
     def available(self, role: str = "default", user_id: int | None = None) -> bool:
         try:
@@ -445,10 +751,12 @@ class AIGateway:
         personal = self._personal_model(uid)
         globals_ = self._global_models()
         personal_ok = bool(personal and not personal.get("key_error")
-                           and not self.breaker.is_open(f"{personal['id']}:{personal['name']}"))
-        global_rows = [m for m in globals_ if (not m["roles"] or "default" in m["roles"])]
-        global_ok = [m for m in global_rows
-                     if not self.breaker.is_open(f"{m['id']}:{m['name']}")]
+                           and not self._model_skipped(personal))
+        # Any enabled global role can serve as a fallback via the default/empty
+        # role rule; model_status previously looked only at role=default and
+        # reported "no model" when only planner/arbiter/writer was configured.
+        global_rows = [m for m in globals_ if not m.get("key_error")]
+        global_ok = [m for m in global_rows if not self._model_skipped(m)]
         usable = personal_ok or bool(global_ok)
         url = str(self.config.get("personal_api_key_url") or "")
         notice = None
@@ -532,6 +840,8 @@ class AIGateway:
             "recent_success_rate": round(success / len(recent), 3) if recent else None,
             "models": models,
             "circuit_open": self.breaker.open_keys() if hasattr(self.breaker, "open_keys") else [],
+            "schema_circuit_open": (self.schema_breaker.open_keys()
+                                    if hasattr(self.schema_breaker, "open_keys") else []),
         }
 
     def _probe_capabilities(self, model: dict[str, Any]) -> dict[str, Any]:
@@ -542,6 +852,7 @@ class AIGateway:
                 "usage": True,
                 "context_window": int(extra.get("context_window") or 32768),
                 "max_output": int(extra.get("max_output") or model.get("max_tokens") or 4096),
+                "max_output_declared": bool(extra.get("max_output")),
                 "degraded": False, "probe_error": ""}
         if provider == "anthropic":
             return base
@@ -560,9 +871,12 @@ class AIGateway:
             "response_format": {"type": "json_object"},
         }
         try:
-            data, _ = _post_json(_openai_url(model["base_url"]), payload, headers,
-                                 min(30, int(model.get("timeout_sec") or 30)),
-                                 allow_private=bool(model.get("allow_private", False)))
+            with self.endpoint_limiter.slot(endpoint_limit_key(model)):
+                data, _ = _post_json(
+                    _openai_url(model["base_url"]), payload, headers,
+                    min(30, int(model.get("timeout_sec") or 30)),
+                    allow_private=bool(model.get("allow_private", False)),
+                    private_allowlist=model.get("private_allowlist") or ())
             base["json_mode"] = True
             base["usage"] = bool(data.get("usage"))
             return base
@@ -597,12 +911,19 @@ class AIGateway:
                 self.config.get("llm_retry_attempts", 2) if self.config else 1)))
         backoff = max(0.0, float(
             self.config.get("llm_retry_backoff_sec", 2.0) if self.config else 1.2))
+        jitter = max(0.0, float(
+            self.config.get("llm_retry_jitter_sec", 0.5) if self.config else 0.0))
+        margin_tokens = max(0, int(
+            self.config.get("llm_context_margin_tokens", 256) if self.config else 256))
         attempt_stage = stage or purpose or "model"
 
         def note_attempt(model: dict[str, Any], status: str, latency_ms: int = 0,
                          usage: Usage | None = None, error: str = "",
                          input_estimate: int = 0,
-                         stream_used: bool | None = None) -> None:
+                         stream_used: bool | None = None,
+                         context_trimmed_chars: int = 0,
+                         context_window: int = 0,
+                         request_max_tokens: int = 0) -> None:
             item: dict[str, Any] = {
                 "stage": attempt_stage,
                 "model": str(model.get("name") or model.get("model") or model.get("id") or ""),
@@ -611,7 +932,13 @@ class AIGateway:
                 "output_tokens": int(usage.output_tokens) if usage else 0,
                 "status": status,
                 "stream": bool(stream if stream_used is None else stream_used),
+                "context_trimmed_chars": max(0, int(context_trimmed_chars or 0)),
+                "context_window": max(0, int(context_window or 0)),
+                "request_max_tokens": max(0, int(request_max_tokens or 0)),
             }
+            host, path = endpoint_target(str(model.get("base_url") or ""))
+            item["endpoint_host"] = host
+            item["endpoint_path"] = path[:300]
             if usage:
                 item["total_tokens"] = int(usage.total_tokens or
                                                usage.input_tokens + usage.output_tokens)
@@ -628,20 +955,19 @@ class AIGateway:
 
         errors: list[str] = []
         for model in models:
-            key = f"{model['id']}:{model['name']}"
+            key = self._model_breaker_key(model)
             for attempt in range(retries_per_model + 1):
                 reservation: dict[str, int] | None = None
+                repair_in_flight = False
+                prompt_user = user
+                system_prompt = system
                 call_started = time.monotonic()
                 try:
-                    if budget:
-                        est = max(1, (len(system) + len(user)) // 3)
-                        reservation = budget.reserve(est)
                     schema_mode = str(self.config.get("model_schema_mode", "auto")
                                       if self.config else "auto").lower()
                     capabilities = self.capabilities.get(
                         model, probe=(schema_mode in ("auto", "probe")))
                     model_schema = json_schema
-                    prompt_user = user
                     if json_schema and provider_name(model) != "mock":
                         if schema_mode == "off" or not capabilities.get("json_mode"):
                             model_schema = None
@@ -654,29 +980,53 @@ class AIGateway:
                             model_schema = {"type": "json_object"}
                             prompt_user = (user + "\n\n请只输出严格 JSON 对象，"
                                            "不要 Markdown 代码块或解释；字段和类型必须符合上面的 JSON Schema。")
+                    # 上下文窗口裁剪必须发生在预算预留和请求构造之前，否则长
+                    # prompt 会先 400，预算也已按虚高长度占用。
+                    fitted = fit_prompt_to_context(
+                        system_prompt, prompt_user,
+                        context_window=capabilities.get("context_window"),
+                        max_output=capabilities.get("max_output"),
+                        requested_max_tokens=max_tokens,
+                        max_output_declared=bool(
+                            capabilities.get("max_output_declared", True)),
+                        margin_tokens=margin_tokens)
+                    system_prompt = fitted["system"]
+                    prompt_user = fitted["user"]
+                    effective_max_tokens = int(fitted["max_tokens"])
+                    trimmed_chars = int(fitted["trimmed_chars"])
+                    input_est = (estimate_tokens(system_prompt)
+                                 + estimate_tokens(prompt_user))
+                    if budget:
+                        # 预留输入 + 最大输出，结算时按实际 usage 校正；这样
+                        # max_total_tokens 在请求前就是硬上限，而不是事后才超。
+                        reservation = budget.reserve(input_est + effective_max_tokens)
                     if trace:
                         try:
                             trace.model_request(
                                 role=role, model=model, provider=provider_name(model),
                                 purpose=purpose, stage=attempt_stage, attempt=attempt + 1,
-                                system=system, user=prompt_user, json_schema=model_schema,
+                                system=system_prompt, user=prompt_user,
+                                json_schema=model_schema,
                                 temperature=(model.get("temperature") if temperature is None else temperature),
-                                max_tokens=max_tokens, stream=stream, phase=attempt_stage)
+                                max_tokens=effective_max_tokens, stream=stream,
+                                phase=attempt_stage)
                         except Exception:
                             pass
                     try:
-                        result = self._call(model, system, prompt_user, model_schema,
-                                            max_tokens, temperature, purpose, stream)
+                        with self.endpoint_limiter.slot(endpoint_limit_key(model)):
+                            result = self._call(model, system_prompt, prompt_user,
+                                                model_schema, effective_max_tokens,
+                                                temperature, purpose, stream)
                     except Exception:
                         if budget and reservation:
-                            budget.release(reservation)
+                            budget.settle_failed(reservation)
                         reservation = None
                         raise
-                    self._note_model(model, True, result.latency_ms)
                     if budget and reservation:
                         budget.settle(reservation, result.usage)
                     reservation = None
-                    self.breaker.ok(key)
+                    result.context_trimmed_chars = trimmed_chars
+                    result.context_window = int(fitted["context_window"])
                     parsed = extract_json(result.text) if json_schema else None
                     if trace:
                         try:
@@ -693,12 +1043,21 @@ class AIGateway:
                         problems = (["模型未返回合法 JSON"] if data is None
                                     else validate_schema(data, json_schema))
                         if not problems:
+                            self._note_model(model, True, result.latency_ms)
+                            self.breaker.ok(key)
+                            self.schema_breaker.ok(key)
                             result.data = data
                             note_attempt(model, "success", result.latency_ms, result.usage,
-                                         stream_used=result.stream_used)
+                                         stream_used=result.stream_used,
+                                         context_trimmed_chars=trimmed_chars,
+                                         context_window=result.context_window,
+                                         request_max_tokens=effective_max_tokens)
                             return result
                         note_attempt(model, "error", result.latency_ms, result.usage,
-                                     "JSON 校验失败: " + "；".join(problems[:3]))
+                                     "JSON 校验失败: " + "；".join(problems[:3]),
+                                     context_trimmed_chars=trimmed_chars,
+                                     context_window=result.context_window,
+                                     request_max_tokens=effective_max_tokens)
                         if trace:
                             try:
                                 trace.validation(phase=attempt_stage, name="model_json_schema",
@@ -706,43 +1065,57 @@ class AIGateway:
                                                  details={"text": result.text})
                             except Exception:
                                 pass
-                        # 只修复一次，修复失败直接换下一个模型/交给调用方降级
+                        # 只修复一次；修复失败则熔断该端点并换下一个模型。
                         if attempt == 0:
                             repair_user = (
-                                f"{user}\n\n[上一次输出不合法，问题如下]\n"
+                                f"{prompt_user}\n\n[上一次输出不合法，问题如下]\n"
                                 + "\n".join(f"- {e}" for e in problems[:12])
                                 + "\n请只输出严格符合 JSON Schema 的 JSON，不要解释。"
                             )
+                            repair_fit = fit_prompt_to_context(
+                                system_prompt, repair_user,
+                                context_window=result.context_window,
+                                max_output=capabilities.get("max_output"),
+                                requested_max_tokens=effective_max_tokens,
+                                max_output_declared=bool(
+                                    capabilities.get("max_output_declared", True)),
+                                margin_tokens=margin_tokens)
+                            repair_system = repair_fit["system"]
+                            repair_text = repair_fit["user"]
                             repair_reservation: dict[str, int] | None = None
                             if budget:
                                 repair_reservation = budget.reserve(
-                                    max(1, (len(system) + len(repair_user)) // 3))
+                                    estimate_tokens(repair_system)
+                                    + estimate_tokens(repair_text)
+                                    + int(repair_fit["max_tokens"]))
                             if trace:
                                 try:
                                     trace.model_request(
                                         role=role, model=model, provider=provider_name(model),
                                         purpose=purpose + ":repair", stage=attempt_stage,
-                                        attempt=attempt + 1, system=system, user=repair_user,
-                                        json_schema=model_schema,
+                                        attempt=attempt + 1, system=repair_system,
+                                        user=repair_text, json_schema=model_schema,
                                         temperature=(model.get("temperature") if temperature is None else temperature),
-                                        max_tokens=max_tokens, stream=stream, repair=True,
-                                        phase=attempt_stage)
+                                        max_tokens=int(repair_fit["max_tokens"]),
+                                        stream=stream, repair=True, phase=attempt_stage)
                                 except Exception:
                                     pass
+                            repair_in_flight = True
                             try:
-                                repair = self._call(model, system, repair_user, model_schema,
-                                                    max_tokens, temperature,
-                                                    purpose + ":repair", stream)
+                                with self.endpoint_limiter.slot(endpoint_limit_key(model)):
+                                    repair_result = self._call(
+                                        model, repair_system, repair_text, model_schema,
+                                        int(repair_fit["max_tokens"]),
+                                        temperature, purpose + ":repair", stream)
                             except Exception:
                                 if budget and repair_reservation:
-                                    budget.release(repair_reservation)
+                                    budget.settle_failed(repair_reservation)
                                 repair_reservation = None
                                 raise
-                            self._note_model(model, True, repair.latency_ms)
                             if budget and repair_reservation:
-                                budget.settle(repair_reservation, repair.usage)
+                                budget.settle(repair_reservation, repair_result.usage)
                             repair_reservation = None
-                            repaired = extract_json(repair.text)
+                            repaired = extract_json(repair_result.text)
                             repair_problems = (["模型未返回合法 JSON"] if repaired is None
                                                else validate_schema(repaired, json_schema))
                             if trace:
@@ -750,33 +1123,63 @@ class AIGateway:
                                     trace.model_response(
                                         role=role, model=model, provider=provider_name(model),
                                         purpose=purpose + ":repair", stage=attempt_stage,
-                                        attempt=attempt + 1, text=repair.text, parsed=repaired,
-                                        usage=repair.usage, latency_ms=repair.latency_ms,
-                                        stream=repair.stream_used, repair=True,
+                                        attempt=attempt + 1, text=repair_result.text,
+                                        parsed=repaired, usage=repair_result.usage,
+                                        latency_ms=repair_result.latency_ms,
+                                        stream=repair_result.stream_used, repair=True,
                                         phase=attempt_stage)
                                     trace.validation(
                                         phase=attempt_stage, name="model_json_repair",
                                         ok=not repair_problems,
                                         errors=repair_problems[:20],
-                                        details={"text": repair.text})
+                                        details={"text": repair_result.text})
                                 except Exception:
                                     pass
                             if repaired is not None and not repair_problems:
-                                repair.data = repaired
+                                repair_result.data = repaired
+                                repair_result.context_trimmed_chars = (
+                                    trimmed_chars + int(repair_fit["trimmed_chars"]))
+                                repair_result.context_window = int(repair_fit["context_window"])
+                                self._note_model(model, True, repair_result.latency_ms)
                                 self.breaker.ok(key)
-                                note_attempt(model, "success", repair.latency_ms, repair.usage,
-                                             stream_used=repair.stream_used)
-                                return repair
-                            note_attempt(model, "error", repair.latency_ms, repair.usage,
-                                         "JSON 校验失败: " + "；".join(repair_problems[:3]))
-                            errors.append(f"{model['name']}: JSON 校验失败 {repair_problems[:3]}")
-                            self._note_model(model, False, error="JSON 校验失败")
+                                self.schema_breaker.ok(key)
+                                note_attempt(model, "success", repair_result.latency_ms,
+                                             repair_result.usage,
+                                             stream_used=repair_result.stream_used,
+                                             context_trimmed_chars=repair_result.context_trimmed_chars,
+                                             context_window=repair_result.context_window,
+                                             request_max_tokens=int(repair_fit["max_tokens"]))
+                                return repair_result
+                            reason = "JSON 校验失败: " + "；".join(repair_problems[:3])
+                            note_attempt(model, "error", repair_result.latency_ms,
+                                         repair_result.usage, reason,
+                                         context_trimmed_chars=int(repair_fit["trimmed_chars"]),
+                                         context_window=int(repair_fit["context_window"]),
+                                         request_max_tokens=int(repair_fit["max_tokens"]))
+                            errors.append(f"{model['name']}: {reason}")
+                            self._note_model(model, False, error=reason)
+                            self.schema_breaker.fail(key)
+                            try:
+                                self.capabilities.mark_degraded(model, reason, caps=capabilities)
+                            except Exception:
+                                pass
                             break
-                        errors.append(f"{model['name']}: JSON 校验失败 {problems[:3]}")
-                        self._note_model(model, False, error="JSON 校验失败")
+                        reason = "JSON 校验失败: " + "；".join(problems[:3])
+                        errors.append(f"{model['name']}: {reason}")
+                        self._note_model(model, False, error=reason)
+                        self.schema_breaker.fail(key)
+                        try:
+                            self.capabilities.mark_degraded(model, reason, caps=capabilities)
+                        except Exception:
+                            pass
                         break
+                    self._note_model(model, True, result.latency_ms)
+                    self.breaker.ok(key)
                     note_attempt(model, "success", result.latency_ms, result.usage,
-                                 stream_used=result.stream_used)
+                                 stream_used=result.stream_used,
+                                 context_trimmed_chars=trimmed_chars,
+                                 context_window=result.context_window,
+                                 request_max_tokens=effective_max_tokens)
                     return result
                 except BudgetExceeded:
                     raise
@@ -784,7 +1187,11 @@ class AIGateway:
                     latency_ms = int((time.monotonic() - call_started) * 1000)
                     note_attempt(model, "error", latency_ms,
                                  error=str(exc),
-                                 input_estimate=max(1, (len(system) + len(prompt_user)) // 3))
+                                 input_estimate=max(1, estimate_tokens(system_prompt)
+                                                    + estimate_tokens(prompt_user)),
+                                 context_trimmed_chars=locals().get("trimmed_chars", 0),
+                                 context_window=locals().get("fitted", {}).get("context_window", 0),
+                                 request_max_tokens=locals().get("effective_max_tokens", 0))
                     if trace:
                         try:
                             trace.model_error(
@@ -798,10 +1205,21 @@ class AIGateway:
                         except Exception:
                             pass
                     errors.append(f"{model['name']}: {exc}")
-                    self._note_model(model, False, error=str(exc))
-                    self.breaker.fail(key)
-                    if attempt < retries_per_model:
-                        time.sleep(min(8.0, backoff * (2 ** attempt)))
+                    if getattr(exc, "circuit_break", True):
+                        # 队列/本地并发拒绝不是端点故障，不能计入模型健康失败。
+                        self._note_model(model, False, error=str(exc))
+                        self.breaker.fail(key)
+                    # 只有可重试错误才在同一模型上退避重试；401/400/JSON
+                    # Content-Type 等确定性错误立即换下一个模型。
+                    retryable = bool(getattr(exc, "retryable", True)) and not repair_in_flight
+                    if retryable and attempt < retries_per_model:
+                        delay = min(8.0, backoff * (2 ** attempt))
+                        if jitter:
+                            delay += random.uniform(0, jitter)
+                        if delay > 0:
+                            time.sleep(delay)
+                        continue
+                    break
         hint = ""
         if self._personal_model(self._uid()):
             hint = "；个人 MaaS Key 调用失败，请到个人中心更新 Key 后重试"
@@ -864,6 +1282,7 @@ def _headers_extra(model: dict[str, Any]) -> dict[str, str]:
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
                timeout: int, *, allow_private: bool = False,
+               private_allowlist: tuple[str, ...] | str | None = None,
                max_bytes: int | None = None) -> tuple[dict[str, Any], int]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
@@ -872,6 +1291,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
         req.add_header(key, value)
     raw = b""
     policy = OutboundPolicy(allow_private=allow_private,
+                            private_allowlist=private_allowlist or (),
                             max_bytes=max_bytes or 1024 * 1024)
     try:
         with open_url(req, timeout=timeout, policy=policy) as resp:
@@ -961,8 +1381,11 @@ def _models_url(model: dict[str, Any]) -> str:
 
 
 def _get_json(url: str, headers: dict[str, str], timeout: int, *,
-              allow_private: bool = False, max_bytes: int | None = None) -> Any:
+              allow_private: bool = False,
+              private_allowlist: tuple[str, ...] | str | None = None,
+              max_bytes: int | None = None) -> Any:
     policy = OutboundPolicy(allow_private=allow_private,
+                            private_allowlist=private_allowlist or (),
                             max_bytes=max_bytes or 1024 * 1024)
     req = urllib.request.Request(url, method="GET")
     req.add_header("Accept", "application/json")
@@ -1012,7 +1435,8 @@ def list_models(model: dict[str, Any], timeout: int = 15) -> list[str]:
             (model.get("extra") or {}).get("anthropic_version") or "2023-06-01")
     headers.update(_headers_extra(model))
     data = _get_json(_models_url(model), headers, max(5, min(int(timeout or 15), 30)),
-                     allow_private=bool(model.get('allow_private', False)))
+                     allow_private=bool(model.get('allow_private', False)),
+                     private_allowlist=model.get("private_allowlist") or ())
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
@@ -1039,6 +1463,7 @@ def list_models(model: dict[str, Any], timeout: int = 15) -> list[str]:
 
 def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, str],
                         timeout: int, *, allow_private: bool = False,
+                        private_allowlist: tuple[str, ...] | str | None = None,
                         max_bytes: int | None = None) -> tuple[str, Usage]:
     """OpenAI SSE 流式读取；长输出不再依赖单个 30 秒空闲连接。
 
@@ -1052,6 +1477,7 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
         req.add_header(key, value)
     raw = b""
     policy = OutboundPolicy(allow_private=allow_private,
+                            private_allowlist=private_allowlist or (),
                             max_bytes=max_bytes or 1024 * 1024)
     try:
         with open_url(req, timeout=timeout, policy=policy) as resp:
@@ -1141,14 +1567,17 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
 
     if stream:
         try:
-            text, usage = _post_openai_stream(url, payload, headers, model["timeout_sec"],
-                                              allow_private=bool(model.get("allow_private", False)))
+            text, usage = _post_openai_stream(
+                url, payload, headers, model["timeout_sec"],
+                allow_private=bool(model.get("allow_private", False)),
+                private_allowlist=model.get("private_allowlist") or ())
             if usage.total_tokens == 0:
                 # 部分网关不返回 usage；给预算一个保守估算，避免完全不计成本。
                 usage = Usage(
-                    input_tokens=max(1, (len(system) + len(user)) // 3),
-                    output_tokens=max(1, len(text) // 3),
-                    total_tokens=max(2, (len(system) + len(user) + len(text)) // 3),
+                    input_tokens=max(1, estimate_tokens(system) + estimate_tokens(user)),
+                    output_tokens=max(1, estimate_tokens(text)),
+                    total_tokens=max(2, estimate_tokens(system) + estimate_tokens(user)
+                                     + estimate_tokens(text)),
                 )
             return text, usage, True
         except AIError as exc:
@@ -1166,21 +1595,27 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
             payload["stream"] = False
 
     try:
-        data, _ = _post_json(url, payload, headers, model["timeout_sec"],
-                              allow_private=bool(model.get("allow_private", False)))
+        data, _ = _post_json(
+            url, payload, headers, model["timeout_sec"],
+            allow_private=bool(model.get("allow_private", False)),
+            private_allowlist=model.get("private_allowlist") or ())
     except AIError as exc:
         # 部分兼容网关不支持原生 json_schema，降级为 json_object 后重试一次。
         if json_schema and "response_format" in str(exc).lower():
             payload["response_format"] = {"type": "json_object"}
             try:
-                data, _ = _post_json(url, payload, headers, model["timeout_sec"],
-                              allow_private=bool(model.get("allow_private", False)))
+                data, _ = _post_json(
+            url, payload, headers, model["timeout_sec"],
+            allow_private=bool(model.get("allow_private", False)),
+            private_allowlist=model.get("private_allowlist") or ())
             except AIError as exc2:
                 if "response_format" not in str(exc2).lower():
                     raise
                 payload.pop("response_format", None)
-                data, _ = _post_json(url, payload, headers, model["timeout_sec"],
-                              allow_private=bool(model.get("allow_private", False)))
+                data, _ = _post_json(
+            url, payload, headers, model["timeout_sec"],
+            allow_private=bool(model.get("allow_private", False)),
+            private_allowlist=model.get("private_allowlist") or ())
         else:
             raise
     text, usage = _parse_openai_payload(data)
@@ -1214,9 +1649,10 @@ def _call_anthropic(model: dict[str, Any], system: str, user: str,
         "anthropic-version": str((model.get("extra") or {}).get("anthropic_version") or "2023-06-01"),
     }
     headers.update(_headers_extra(model))
-    data, _ = _post_json(_anthropic_url(model["base_url"]), payload, headers,
-                         model["timeout_sec"],
-                         allow_private=bool(model.get("allow_private", False)))
+    data, _ = _post_json(
+        _anthropic_url(model["base_url"]), payload, headers, model["timeout_sec"],
+        allow_private=bool(model.get("allow_private", False)),
+        private_allowlist=model.get("private_allowlist") or ())
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
     if not text:

@@ -46,6 +46,66 @@ class OutboundPolicy:
     allow_private: bool = False
     max_bytes: int = DEFAULT_MAX_BYTES
     max_redirects: int = MAX_REDIRECTS
+    # 私网放行白名单：CIDR（10.0.0.0/8）、精确主机（llm.corp）或后缀（*.corp）。
+    # 为空且 allow_private=True 时维持“允许所有私网”；非空时只放行匹配目标。
+    private_allowlist: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "private_allowlist",
+                           _normalize_allowlist(self.private_allowlist))
+
+
+def _normalize_allowlist(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items = value.replace(";", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = [value]
+    normalized: list[str] = []
+    for item in items:
+        entry = str(item or "").strip().lower().rstrip(".")
+        if entry and entry not in normalized:
+            normalized.append(entry)
+    return tuple(normalized)
+
+
+def _host_pattern_match(host: str, pattern: str) -> bool:
+    if pattern.startswith("*."):
+        suffix = pattern[1:]  # ".corp"
+        return host.endswith(suffix) and len(host) > len(suffix)
+    return host == pattern
+
+
+def _allowlist_match(host: str, ip: ipaddress._BaseAddress,
+                     entries: tuple[str, ...]) -> bool:
+    """Return True when a private target is explicitly allowlisted.
+
+    An empty list is handled by the caller as "allow all private".  A non-empty
+    list rejects every private target that neither the hostname nor the
+    resolved address matches.
+    """
+    for entry in entries:
+        if not entry:
+            continue
+        if entry.startswith(("http://", "https://")):
+            continue
+        if "/" in entry:
+            try:
+                if ip in ipaddress.ip_network(entry, strict=False):
+                    return True
+            except ValueError:
+                continue
+        try:
+            if ip == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            pass
+        if _host_pattern_match(host, entry):
+            return True
+    return False
 
 
 def _is_metadata_ip(ip: ipaddress._BaseAddress) -> bool:
@@ -60,13 +120,18 @@ def _is_metadata_ip(ip: ipaddress._BaseAddress) -> bool:
     return ip.is_link_local
 
 
-def _is_forbidden(ip: ipaddress._BaseAddress, allow_private: bool) -> bool:
+def _is_forbidden(ip: ipaddress._BaseAddress, allow_private: bool,
+                  host: str = "", allowlist: tuple[str, ...] = ()) -> bool:
     if _is_metadata_ip(ip):
         return True
     if ip.is_unspecified or ip.is_multicast:
         return True
     if ip.is_loopback or ip.is_private:
-        return not allow_private
+        if not allow_private:
+            return True
+        if not allowlist:
+            return False
+        return not _allowlist_match(host, ip, allowlist)
     if ip.is_reserved:
         return True
     return False
@@ -108,7 +173,7 @@ def validate_outbound_url(url: str, policy: OutboundPolicy | None = None) -> str
             ip = ipaddress.ip_address(address)
         except ValueError as exc:
             raise OutboundPolicyError(f"主机解析出非法地址: {address}") from exc
-        if _is_forbidden(ip, policy.allow_private):
+        if _is_forbidden(ip, policy.allow_private, host, policy.private_allowlist):
             reason = "云元数据/link-local 地址" if _is_metadata_ip(ip) else "私网/环回/保留地址"
             raise OutboundPolicyError(f"禁止访问{reason}: {host} -> {address}")
     return raw
@@ -202,12 +267,22 @@ def error_body(exc: urllib.error.HTTPError, max_bytes: int = 4096) -> str:
 
 
 def policy_from_config(config: Any, *, max_key: str = "model_request_max_bytes") -> OutboundPolicy:
-    allow = False
+    # 1.28.1 起默认允许私网/回环；元数据与 link-local 仍永久拒绝。
+    allow = True
     max_bytes = DEFAULT_MAX_BYTES
+    private_allowlist: Any = ()
     if config is not None:
         try:
             allow = bool(config.get("model_discovery_allow_private", True))
             max_bytes = max(1024, int(config.get(max_key, DEFAULT_MAX_BYTES)))
+            private_allowlist = config.get("model_private_allowlist", "")
         except (TypeError, ValueError):
             pass
-    return OutboundPolicy(allow_private=allow, max_bytes=max_bytes)
+    return OutboundPolicy(allow_private=allow, max_bytes=max_bytes,
+                          private_allowlist=private_allowlist)
+
+
+def endpoint_target(url: str) -> tuple[str, str]:
+    """Return the normalized host/path used for outbound audit records."""
+    parsed = urlparse(str(url or ""))
+    return (parsed.hostname or "").lower(), parsed.path or "/"
