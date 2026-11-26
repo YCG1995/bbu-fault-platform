@@ -52,6 +52,8 @@ EXPECTED_ROUTES = {
     "GET /api/search",
     "GET /api/metrics",
     "GET /api/metrics/prometheus",
+    "GET /api/usage/overview",
+    "GET /api/usage/tasks",
     "GET /api/cases",
     "GET /api/cases/{id}",
     "POST /api/cases/{id}/label",
@@ -698,6 +700,13 @@ def main() -> int:
         status, raw, headers = admin_client.request("GET", "/api/metrics/prometheus")
         assert status == 200 and b"bbu_queue_depth" in raw and "text/plain" in headers.get("content-type", "")
         hit("GET /api/metrics/prometheus")
+        _, usage = admin_client.json("GET", "/api/usage/overview?days=7")
+        assert "totals" in usage and isinstance(usage["daily"], list)
+        assert len(usage["daily"]) == 7 and "directory" in usage
+        hit("GET /api/usage/overview")
+        _, usage_tasks = admin_client.json("GET", "/api/usage/tasks?days=7&page=1&page_size=10")
+        assert usage_tasks["page"] == 1 and isinstance(usage_tasks["items"], list)
+        hit("GET /api/usage/tasks")
         _, events = admin_client.json("GET", f"/api/tasks/{clock}/events?after=0")
         assert events["items"]
         hit("GET /api/tasks/{id}/events")

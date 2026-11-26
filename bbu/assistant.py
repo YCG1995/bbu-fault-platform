@@ -195,7 +195,7 @@ class AssistantService:
             "required": ["reply", "calls"],
         }
         budget = Budget(max_calls=4, max_tokens=12000)
-        with self.app.gateway.user_context(user["id"]):
+        with self.app.gateway.usage_context(user["id"], task_kind="assistant"):
             plan_result = self.app.gateway.complete(
                 "assistant", system, user_prompt, json_schema=schema,
                 max_tokens=900, temperature=0.1, purpose="assistant.plan",
@@ -323,7 +323,7 @@ class AssistantService:
 - 管理员操作给出页面入口；不要输出密钥、密码、Token。
 - 300 字以内，中文。"""
         try:
-            with self.app.gateway.user_context(user["id"]):
+            with self.app.gateway.usage_context(user["id"], task_kind="assistant"):
                 result = self.app.gateway.complete(
                     "assistant", "你是 BBU FaultScope 平台助手，只能依据给定工具结果回答。",
                     prompt, max_tokens=900, temperature=0.2,

@@ -146,6 +146,8 @@ class TaskPipeline:
         # 诊断使用任务提交者的个人模型配置；未配置时网关自动回退管理员默认模型。
         row = self.db.one("SELECT user_id,title,mode,description FROM tasks WHERE id=?", (task_id,)) or {}
         previous = self.gateway.set_user(row.get("user_id") or 0)
+        previous_usage = self.gateway.set_usage_context({
+            "task_id": task_id, "task_kind": "diagnosis"})
         trace = None
         try:
             if self.traces:
@@ -184,6 +186,7 @@ class TaskPipeline:
                     trace.finish("failed", error_code="incomplete",
                                  error_summary="任务未正常结束")
             self.gateway.set_user(previous)
+            self.gateway.set_usage_context(previous_usage)
 
     def _run_task(self, task_id: str, cancel_event: threading.Event,
                   trace: Any = None) -> dict[str, Any]:

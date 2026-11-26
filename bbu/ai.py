@@ -257,6 +257,7 @@ class AIGateway:
         self.db = db
         self.config = config
         self.on_event = on_event
+        self.on_usage: Callable[[dict[str, Any]], None] | None = None
         self.breaker = CircuitBreaker()
         self._cache: dict[int, dict[str, Any]] = {}
         self._metrics_lock = threading.Lock()
@@ -290,6 +291,53 @@ class AIGateway:
             yield
         finally:
             self.set_user(previous)
+
+    def set_usage_context(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """设置当前线程的用量归属（任务 / 工坊 / 助手 / 技能）。"""
+        previous = dict(getattr(self._local, "usage_meta", {}) or {})
+        self._local.usage_meta = dict(meta or {})
+        return previous
+
+    @contextmanager
+    def usage_context(self, user_id: int | None, **meta: Any):
+        previous_user = self.set_user(user_id)
+        previous_meta = self.set_usage_context(meta)
+        try:
+            yield
+        finally:
+            self.set_usage_context(previous_meta)
+            self.set_user(previous_user)
+
+    def _emit_usage(self, item: dict[str, Any], model: dict[str, Any],
+                    purpose: str) -> None:
+        if self.on_usage is None:
+            return
+        meta = dict(getattr(self._local, "usage_meta", {}) or {})
+        event = {
+            "user_id": self._uid(),
+            "task_id": str(meta.get("task_id") or ""),
+            "task_kind": str(meta.get("task_kind") or "direct"),
+            "skill_name": str(meta.get("skill_name") or ""),
+            "model_id": str(model.get("id") or ""),
+            "model_name": str(model.get("name") or model.get("model") or ""),
+            "provider": str(model.get("provider") or ""),
+            "model": str(model.get("model") or ""),
+            "scope": str(model.get("source") or "admin"),
+            "purpose": str(purpose or ""),
+            "stage": str(item.get("stage") or ""),
+            "status": str(item.get("status") or "success"),
+            "input_tokens": int(item.get("input_tokens") or 0),
+            "output_tokens": int(item.get("output_tokens") or 0),
+            "total_tokens": int(item.get("total_tokens") or 0),
+            "estimated_input_tokens": int(item.get("estimated_input_tokens") or 0),
+            "latency_ms": int(item.get("latency_ms") or 0),
+            "error": str(item.get("error") or ""),
+        }
+        try:
+            self.on_usage(event)
+        except Exception:
+            # 统计落库失败不能打断诊断 / 工坊主链路。
+            pass
 
     # ---------- 模型选择 ----------
     def _global_models(self) -> list[dict[str, Any]]:
@@ -536,8 +584,6 @@ class AIGateway:
                          usage: Usage | None = None, error: str = "",
                          input_estimate: int = 0,
                          stream_used: bool | None = None) -> None:
-            if attempt_sink is None:
-                return
             item: dict[str, Any] = {
                 "stage": attempt_stage,
                 "model": str(model.get("name") or model.get("model") or model.get("id") or ""),
@@ -557,7 +603,9 @@ class AIGateway:
                 match = re.search(r"\bHTTP\s+(\d{3})\b", str(error))
                 if match:
                     item["http_status"] = int(match.group(1))
-            attempt_sink(item)
+            if attempt_sink is not None:
+                attempt_sink(item)
+            self._emit_usage(item, model, purpose)
 
         errors: list[str] = []
         for model in models:

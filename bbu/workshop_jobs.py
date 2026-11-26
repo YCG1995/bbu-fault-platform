@@ -114,7 +114,8 @@ class WorkshopJobService:
             kind = job["kind"]
             draft_id = job["draft_id"]
             model_override = args.get("model_override")
-            with self.gateway.user_context(int(job["user_id"])):
+            with self.gateway.usage_context(
+                    int(job["user_id"]), task_id=job_id, task_kind="workshop"):
                 if kind == "analyze":
                     result = self.workshop.analyze(
                         draft_id, progress=self._callback(job_id, trace),

@@ -21,6 +21,17 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.23.0 用量统计
+
+本版本新增“用量统计”，把模型调用、任务 Token 与技能执行消耗统一落库；数据库 schema 从 20 升到 21。
+
+- **模型每日统计**：新增 `llm_usage_events` 逐调用事实表。网关每次实际尝试（含规划、补规划、仲裁、报告、JSON 修复与失败重试）记录模型、来源、用途、状态、输入/输出/总 Token、耗时与任务归属；`model_configs` 与 `user_model_configs` 分别标记为共享 / 个人，页面分开展示。
+- **任务 Token**：`GET /api/usage/tasks` 按任务汇总调用次数、输入/输出/总 Token 和参与模型；历史任务没有逐调用事件时回退 `tasks.stats_json`，页面标记“历史汇总”。
+- **技能消耗**：按 `task_skills` 统计执行次数、失败、任务数、Token、工具调用、证据数、关联输入和平均耗时；关联输入按任务去重。
+- **权限**：管理员可查看全部用户或指定用户；普通用户只能查看自己的调用，显式查询他人返回 403。页面默认近 30 天。
+- **界面**：新增“用量统计”页，内联 SVG 堆叠柱图按日展示各模型 Token / 调用次数，附模型明细、每日明细、技能消耗和任务 Token 表；1440px 与 390px 均通过浏览器验收。
+- 验证：单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.23.0.md`。
+
 ## 1.22.0 指定技能、全量证据与执行轨迹
 
 本版本补齐 P1–P3：指定技能诊断、全量证据聚合与执行轨迹，并加固归档与复杂规则回归；数据库 schema 从 18 升到 20。
@@ -239,13 +250,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.22.0-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.23.0-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.22.0-offline.tar.gz
+tar -xzf bbu-fault-platform-1.23.0-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

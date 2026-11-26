@@ -10,6 +10,7 @@ import { renderWorkshop } from './page_workshop.js';
 import { renderModels, renderUsers, renderAudit, renderSystem } from './page_admin.js';
 import { renderTraceDetail, renderTraces } from './page_traces.js';
 import { renderCases, renderCaseDetail } from './page_cases.js';
+import { renderUsage } from './page_usage.js';
 import { openPersonalModelModal } from './personal_model.js';
 import { mountAssistant, unmountAssistant } from './assistant.js';
 
@@ -17,6 +18,7 @@ const NAV = [
   { href: '#/dashboard', label: '总览', icon: 'dashboard' },
   { href: '#/tasks/new', label: '新建诊断', icon: 'plus' },
   { href: '#/tasks', label: '任务记录', icon: 'list' },
+  { href: '#/usage', label: '用量统计', icon: 'activity' },
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
@@ -768,6 +770,7 @@ function route() {
   updateNav();
   if (path === '#/dashboard' || path === '#/') return renderDashboard();
   if (path === '#/tasks') return renderTaskList();
+  if (path === '#/usage') return renderUsage();
   if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();
   const caseMatch = path.match(/^#\/cases\/([^/]+)$/);

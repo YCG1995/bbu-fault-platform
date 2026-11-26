@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -575,6 +575,32 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_task ON tool_calls(task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_decision ON tool_calls(decision, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS llm_usage_events (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  task_id TEXT NOT NULL DEFAULT '',
+  task_kind TEXT NOT NULL DEFAULT 'direct',
+  skill_name TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  model_name TEXT NOT NULL DEFAULT '',
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT 'admin',
+  purpose TEXT NOT NULL DEFAULT '',
+  stage TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'success',
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_day ON llm_usage_events(created_at, user_id);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_task ON llm_usage_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage_events(model_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS trace_runs (
   id TEXT PRIMARY KEY,

@@ -67,6 +67,7 @@ from .skills import SkillRegistry, SkillRunner, parse_frontmatter
 from .session import DiagnosticSession, RevisionConflict
 from .tool_contract import ToolPolicy
 from .trace import TraceStore
+from .usage import UsageStore
 from .storage import save_upload
 from .util import (CST, iso_now, new_id, read_json, safe_filename, sha256_file, truncate,
                    unique_path, within_directory, write_json)
@@ -292,6 +293,8 @@ class App:
         self.tools = ToolPolicy(self.db, config)
         self.runner = SkillRunner(config, db=self.db, policy=self.tools)
         self.gateway = AIGateway(self.db, config, secret_box=self.secret_box)
+        self.usage = UsageStore(self.db, config)
+        self.gateway.on_usage = self._record_llm_usage
         self.traces = TraceStore(self.db, config)
         try:
             self.traces.cleanup()
@@ -337,6 +340,13 @@ class App:
         self.workshop_jobs.shutdown()
         self.storage.shutdown()
 
+    def _record_llm_usage(self, event: dict[str, Any]) -> None:
+        try:
+            self.usage.record(event)
+        except Exception:
+            # 用量统计是旁路，不能影响诊断主流程。
+            pass
+
     # ---------- demo ----------
     def _install_demos(self) -> None:
         if not self.config.get("install_demo_skills", True):
@@ -377,6 +387,8 @@ class App:
         r.add("GET", r"/api/stats", h_stats)
         r.add("GET", r"/api/metrics", h_metrics)
         r.add("GET", r"/api/metrics/prometheus", h_metrics_prometheus)
+        r.add("GET", r"/api/usage/overview", h_usage_overview)
+        r.add("GET", r"/api/usage/tasks", h_usage_tasks)
         r.add("GET", r"/mcp", h_mcp_http)
         r.add("POST", r"/mcp", h_mcp_http)
         r.add("GET", r"/api/assistant/status", h_assistant_status)
@@ -1817,6 +1829,51 @@ def h_metrics_prometheus(app: App, req):
     body = prometheus_metrics(collect_metrics(app)).encode("utf-8")
     return 200, {"Content-Type": "text/plain; version=0.0.4; charset=utf-8",
                  "Cache-Control": "no-store"}, body
+
+
+def _usage_scope(app: App, req):
+    user = _auth(app, req, csrf=False)
+    raw = str(req.query.get("user_id") or "").strip()
+    if raw:
+        try:
+            selected = int(raw)
+        except ValueError as exc:
+            raise HTTPError(400, "user_id 非法") from exc
+        if user["role"] != "admin" and selected != int(user["id"]):
+            raise HTTPError(403, "只能查看自己的用量")
+        return user, selected, False
+    if user["role"] == "admin":
+        return user, None, True
+    return user, int(user["id"]), False
+
+
+def _usage_days(req, default: int = 30) -> int:
+    try:
+        days = int(str(req.query.get("days") or default))
+    except ValueError as exc:
+        raise HTTPError(400, "days 非法") from exc
+    if days < 1 or days > 365:
+        raise HTTPError(400, "days 必须在 1-365 之间")
+    return days
+
+
+def h_usage_overview(app: App, req):
+    _user, user_id, all_users = _usage_scope(app, req)
+    return response_json(app.usage.overview(
+        days=_usage_days(req), user_id=user_id, all_users=all_users,
+        include_directory=bool(_user["role"] == "admin")))
+
+
+def h_usage_tasks(app: App, req):
+    _user, user_id, all_users = _usage_scope(app, req)
+    try:
+        page = int(str(req.query.get("page") or 1))
+        page_size = int(str(req.query.get("page_size") or 20))
+    except ValueError as exc:
+        raise HTTPError(400, "分页参数非法") from exc
+    return response_json(app.usage.task_rows(
+        days=_usage_days(req), user_id=user_id, all_users=all_users,
+        page=page, page_size=page_size))
 
 
 def h_stats(app: App, req):
