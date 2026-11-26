@@ -206,7 +206,7 @@ def policy_from_config(config: Any, *, max_key: str = "model_request_max_bytes")
     max_bytes = DEFAULT_MAX_BYTES
     if config is not None:
         try:
-            allow = bool(config.get("model_discovery_allow_private", False))
+            allow = bool(config.get("model_discovery_allow_private", True))
             max_bytes = max(1024, int(config.get(max_key, DEFAULT_MAX_BYTES)))
         except (TypeError, ValueError):
             pass

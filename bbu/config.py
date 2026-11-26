@@ -61,7 +61,7 @@ DEFAULTS: dict[str, Any] = {
     "skill_manifest_mode": "shadow",
     "model_schema_mode": "auto",
     "model_capability_cache_hours": 24,
-    "model_discovery_allow_private": False,
+    "model_discovery_allow_private": True,
     "model_request_max_bytes": 1048576,
     "rule_scope_v2": "shadow",
     "agent_engine_mode": "shadow",

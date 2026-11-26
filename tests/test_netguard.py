@@ -20,11 +20,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
 from bbu.ai import AIError, _get_json, list_models  # noqa: E402
+from bbu.config import DEFAULTS  # noqa: E402
 from bbu.netguard import (  # noqa: E402
     OutboundContentTypeError,
     OutboundPolicy,
     OutboundPolicyError,
     OutboundResponseTooLarge,
+    policy_from_config,
     read_limited,
     validate_outbound_url,
 )
@@ -157,6 +159,27 @@ class NetGuardTests(unittest.TestCase):
         self.assertTrue(validate_outbound_url(
             f"http://127.0.0.1:{self.port}/v1/models",
             OutboundPolicy(allow_private=True)))
+
+    def test_platform_config_default_is_allow_private(self):
+        self.assertIs(DEFAULTS["model_discovery_allow_private"], True)
+
+    def test_config_default_allows_private_model_endpoint(self):
+        policy = policy_from_config({})
+        self.assertTrue(policy.allow_private)
+        self.assertTrue(validate_outbound_url(
+            f"http://127.0.0.1:{self.port}/v1/models", policy))
+
+    def test_config_can_still_explicitly_block_private(self):
+        policy = policy_from_config({"model_discovery_allow_private": False})
+        self.assertFalse(policy.allow_private)
+        with self.assertRaises(OutboundPolicyError):
+            validate_outbound_url(f"http://127.0.0.1:{self.port}/v1/models", policy)
+
+    def test_config_default_still_blocks_metadata_and_link_local(self):
+        policy = policy_from_config({})
+        for url in ("http://169.254.169.254/latest/meta-data", "http://[fe80::1]/"):
+            with self.assertRaises(OutboundPolicyError):
+                validate_outbound_url(url, policy)
 
     def test_metadata_and_link_local_never_allowed(self):
         for url in ("http://169.254.169.254/latest/meta-data",

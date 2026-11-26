@@ -3235,7 +3235,7 @@ def h_model_test(app: App, req, model_id: str):
         raise HTTPError(400, str(exc)) from exc
     model["roles"] = _loads(row["roles"], [])
     model["extra"] = _loads(row["extra"], {})
-    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", False))
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
     result = app.gateway.test_model(model)
     return response_json(result)
 
@@ -3245,7 +3245,7 @@ def h_model_capabilities(app: App, req, model_id: str):
     row = _model_row(app, int(model_id))
     model = dict(row)
     model["extra"] = _loads(row.get("extra"), {})
-    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", False))
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"]) if row.get("api_key") else ""
     except ValueError as exc:
@@ -3304,7 +3304,7 @@ def h_model_discover(app: App, req):
     model = {
         "provider": provider, "base_url": base_url, "api_key": api_key,
         "extra": extra, "timeout_sec": timeout_sec,
-        "allow_private": bool(app.config.get("model_discovery_allow_private", False)),
+        "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
     }
     try:
         names = list_models(model, timeout=timeout_sec)
@@ -3359,7 +3359,7 @@ def h_model_test_draft(app: App, req):
         "enabled": 1,
         "priority": payload["priority"],
         "extra": _loads(payload["extra"], {}),
-        "allow_private": bool(app.config.get("model_discovery_allow_private", False)),
+        "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
     }
     try:
         if payload["provider"] == "mock":
@@ -3750,7 +3750,7 @@ def h_profile_model_key_test(app: App, req):
     model = dict(row)
     model["roles"] = ["default"]
     model["extra"] = _loads(row.get("extra"), {}) or {}
-    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", False))
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"])
     except ValueError as exc:

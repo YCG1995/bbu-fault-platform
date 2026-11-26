@@ -369,7 +369,7 @@ class AIGateway:
             row["source"] = "admin"
             row["personal"] = False
             row["allow_private"] = (
-                bool(self.config.get("model_discovery_allow_private", False))
+                bool(self.config.get("model_discovery_allow_private", True))
                 if self.config is not None else True)
         return rows
 
@@ -391,7 +391,7 @@ class AIGateway:
             "source": "personal",
             "personal": True,
             "allow_private": (
-                bool(self.config.get("model_discovery_allow_private", False))
+                bool(self.config.get("model_discovery_allow_private", True))
                 if self.config is not None else True),
         })
         try:
