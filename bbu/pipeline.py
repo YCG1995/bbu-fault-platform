@@ -89,7 +89,8 @@ CONF_RANK = {"low": 1, "medium": 2, "high": 3}
 class TaskPipeline:
     def __init__(self, db: Database, config: Any, registry: SkillRegistry,
                  gateway: AIGateway, runner: SkillRunner,
-                 experiences: ExperienceStore | None = None) -> None:
+                 experiences: ExperienceStore | None = None,
+                 traces: Any = None) -> None:
         self.db = db
         self.config = config
         self.registry = registry
@@ -97,6 +98,7 @@ class TaskPipeline:
         self.runner = runner
         self.matcher = Matcher(registry)
         self.experiences = experiences or ExperienceStore(db)
+        self.traces = traces
         self.egress = DataEgressPolicy.for_diagnostic(config)
         self.evidence_store = EvidenceStore(db)
         self.tools = ToolPolicy(db, config)
@@ -132,24 +134,65 @@ class TaskPipeline:
             "UPDATE tasks SET stage=?, progress=? WHERE id=?",
             (stage, progress, task["id"]))
         self._emit(task["id"], level, message, stage, {"progress": progress})
+        trace = task.get("_trace")
+        if trace:
+            trace.append("stage", phase=stage, status="running", progress=int(progress),
+                         message=message, level=level)
         task["stage"] = stage
         task["progress"] = progress
 
     # ---------- 主流程 ----------
     def run(self, task_id: str, cancel_event: threading.Event) -> dict[str, Any]:
         # 诊断使用任务提交者的个人模型配置；未配置时网关自动回退管理员默认模型。
-        row = self.db.one("SELECT user_id FROM tasks WHERE id=?", (task_id,))
-        previous = self.gateway.set_user((row or {}).get("user_id") or 0)
+        row = self.db.one("SELECT user_id,title,mode,description FROM tasks WHERE id=?", (task_id,)) or {}
+        previous = self.gateway.set_user(row.get("user_id") or 0)
+        trace = None
         try:
-            return self._run_task(task_id, cancel_event)
+            if self.traces:
+                trace = self.traces.start(
+                    kind="diagnosis", ref_id=task_id, user_id=int(row.get("user_id") or 0),
+                    meta={"title": row.get("title") or "", "mode": row.get("mode") or "",
+                          "description_chars": len(row.get("description") or ""),
+                          "trigger": "worker"})
+            return self._run_task(task_id, cancel_event, trace)
+        except Exception as exc:
+            if trace:
+                trace.error(phase="run", code="orchestrator_error",
+                            message=f"{type(exc).__name__}: {exc}", exc=exc,
+                            retryable=True)
+                trace.status = "failed"
+            raise
         finally:
+            if trace:
+                latest = self.db.one("SELECT status,error FROM tasks WHERE id=?", (task_id,)) or {}
+                status = str(latest.get("status") or "")
+                if trace.status == "failed":
+                    trace.finish("failed", error_code="orchestrator_error",
+                                 error_summary=str(latest.get("error") or "任务异常中断"))
+                elif status == "done":
+                    trace.finish("success")
+                elif status == "needs_data":
+                    trace.finish("needs_data", error_code="needs_data",
+                                 error_summary=str(latest.get("error") or "需要补充数据"))
+                elif status == "cancelled":
+                    trace.finish("cancelled", error_code="cancelled",
+                                 error_summary="用户取消")
+                elif status == "failed":
+                    trace.finish("failed", error_code="task_failed",
+                                 error_summary=str(latest.get("error") or "任务失败"))
+                else:
+                    trace.finish("failed", error_code="incomplete",
+                                 error_summary="任务未正常结束")
             self.gateway.set_user(previous)
 
-    def _run_task(self, task_id: str, cancel_event: threading.Event) -> dict[str, Any]:
+    def _run_task(self, task_id: str, cancel_event: threading.Event,
+                  trace: Any = None) -> dict[str, Any]:
         started = time.time()
         task = self.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
         if not task:
             raise RuntimeError(f"任务不存在: {task_id}")
+        if trace:
+            task["_trace"] = trace
         task["username"] = (self.db.one(
             "SELECT username FROM users WHERE id=?", (task["user_id"],)) or {}).get("username")
         task_dir = self.config.data_dir / "tasks" / task_id
@@ -633,13 +676,19 @@ class TaskPipeline:
                              safe_payload["catalog"], safe_payload["experiences"],
                              mode, max_skills, max_steps),
                 json_schema=PLAN_SCHEMA, purpose="plan", budget=budget,
-                model_override=task.get("model_override"))
+                model_override=task.get("model_override"),
+                trace=task.get("_trace"))
             meta["llm_used"] = True
             meta["model"] = result.model_name
             models_used.add(result.model_name)
             plan, errors, warnings = normalize_plan(
                 result.data, catalog, self.config, mode, source="ai", replan=False)
             meta["notes"].extend(warnings)
+            if task.get("_trace"):
+                task["_trace"].validation(phase="planning", name="plan_normalize",
+                                           ok=not errors, errors=errors[:20],
+                                           details={"warnings": warnings[:20],
+                                                    "summary": plan.get("summary")})
             if errors:
                 meta["notes"].extend(errors)
                 self._emit(task["id"], "warning",
@@ -847,13 +896,30 @@ class TaskPipeline:
             except Exception as exc:  # noqa: BLE001 - 审批查询失败按无审批处理
                 self._emit(task["id"], "warning", f"工具审批查询失败：{exc}", stage)
             tool_key = f"{task['id']}-{step_id}-{skill.name}-{time.time_ns()}"
+            trace = task.get("_trace")
+            if trace:
+                trace.tool_call(
+                    phase=stage, step_id=step_id, tool=skill.name, version=skill.version or "",
+                    arguments={"inputs": [str(x) for x in inputs], "description": task.get("description") or "",
+                               "score": cand.get("score"), "plan_step": step_id,
+                               "approval_id": approval_id},
+                    decision={"approval_id": approval_id, "source": cand.get("source") or "plan"},
+                    sandbox={"kind": "subprocess", "cwd": str(skill.path),
+                             "timeout_sec": self.config.get("skill_timeout_sec", 120)})
             self._session_note(task["id"], "tool_started", {
                 "state": "fanout", "skill": skill.name, "plan_step": step_id,
                 "score": cand["score"], "approval_id": approval_id,
             }, f"tool-start-{tool_key}")
-            res = self.runner.run(skill, inputs, task["description"], out,
-                                  cancel_event=cancel_event, task_id=task["id"],
-                                  actor_role=role, approval_id=approval_id)
+            try:
+                res = self.runner.run(skill, inputs, task["description"], out,
+                                      cancel_event=cancel_event, task_id=task["id"],
+                                      actor_role=role, approval_id=approval_id)
+            except Exception as exc:
+                if trace:
+                    trace.error(phase=stage, step_id=step_id, code="skill_runner_error",
+                                message=f"{skill.name}: {exc}", exc=exc, retryable=True,
+                                details={"tool": skill.name, "tool_key": tool_key})
+                raise
             res["skill_name"] = skill.name
             res["skill_title"] = skill.title
             res["score"] = cand["score"]
@@ -863,6 +929,25 @@ class TaskPipeline:
                 task["id"], skill.name, skill.version or "", res.get("evidence") or [],
                 source_root=out)
             self._persist_skill(task["id"], res, skill)
+            if trace:
+                trace.tool_result(
+                    phase=stage, step_id=step_id, tool=skill.name,
+                    version=skill.version or "", tool_call_id=res.get("tool_call_id") or "",
+                    status=str(res.get("status") or ("done" if res.get("ok") else "failed")),
+                    exit_code=res.get("exit_code"),
+                    duration_ms=int(res.get("duration_ms") or 0),
+                    stdout=str(res.get("stdout_tail") or ""),
+                    stderr=str(res.get("stderr_tail") or ""),
+                    error=str(res.get("error") or ""),
+                    artifacts=res.get("artifacts"),
+                    result={"ok": res.get("ok"), "status": res.get("status"),
+                            "primary": res.get("primary"),
+                            "root_cause": res.get("root_cause"),
+                            "evidence_count": len(res.get("evidence") or []),
+                            "limitations": (res.get("limitations") or [])[:10],
+                            "summary": res.get("summary"),
+                            "verdict": res.get("verdict"),
+                            "reports": res.get("reports")})
             self._session_note(task["id"], "tool_finished", {
                 "state": "fanout", "skill": skill.name, "plan_step": step_id,
                 "status": res.get("status") or ("done" if res.get("ok") else "failed"),
@@ -995,11 +1080,17 @@ class TaskPipeline:
                                executed_summary, catalog, experiences,
                                compact_plan(plan), max_new, max_steps),
                 json_schema=PLAN_SCHEMA, purpose="replan", budget=budget,
-                model_override=task.get("model_override"))
+                model_override=task.get("model_override"),
+                trace=task.get("_trace"))
             models_used.add(result.model_name)
             new_plan, errors, warnings = normalize_plan(
                 result.data, catalog, self.config, mode, executed=executed,
                 source="ai", replan=True, allow_empty=True)
+            if task.get("_trace"):
+                task["_trace"].validation(phase="replanning", name="replan_normalize",
+                                           ok=not errors, errors=errors[:20],
+                                           details={"summary": new_plan.get("summary"),
+                                                    "steps": new_plan.get("steps")})
             if errors:
                 self._emit(task["id"], "warning",
                            "补规划未通过校验，不再追加：" + "；".join(errors[:3]), "replanning")
@@ -1156,10 +1247,17 @@ class TaskPipeline:
                     "arbiter", ARBITER_SYSTEM,
                     arbiter_user(safe_payload["description"], safe_payload["candidates"]),
                     json_schema=ARBITER_SCHEMA, purpose="adjudicate", budget=budget,
-                    model_override=task.get("model_override"))
+                    model_override=task.get("model_override"),
+                    trace=task.get("_trace"))
                 llm_used = True
                 models_used.add(result.model_name)
                 data = result.data or {}
+                if task.get("_trace"):
+                    task["_trace"].validation(phase="arbitration", name="arbiter_choice",
+                                               ok=bool(data.get("decision")),
+                                               errors=[] if data.get("decision") else ["模型未给出 decision"],
+                                               details={"decision": data.get("decision"),
+                                                        "chosen_skill": data.get("chosen_skill")})
                 decision = data.get("decision")
                 if decision == "choose":
                     picked = next((r for r in matched if r["skill_name"] == data.get("chosen_skill")), None)
@@ -1285,19 +1383,32 @@ class TaskPipeline:
                 result = self.gateway.complete(
                     "writer", REPORT_SYSTEM, report_user(safe_payload["facts"], safe_payload["evidence"]),
                     json_schema=REPORT_SCHEMA, purpose="report", budget=budget,
-                    model_override=task.get("model_override"))
+                    model_override=task.get("model_override"),
+                    trace=task.get("_trace"))
                 models_used.add(result.model_name)
                 data = result.data or {}
                 bad = validate_citations(
                     (data.get("headline") or "") + "\n" + (data.get("analysis") or ""),
                     len(evidence))
                 if bad:
+                    if task.get("_trace"):
+                        task["_trace"].validation(phase="reporting", name="report_citations",
+                                                   ok=False, errors=bad[:20],
+                                                   details={"headline": data.get("headline"),
+                                                            "analysis": data.get("analysis")})
                     self._emit(task["id"], "warning",
                                "报告研判引用不存在的证据，已回退确定性模板：" + "；".join(bad[:3]),
                                "reporting")
                 else:
                     narrative_check = validate_narrative(
                         data, claims, evidence=(chosen or {}).get("evidence") or [])
+                    if task.get("_trace"):
+                        task["_trace"].validation(
+                            phase="reporting", name="report_narrative",
+                            ok=bool(narrative_check.get("ok")),
+                            errors=(narrative_check.get("errors") or [])[:20],
+                            details={"warnings": (narrative_check.get("warnings") or [])[:20],
+                                     "claims": len(claims or [])})
                     if narrative_check.get("ok"):
                         narrative = data
                     else:
@@ -1344,6 +1455,10 @@ class TaskPipeline:
                     reason: str, inventory: dict[str, Any],
                     routing: dict[str, Any] | None = None,
                     plan: dict[str, Any] | None = None) -> dict[str, Any]:
+        trace = task.get("_trace")
+        if trace:
+            trace.append("decision", status="needs_data", phase="arbitration",
+                         reason=reason, missing_info=missing[:20])
         arbitration = {
             "status": "needs_data",
             "chosen_skill": "",
@@ -1390,6 +1505,9 @@ class TaskPipeline:
         return result
 
     def _finish_cancelled(self, task, task_dir, results=None) -> dict[str, Any]:
+        trace = task.get("_trace")
+        if trace:
+            trace.append("decision", status="cancelled", phase="run", reason="用户取消")
         self.db.execute(
             "UPDATE tasks SET status='cancelled', stage='done', progress=100, finished_at=?, error=? WHERE id=?",
             (iso_now(), "用户取消", task["id"]))
@@ -1533,6 +1651,9 @@ class TaskPipeline:
                                f"hyp-{hid}-{status}-{digest}")
 
     def _fail(self, task, task_dir, error: str, stage_times, budget) -> dict[str, Any]:
+        trace = task.get("_trace")
+        if trace:
+            trace.error(phase="run", code="task_failed", message=error, retryable=False)
         stats = self._stats(time.time(), stage_times, budget, set())
         self.db.execute(
             "UPDATE tasks SET status='failed', stage='done', progress=100, finished_at=?, "

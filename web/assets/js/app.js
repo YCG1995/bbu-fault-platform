@@ -8,6 +8,7 @@ import { renderTaskDetail } from './page_task_detail.js';
 import { renderSkills } from './page_skills.js';
 import { renderWorkshop } from './page_workshop.js';
 import { renderModels, renderUsers, renderAudit, renderSystem } from './page_admin.js';
+import { renderTraceDetail, renderTraces } from './page_traces.js';
 import { renderCases, renderCaseDetail } from './page_cases.js';
 import { openPersonalModelModal } from './personal_model.js';
 import { mountAssistant, unmountAssistant } from './assistant.js';
@@ -25,6 +26,7 @@ const ADMIN_NAV = [
   { href: '#/models', label: '模型接入', icon: 'cpu' },
   { href: '#/users', label: '用户管理', icon: 'users' },
   { href: '#/audit', label: '审计日志', icon: 'shield' },
+  { href: '#/traces', label: '执行轨迹', icon: 'history' },
 ];
 
 let loginRoot = null;
@@ -777,6 +779,10 @@ function route() {
   if (path === '#/models') return state.user.role === 'admin' ? renderModels() : denied();
   if (path === '#/users') return state.user.role === 'admin' ? renderUsers() : denied();
   if (path === '#/audit') return state.user.role === 'admin' ? renderAudit() : denied();
+  if (path === '#/traces') return state.user.role === 'admin' ? renderTraces() : denied();
+  const traceMatch = path.match(/^#\/traces\/([^/]+)$/);
+  if (traceMatch) return state.user.role === 'admin'
+    ? renderTraceDetail(decodeURIComponent(traceMatch[1])) : denied();
   if (path === '#/system') return renderSystem();
   location.hash = '#/dashboard';
 }

@@ -1,6 +1,6 @@
 # BBU FaultScope · BBU 故障诊断平台
 
-面向内网 BBU / ITBBU / SDR 现场故障的**自包含诊断平台**：上传故障描述与日志包，AI 先基于描述、日志结构和技能目录生成动态波次计划，技能按证据门槛并行执行；证据不足时最多补规划一次，随后仲裁并生成可交付的 HTML/Markdown 报告。
+面向内网 BBU / ITBBU / SDR 现场故障的**自包含诊断平台**：上传故障描述与日志包，AI 先基于描述、日志结构和技能目录生成动态波次计划，技能按证据门槛并行执行；也支持只执行一个指定技能。证据不足时最多补规划一次，随后仲裁并生成可交付的 HTML/Markdown 报告。
 
 ## 核心能力
 
@@ -20,6 +20,17 @@
 - **平台助手与 MCP Server**：所有登录用户可使用右下角悬浮助手查平台文档、自己的通知/任务事件/外部 IM；管理员额外拥有系统状态、备份/空间、升级/回滚、用户/模型/通知配置等受控运维能力。同一工具层通过 `POST /mcp` 暴露为 MCP Server，每个账号使用独立 Bearer Token，默认只接受 loopback。
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
+
+## 1.22.0 指定技能、全量证据与执行轨迹
+
+本版本补齐 P1–P3：指定技能诊断、全量证据聚合与执行轨迹，并加固归档与复杂规则回归；数据库 schema 从 18 升到 20。
+
+- **P1 指定技能**：诊断模式改为快速定位 / 深度分析 / 指定技能；指定技能模式只执行一个 ready/degraded 技能，不触发 AI 扩选与补规划。新建任务页、技能卡片和“系统信息 → 任务空间”均可直接发起。
+- **P2 全量证据**：任务详情从证据库分页拉全量证据，按“根因 + 技能 + 规则”聚合；支持搜索、技能/根因筛选、查看全部与原文展开；新增根因决策卡，明确必要证据、反证、近邻鉴别和“缺扫描不等于反证”。
+- **P3 工具与回归**：助手/MCP 新增 `create_skill_diagnosis`，复用来源任务日志创建指定技能任务，MCP 写模式要求 `confirm=true`；补齐归档安全矩阵、时间窗/多站点/数值边界/CSV/XLSX/多根因冲突回归。
+- **执行轨迹**：诊断与工坊记录模型、工具、校验、计划和错误事件；管理员可在“执行轨迹”与任务详情“执行过程”查看。轨迹仅管理员可见。
+- **修复**：运行配置 enum 下拉中文标签；助手输入框移除多余 placeholder；xlsx 绝对 rels 路径导致的整表漏检；归档绝对路径成员与损坏归档处理。
+- 验证：单元/集成 **217 passed**、REST 冒烟 **150/150**、1.21.0→1.22.0 离线升级通过。详见 `docs/版本说明-1.22.0.md`。
 
 ## 1.21.0 管理与诊断体验 / 工坊重构 / 证据增强
 
@@ -228,13 +239,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.21.0-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.22.0-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.21.0-offline.tar.gz
+tar -xzf bbu-fault-platform-1.22.0-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

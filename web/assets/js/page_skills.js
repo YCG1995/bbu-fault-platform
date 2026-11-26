@@ -72,6 +72,7 @@ export async function renderSkills() {
         </div>
         ${reasons.length ? `<div class="alert ${s.status === 'incompatible' ? 'danger' : 'warn'}" style="padding:8px 10px;font-size:11px">${icon('alert')}<div>${esc(reasons[0])}</div></div>` : ''}
         <div class="actions">
+          ${['ready', 'degraded'].includes(s.status) ? `<button class="btn btn-sm btn-primary" data-act="diagnose" data-name="${esc(s.name)}">${icon('play')}用此技能诊断</button>` : ''}
           <button class="btn btn-sm" data-act="detail" data-name="${esc(s.name)}">${icon('eye')}详情</button>
           ${s.status !== 'incompatible' && isAdmin ? `<button class="btn btn-sm ${s.status === 'disabled' ? '' : 'btn-danger'}" data-act="toggle" data-name="${esc(s.name)}" data-status="${s.status}">${s.status === 'disabled' ? '启用' : '停用'}</button>` : ''}
           ${isAdmin ? `<button class="btn btn-sm" data-act="channel" data-name="${esc(s.name)}" data-channel="${s.channel || 'stable'}">${s.channel === 'canary' ? '转稳定' : '灰度'}</button>` : ''}
@@ -101,6 +102,10 @@ export async function renderSkills() {
     },
     import: () => openImportModal(() => renderSkills()),
     detail: (el) => openSkillDrawer(el.dataset.name, () => renderSkills()),
+    diagnose: (el) => {
+      try { sessionStorage.setItem('bbu.diagnose_skill', el.dataset.name); } catch { /* ignore */ }
+      location.hash = '#/tasks/new';
+    },
     channel: async (el) => {
       const name = el.dataset.name;
       const next = el.dataset.channel === 'canary' ? 'stable' : 'canary';

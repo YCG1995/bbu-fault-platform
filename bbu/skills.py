@@ -622,6 +622,7 @@ class SkillRunner:
                               int(self.config.get("skill_timeout_sec", 900)))
 
         def _finish(res: dict[str, Any], status: str, error: str = "") -> dict[str, Any]:
+            res.setdefault("artifacts", {"stdout": str(stdout_path), "stderr": str(stderr_path)})
             if self.policy and call_id:
                 resource = {"duration_ms": res.get("duration_ms"),
                             "output_bytes": _file_size(stdout_path) + _file_size(stderr_path),
@@ -659,29 +660,36 @@ class SkillRunner:
         summary = read_json(out_dir / "run-summary.json", {}) or {}
         if cancelled:
             return _finish({"ok": False, "status": "cancelled", "error": "用户取消",
-                            "duration_ms": duration_ms, "summary": summary}, "cancelled")
+                            "duration_ms": duration_ms, "summary": summary, "exit_code": None,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "cancelled")
         if timed_out:
             return _finish({"ok": False, "status": "timeout",
                             "error": f"子 Skill 执行超过 {timeout}s（日志见 {stderr_path.name}）",
-                            "duration_ms": duration_ms, "summary": summary,
-                            "stderr_tail": _tail(stderr_path)}, "timeout")
+                            "duration_ms": duration_ms, "summary": summary, "exit_code": None,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "timeout")
         if manifest is not None:
             from .sandbox import output_limit_bytes
             if _file_size(stdout_path) + _file_size(stderr_path) > output_limit_bytes(self.config):
                 return _finish({"ok": False, "status": "output_limited",
                                 "error": "子 Skill 输出超过沙箱上限",
-                                "duration_ms": duration_ms, "summary": summary}, "failed")
+                                "duration_ms": duration_ms, "summary": summary,
+                                "exit_code": proc.returncode,
+                                "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "failed")
         if proc.returncode != 0 or not summary.get("ok"):
             return _finish({"ok": False, "status": "failed",
                             "error": (summary.get("error") or f"退出码 {proc.returncode}"),
                             "duration_ms": duration_ms, "summary": summary,
-                            "stderr_tail": _tail(stderr_path)}, "failed")
+                            "exit_code": proc.returncode,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "failed")
         evidence = read_json(out_dir / "evidence.json", {}) or {}
         report_md = out_dir / "report.md"
         report_html = out_dir / "report.html"
         normalized = self._normalize(skill, summary, evidence, report_md, report_html,
                                      duration_ms)
         normalized["sandbox"] = sandbox_meta
+        normalized["exit_code"] = proc.returncode
+        normalized["stdout_tail"] = _tail(stdout_path)
+        normalized["stderr_tail"] = _tail(stderr_path)
         if decision:
             normalized["tool_decision"] = decision.get("decision")
         return _finish(normalized, "done")
@@ -848,7 +856,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-def _tail(path: Path, limit: int = 1200) -> str:
+def _tail(path: Path, limit: int = 4000) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
         return text[-limit:]

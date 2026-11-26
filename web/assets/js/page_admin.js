@@ -1104,13 +1104,15 @@ function runtimeFieldHtml(item) {
       <div class="help">默认 ${item.value ? '开启' : '关闭'} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
   }
   if (item.type === 'enum') {
-    const options = (item.choices || []).map((value) =>
-      `<option value="${esc(value)}" ${String(item.value) === String(value) ? 'selected' : ''}>${esc(value)}</option>`).join('');
+    const options = (item.choices || []).map((value) => {
+      const label = (item.choice_labels || {})[value] || value;
+      return `<option value="${esc(value)}" ${String(item.value) === String(value) ? 'selected' : ''}>${esc(label)}</option>`;
+    }).join('');
     return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
         ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
       <select class="input" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
         data-runtime-type="enum" ${disabled}>${options}</select>
-      <div class="help">默认 ${esc(item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+      <div class="help">默认 ${esc((item.choice_labels || {})[item.default] || item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
   }
   const step = item.type === 'float' ? '0.1' : '1';
   return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
@@ -1304,6 +1306,11 @@ async function renderStoragePanel(panel) {
   if (!panel) return;
   if (storagePollTimer) { clearInterval(storagePollTimer); storagePollTimer = null; }
   let data;
+  let skills = [];
+  try {
+    const skillData = await api('/api/skills');
+    skills = (skillData.items || []).filter((s) => ['ready', 'degraded'].includes(s.status));
+  } catch { /* 技能列表失败不阻塞空间统计 */ }
   try { data = await api('/api/storage/overview'); }
   catch (err) {
     panel.innerHTML = `<div class="card"><div class="card-head"><h2>任务空间</h2></div>
@@ -1344,6 +1351,16 @@ async function renderStoragePanel(panel) {
         <button class="btn" id="storage-refresh">${icon('refresh')}重新统计</button>
       </div></div>
     <div class="card-body">
+      <div class="between" style="gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;background:#f8fafc;border:1px solid #e8edf4;border-radius:8px">
+        <div><strong>按技能诊断</strong><div class="tiny muted">选择可用技能后，直接进入只执行该技能的诊断任务</div></div>
+        <div class="inline" style="gap:8px;flex-wrap:wrap">
+          <select class="select" id="storage-skill" style="min-width:220px" ${skills.length ? '' : 'disabled'}>
+            <option value="">${skills.length ? '选择技能' : '暂无可用技能'}</option>
+            ${skills.map((s) => `<option value="${esc(s.name)}">${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
+          </select>
+          <button class="btn btn-primary" id="storage-skill-diagnose" ${skills.length ? '' : 'disabled'}>${icon('play')}按技能诊断</button>
+        </div>
+      </div>
       <div class="grid grid-4" style="margin-bottom:14px">
         <div class="card stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
         <div class="card stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
@@ -1367,6 +1384,12 @@ async function renderStoragePanel(panel) {
     panel.querySelectorAll('.storage-check:not(:disabled)').forEach((c) => { c.checked = checkAll.checked; });
   });
   panel.querySelector('#storage-refresh').addEventListener('click', () => renderStoragePanel(panel));
+  panel.querySelector('#storage-skill-diagnose')?.addEventListener('click', () => {
+    const name = panel.querySelector('#storage-skill')?.value || '';
+    if (!name) { toast('请先选择一个可用技能', 'warn'); return; }
+    try { sessionStorage.setItem('bbu.diagnose_skill', name); } catch { /* ignore */ }
+    location.hash = '#/tasks/new';
+  });
   panel.querySelector('#storage-release-selected').addEventListener('click', () => {
     const ids = [...panel.querySelectorAll('.storage-check:checked')].map((c) => c.dataset.task);
     releaseTasks(panel, ids, panel.querySelector('#storage-release-mode').value);

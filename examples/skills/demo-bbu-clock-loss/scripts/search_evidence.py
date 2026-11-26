@@ -234,9 +234,13 @@ def iter_xlsx_rows(path):
                 if local(el.tag) == "sheet":
                     rid = el.get(
                         "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-                    tgt = rels.get(rid, "")
+                    tgt = rels.get(rid, "").replace("\\", "/")
                     if tgt:
-                        tgt = tgt if tgt.startswith("xl/") else "xl/" + tgt.lstrip("/")
+                        # OOXML 允许 Target 为 "/xl/worksheets/sheet1.xml"（绝对包路径）。
+                        # 先去掉前导 "/"，再补 xl/，否则会拼出 xl/xl/... 导致整表漏检。
+                        tgt = tgt.lstrip("/")
+                        if not tgt.startswith("xl/"):
+                            tgt = "xl/" + tgt
                         sheets.append((el.get("name", "sheet"), tgt))
         if not sheets:  # rels 缺失兜底：按 sheetN.xml 顺序
             sheets = [(Path(n).stem, n) for n in sorted(names)

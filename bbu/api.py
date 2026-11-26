@@ -66,6 +66,7 @@ from .security import (ROLE_RANK, SESSION_COOKIE, SecretBox, bootstrap_admin, ch
 from .skills import SkillRegistry, SkillRunner, parse_frontmatter
 from .session import DiagnosticSession, RevisionConflict
 from .tool_contract import ToolPolicy
+from .trace import TraceStore
 from .storage import save_upload
 from .util import (CST, iso_now, new_id, read_json, safe_filename, sha256_file, truncate,
                    unique_path, within_directory, write_json)
@@ -291,14 +292,21 @@ class App:
         self.tools = ToolPolicy(self.db, config)
         self.runner = SkillRunner(config, db=self.db, policy=self.tools)
         self.gateway = AIGateway(self.db, config, secret_box=self.secret_box)
+        self.traces = TraceStore(self.db, config)
+        try:
+            self.traces.cleanup()
+        except Exception:
+            pass
         self.workshop = WorkshopService(self.db, config, self.registry, self.gateway)
-        self.workshop_jobs = WorkshopJobService(self.db, config, self.workshop, self.gateway)
+        self.workshop_jobs = WorkshopJobService(self.db, config, self.workshop, self.gateway,
+                                                traces=self.traces)
         self.storage = TaskStorageService(self.db, config)
         self.backups = BackupManager(self.db, config)
         self.learning = LearningService(self.db, config, self.registry, self.workshop)
         self.pipeline = TaskPipeline(self.db, config, self.registry,
                                      self.gateway, self.runner,
-                                     experiences=self.learning.experiences)
+                                     experiences=self.learning.experiences,
+                                     traces=self.traces)
         self.evidence_store = EvidenceStore(self.db)
         self.assistant = AssistantService(self)
         self.mcp = MCPService(self, self.assistant)
@@ -439,6 +447,10 @@ class App:
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest/sign",
               h_skill_manifest_sign)
         r.add("GET", r"/api/tool-calls", h_tool_calls)
+        r.add("GET", r"/api/traces", h_traces)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/summary", h_trace_summary)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/events", h_trace_events)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/download", h_trace_download)
         r.add("GET", r"/api/tool-approvals", h_tool_approvals)
         r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/tool-approvals",
               h_tool_approval_create)
@@ -791,7 +803,8 @@ def _draft_files(row: dict) -> list[dict]:
 def _draft_public(row: dict) -> dict:
     return {
         "id": row["id"], "title": row["title"], "description": row["description"],
-        "mode": row["mode"], "model_override": row.get("model_override"),
+        "mode": row["mode"], "skill_name": row.get("skill_name") or "",
+        "model_override": row.get("model_override"),
         "include_canary": bool(row.get("include_canary")),
         "files": [{k: f.get(k) for k in ("id", "name", "size", "sha256")}
                   for f in _draft_files(row)],
@@ -816,7 +829,15 @@ def _draft_payload(app: App, req) -> dict:
     description = str(data.get("description") or "").strip()
     if len(description) > 20000:
         raise HTTPError(400, "故障描述过长（上限 20000 字）")
-    mode = data.get("mode") if data.get("mode") in ("fast", "deep") else "fast"
+    mode = data.get("mode") if data.get("mode") in ("fast", "deep", "skill") else "fast"
+    skill_name = str(data.get("skill_name") or "").strip()
+    if mode != "skill":
+        skill_name = ""
+    elif skill_name:
+        available = {r["name"] for r in app.db.all(
+            "SELECT name FROM skills WHERE status IN ('ready','degraded')")}
+        if skill_name not in available:
+            raise HTTPError(400, "指定技能不存在或不可用")
     model_override = data.get("model_override")
     if model_override in ("", None):
         model_override = None
@@ -827,7 +848,8 @@ def _draft_payload(app: App, req) -> dict:
             raise HTTPError(400, "model_override 必须是整数") from exc
     include_canary = bool(data.get("include_canary")) and app and True
     return {"title": title, "description": description, "mode": mode,
-            "model_override": model_override, "include_canary": 1 if include_canary else 0}
+            "skill_name": skill_name, "model_override": model_override,
+            "include_canary": 1 if include_canary else 0}
 
 
 def h_task_draft_create(app: App, req):
@@ -836,10 +858,11 @@ def h_task_draft_create(app: App, req):
     draft_id = new_id("D")
     now = iso_now()
     app.db.execute(
-        "INSERT INTO task_drafts(id,user_id,title,description,mode,model_override,"
-        "include_canary,files_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO task_drafts(id,user_id,title,description,mode,skill_name,model_override,"
+        "include_canary,files_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (draft_id, user["id"], payload["title"], payload["description"], payload["mode"],
-         payload["model_override"], 1 if user["role"] == "admin" and payload["include_canary"] else 0,
+         payload["skill_name"], payload["model_override"],
+         1 if user["role"] == "admin" and payload["include_canary"] else 0,
          "[]", now, now))
     app.db.audit(user["id"], user["username"], "task.draft_create", draft_id, {}, req.ip)
     row = app.db.one("SELECT * FROM task_drafts WHERE id=?", (draft_id,))
@@ -851,9 +874,10 @@ def h_task_draft_update(app: App, req, draft_id: str):
     row = _task_draft_for(app, user, draft_id)
     payload = _draft_payload(app, req)
     app.db.execute(
-        "UPDATE task_drafts SET title=?,description=?,mode=?,model_override=?,include_canary=?,"
-        "updated_at=? WHERE id=?",
-        (payload["title"], payload["description"], payload["mode"], payload["model_override"],
+        "UPDATE task_drafts SET title=?,description=?,mode=?,skill_name=?,model_override=?,"
+        "include_canary=?,updated_at=? WHERE id=?",
+        (payload["title"], payload["description"], payload["mode"], payload["skill_name"],
+         payload["model_override"],
          1 if user["role"] == "admin" and payload["include_canary"] else 0,
          iso_now(), row["id"]))
     row = app.db.one("SELECT * FROM task_drafts WHERE id=?", (row["id"],))
@@ -941,16 +965,20 @@ def h_task_create(app: App, req):
     supplied_title = (fields.get("title") or "").strip()
     title = supplied_title or truncate(description.splitlines()[0], 60)
     title_source = "manual" if supplied_title else "deterministic"
-    mode = fields.get("mode") if fields.get("mode") in ("fast", "deep") else "fast"
+    mode = fields.get("mode") if fields.get("mode") in ("fast", "deep", "skill") else "fast"
     include_canary = fields.get("include_canary") in ("1", "true", "on") and user["role"] == "admin"
-    selected_skills = [x.strip() for x in str(fields.get("skill_names") or "").split(",")
-                       if x.strip()][:6]
-    if selected_skills:
+    skill_name = str(fields.get("skill_name") or "").strip()
+    if mode == "skill":
+        if not skill_name:
+            raise HTTPError(400, "指定技能模式必须选择一个技能")
         available = {r["name"] for r in app.db.all(
             "SELECT name FROM skills WHERE status IN ('ready','degraded')")}
-        missing = [x for x in selected_skills if x not in available]
-        if missing:
-            raise HTTPError(400, "指定技能不存在或不可用：" + "、".join(missing))
+        if skill_name not in available:
+            raise HTTPError(400, "指定技能不存在或不可用：" + skill_name)
+        selected_skills = [skill_name]
+    else:
+        skill_name = ""
+        selected_skills = []
     model_override = None
     if fields.get("model_id"):
         try:
@@ -994,7 +1022,7 @@ def h_task_create(app: App, req):
         (task_id, user["id"], title, description, title_source, "queued", "queued", 0, mode,
          model_override, json.dumps(inputs, ensure_ascii=False),
          json.dumps({"mode": mode, "model_override": model_override,
-                     "include_canary": include_canary,
+                     "include_canary": include_canary, "skill_name": skill_name,
                      "skill_names": selected_skills}, ensure_ascii=False), now))
     app.worker.submit(task_id)
     if draft_row:
@@ -1194,9 +1222,13 @@ def h_task_evidence(app: App, req, task_id: str):
         limit = max(1, min(1000, int(req.query.get("limit", 300))))
     except ValueError:
         limit = 300
-    items = app.evidence_store.list(task_id, limit)
+    try:
+        offset = max(0, int(req.query.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    items = app.evidence_store.list(task_id, limit, offset)
     return response_json({"items": items, "total": app.evidence_store.count(task_id),
-                          "limit": limit})
+                          "limit": limit, "offset": offset})
 
 
 def _supplement_answers(fields: dict[str, str]) -> dict[str, str]:
@@ -2399,6 +2431,40 @@ def h_skill_manifest_sign(app: App, req, name: str):
                           "signature": result.get("signature")})
 
 
+def _trace_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item.pop("trace_path_abs", None)
+    kind = str(item.get("kind") or "")
+    ref_id = str(item.get("ref_id") or "")
+    meta = item.get("meta") or {}
+    title = ""
+    if kind == "diagnosis":
+        task = app.db.one("SELECT title FROM tasks WHERE id=?", (ref_id,)) or {}
+        title = str(task.get("title") or "")
+        item["ref_url"] = f"#/tasks/{ref_id}"
+    elif kind == "workshop":
+        draft_id = str(meta.get("draft_id") or "")
+        draft = app.db.one("SELECT name FROM workshop_drafts WHERE id=?", (draft_id,)) or {}
+        title = str(draft.get("name") or "")
+        item["ref_url"] = "#/workshop"
+        item["draft_id"] = draft_id
+    item["ref_title"] = title or str(meta.get("title") or meta.get("draft_name") or "")
+    return item
+
+
+def h_traces(app: App, req):
+    _admin(app, req, csrf=False)
+    kind = str(req.query.get("kind") or "").strip()
+    ref_id = str(req.query.get("ref_id") or "").strip()
+    status = str(req.query.get("status") or "").strip()
+    try:
+        limit = max(1, min(200, int(req.query.get("limit") or 60)))
+    except ValueError:
+        limit = 60
+    rows = app.traces.list(kind=kind, ref_id=ref_id, status=status, limit=limit)
+    return response_json({"items": [_trace_public(app, row) for row in rows]})
+
+
 def h_tool_calls(app: App, req):
     user = _auth(app, req, csrf=False)
     task_id = str(req.query.get("task_id") or "").strip()
@@ -2413,6 +2479,59 @@ def h_tool_calls(app: App, req):
         raise HTTPError(400, "limit 必须是整数") from exc
     return response_json({"items": app.tools.list_calls(task_id, limit_n),
                           "mode": app.tools.mode})
+
+
+def _trace_for(app: App, run_id: str) -> dict[str, Any]:
+    run = app.traces.get(run_id)
+    if not run:
+        raise HTTPError(404, "轨迹不存在")
+    return run
+
+
+def h_trace_summary(app: App, req, run_id: str):
+    _admin(app, req, csrf=False)
+    try:
+        data = app.traces.summary(run_id)
+    except KeyError as exc:
+        raise HTTPError(404, "轨迹不存在") from exc
+    data["run"] = _trace_public(app, data["run"])
+    return response_json(data)
+
+
+def h_trace_events(app: App, req, run_id: str):
+    _admin(app, req, csrf=False)
+    try:
+        after = max(0, int(req.query.get("after") or 0))
+    except ValueError:
+        after = 0
+    try:
+        limit = max(1, min(1000, int(req.query.get("limit") or 300)))
+    except ValueError:
+        limit = 300
+    type_filter = str(req.query.get("type") or "").strip()
+    phase = str(req.query.get("phase") or "").strip()
+    only_failed = str(req.query.get("only_failed") or "") in ("1", "true", "yes")
+    try:
+        data = app.traces.events(run_id, after=after, limit=limit,
+                                 type_filter=type_filter, phase=phase,
+                                 only_failed=only_failed)
+    except KeyError as exc:
+        raise HTTPError(404, "轨迹不存在") from exc
+    data["run"] = _trace_public(app, data["run"])
+    return response_json(data)
+
+
+def h_trace_download(app: App, req, run_id: str):
+    actor = _admin(app, req, csrf=False)
+    run = _trace_for(app, run_id)
+    path = Path(str(run.get("trace_path_abs") or "")).resolve()
+    root = (Path(app.config.data_dir) / "traces").resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPError(404, "轨迹原文不存在")
+    app.db.audit(actor["id"], actor["username"], "trace.download", run_id,
+                 {"size": path.stat().st_size}, req.ip)
+    return response_file(path, "application/x-ndjson; charset=utf-8",
+                         download_name=f"{run_id}.jsonl", inline=False)
 
 
 def h_tool_approvals(app: App, req):
@@ -2668,10 +2787,23 @@ def h_workshop_logs(app: App, req, draft_id: str):
         app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
                      {"files": len(files), "async": True}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "logs", "files": len(files)})
     try:
-        draft = app.workshop.attach_logs(draft_id, payload, model_override=model_override)
+        draft = app.workshop.attach_logs(draft_id, payload, model_override=model_override,
+                                         trace=trace)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_logs_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_logs_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_logs_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_logs_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
                  {"files": len(files)}, req.ip)
     return response_json({"draft": draft})
@@ -2692,11 +2824,24 @@ def h_workshop_analyze(app: App, req, draft_id: str):
         app.db.audit(user["id"], user["username"], "workshop.analyze", draft_id,
                      {"async": True}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "analyze"})
     try:
         draft = app.workshop.analyze(
-            draft_id, model_override=int(model_override) if model_override else None)
+            draft_id, model_override=int(model_override) if model_override else None,
+            trace=trace)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_analyze_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_analyze_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_analyze_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_analyze_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.analyze", draft_id, {}, req.ip)
     return response_json({"draft": draft})
 
@@ -2717,11 +2862,24 @@ def h_workshop_refine(app: App, req, draft_id: str):
         app.db.audit(user["id"], user["username"], "workshop.refine", draft_id,
                      {"async": True}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "refine"})
     try:
         draft = app.workshop.refine(
-            draft_id, text, model_override=int(model_override) if model_override else None)
+            draft_id, text, model_override=int(model_override) if model_override else None,
+            trace=trace)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_refine_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_refine_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_refine_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_refine_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.refine", draft_id, {}, req.ip)
     return response_json({"draft": draft})
 

@@ -433,7 +433,8 @@ class WorkshopService:
 
     # ---------- 日志与 AI 起草 ----------
     def attach_logs(self, draft_id: str, files: list[dict[str, Any]], *,
-                    progress: Any = None, model_override: int | None = None) -> dict[str, Any]:
+                    progress: Any = None, model_override: int | None = None,
+                    trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
         log_dir = draft_dir / "logs"
@@ -443,10 +444,11 @@ class WorkshopService:
             shutil.move(str(src), unique_path(log_dir, src.name))
         self.db.execute("UPDATE workshop_drafts SET log_path=?, updated_at=? WHERE id=?",
                         (str(log_dir), iso_now(), draft_id))
-        return self.analyze(draft_id, progress=progress, model_override=model_override)
+        return self.analyze(draft_id, progress=progress, model_override=model_override,
+                            trace=trace)
 
     def analyze(self, draft_id: str, *, progress: Any = None,
-                model_override: int | None = None) -> dict[str, Any]:
+                model_override: int | None = None, trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         self._invalidate_build(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
@@ -474,10 +476,15 @@ class WorkshopService:
         elif not row.get("source_text"):
             raise ValueError("请先粘贴故障资料或上传日志/案例包")
         self._progress(progress, "extract", 22, "日志盘点完成，开始语义提取")
-        return self._generate(draft_id, extras, progress=progress, model_override=model_override)
+        if trace:
+            trace.append("stage", phase="extract", status="running", progress=22,
+                         message="日志盘点完成，开始语义提取")
+        return self._generate(draft_id, extras, progress=progress,
+                              model_override=model_override, trace=trace)
 
     def _generate(self, draft_id: str, extras: dict[str, Any] | None = None, *,
-                  progress: Any = None, model_override: int | None = None) -> dict[str, Any]:
+                  progress: Any = None, model_override: int | None = None,
+                  trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         self._invalidate_build(draft_id)
         source_text = str(row.get("source_text") or "").strip()
@@ -532,7 +539,7 @@ class WorkshopService:
                     json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:extract", budget=budget,
                     max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
                     model_override=model_override, stage="extract", stream=True,
-                    attempt_sink=attempt_sink)
+                    attempt_sink=attempt_sink, trace=trace)
                 spec = merge_specs(spec, result.data or {})
                 analysis["model"] = result.model_name
                 analysis["source"] = "ai"
@@ -569,7 +576,7 @@ class WorkshopService:
                     workshop_review_user(source_context, safe_spec(spec), quality),
                     json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review", budget=budget,
                     max_tokens=review_budget, temperature=0.1, model_override=model_override,
-                    stage="review", stream=True, attempt_sink=attempt_sink)
+                    stage="review", stream=True, attempt_sink=attempt_sink, trace=trace)
                 review = result.data or {}
                 analysis["review_status"] = "success"
                 quality = self._merge_review(quality, review)
@@ -582,7 +589,7 @@ class WorkshopService:
                         json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:repair", budget=budget,
                         max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
                         model_override=model_override, stage="repair", stream=True,
-                        attempt_sink=attempt_sink)
+                        attempt_sink=attempt_sink, trace=trace)
                     spec = merge_specs(spec, repair.data or {})
                     analysis["repair_status"] = "success"
                     quality = audit_spec(spec)
@@ -596,7 +603,7 @@ class WorkshopService:
                         json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review-final",
                         budget=budget, max_tokens=min(3000, review_budget),
                         temperature=0.1, model_override=model_override, stage="review-final",
-                        stream=True, attempt_sink=attempt_sink)
+                        stream=True, attempt_sink=attempt_sink, trace=trace)
                     review = result.data or {}
                     analysis["review_status"] = "success"
                     quality = self._merge_review(quality, review)
@@ -634,6 +641,15 @@ class WorkshopService:
         blocking = any(q.get("blocking") for q in quality.get("questions") or [])
         status = "needs_confirmation" if not quality["ok"] or not check["ok"] or blocking else "generated"
         last_error = "" if check["ok"] else "；".join(check.get("errors") or ["profile 校验未通过"])
+        if trace:
+            quality_errors = [str(x.get("message") or x) for x in quality.get("errors") or []]
+            trace.validation(
+                phase="check", name="workshop_profile_and_quality",
+                ok=bool(quality.get("ok")) and bool(check.get("ok")) and not blocking,
+                errors=(quality_errors + list(check.get("errors") or []))[:30],
+                details={"quality_score": quality.get("score"),
+                         "quality_ok": quality.get("ok"), "profile_ok": check.get("ok"),
+                         "blocking": blocking, "status": status})
         self.db.execute(
             "UPDATE workshop_drafts SET name=?, title=?, fault_name=?, category=?, description=?, profile_yaml=?, "
             "analysis_json=?, check_json=?, status=?, last_error=?, updated_at=? WHERE id=?",
@@ -664,7 +680,7 @@ class WorkshopService:
         return merged
 
     def refine(self, draft_id: str, text: str, *, progress: Any = None,
-               model_override: int | None = None) -> dict[str, Any]:
+               model_override: int | None = None, trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         if row["status"] == "published":
             raise ValueError("已发布草稿不可重建，请新建版本")

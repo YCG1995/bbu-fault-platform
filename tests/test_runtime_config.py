@@ -37,6 +37,17 @@ class RuntimeConfigTests(unittest.TestCase):
             self.cfg.save_runtime({"max_workers": 0})
         self.assertEqual((self.tmp / "config.json").read_text(), before)
 
+    def test_enum_items_expose_choices_and_roundtrip(self):
+        enums = ["tool_policy_mode", "tool_sandbox_mode", "agent_engine_mode",
+                 "skill_manifest_mode", "model_schema_mode"]
+        saved = self.cfg.save_runtime({k: self.cfg.get(k) for k in enums})
+        self.assertEqual({x["key"] for x in saved}, set(enums))
+        for key in enums:
+            item = next(x for x in self.cfg.runtime_items() if x["key"] == key)
+            self.assertTrue(item["choices"], key)
+            self.assertEqual(set(item["choices"]), set(item["choice_labels"]), key)
+            self.assertEqual(self.cfg.get(key), saved[[x["key"] for x in saved].index(key)]["value"])
+
     def test_environment_override_is_visible_and_not_overwritable(self):
         with patch.dict(os.environ, {"BBU_MAX_WORKERS": "9"}):
             cfg = Config(self.tmp)

@@ -155,6 +155,10 @@ EXPECTED_ROUTES = {
     "POST /api/profile/model-key/test",
     "GET /api/audit",
     "GET /api/audit/export",
+    "GET /api/traces",
+    "GET /api/traces/{run_id}/summary",
+    "GET /api/traces/{run_id}/events",
+    "GET /api/traces/{run_id}/download",
     "GET /api/tool-calls",
     "GET /api/tool-approvals",
     "POST /api/tool-approvals/{id}/decide",
@@ -591,11 +595,17 @@ def main() -> int:
         run_id = recovery["run"]["id"]
         assert recovery["run"]["before"], recovery
         hit("POST /api/tasks/{id}/recovery-runs")
-        _, observed = admin_client.json("POST", f"/api/recovery-runs/{run_id}/observe", {
-            "after": {"verdict": {"status": "matched", "root_cause_name": ""},
-                      "evidence": [{"rule_id": "E1", "file": "after-clock.log",
-                                    "line_no": 3, "text": "clock stable"}]}})
+        _, observed = admin_client.multipart(f"/api/recovery-runs/{run_id}/observe", {
+            "after": json.dumps({"verdict": {"status": "matched", "root_cause_name": ""},
+                                 "evidence": [{"rule_id": "E1", "file": "after-clock.log",
+                                               "line_no": 3}]}, ensure_ascii=False),
+        }, [("file", "after-clock.log", b"clock stable\nPLL locked\n", "text/plain")],
+            expected=200)
         assert observed["run"]["comparison"]["status"] == "recovered", observed
+        uploaded = observed["run"]["after"]["evidence"][0]
+        assert uploaded["uploaded"] is True and uploaded["sha256"]
+        assert uploaded["file"] == "after-clock.log" and uploaded["size"] > 0
+        assert "clock stable" in uploaded["text"]
         hit("POST /api/recovery-runs/{id}/observe")
         _, recovery_review = admin_client.json("POST", f"/api/recovery-runs/{run_id}/review",
                                                {"decision": "confirmed", "note": "现场已恢复"})
@@ -998,6 +1008,7 @@ def main() -> int:
         reviewer.login("api_reviewer", "Reviewer!2026x")
         _, reviewer_tasks = reviewer.json("GET", "/api/tasks")
         assert any(item["id"] == clock for item in reviewer_tasks["items"])
+        reviewer.json("GET", "/api/traces", expected=403)
         _, reviewer_detail = reviewer.json("GET", f"/api/tasks/{clock}")
         assert reviewer_detail["reviewer_id"] == reviewer_id
         reviewer.json("GET", "/api/users", expected=403)
@@ -1084,6 +1095,31 @@ def main() -> int:
         }, expected=201)
         admin_client.json("DELETE", f"/api/task-drafts/{draft2['draft']['id']}")
         hit("DELETE /api/task-drafts/{id}")
+
+        _, traces = admin_client.json(
+            "GET", f"/api/traces?kind=diagnosis&ref_id={clock}&limit=10")
+        assert traces["items"], "诊断任务完成后没有执行轨迹"
+        trace_run = traces["items"][0]
+        assert trace_run["status"] in ("success", "needs_data", "failed"), trace_run
+        assert trace_run["trace_path"].endswith(".jsonl")
+        hit("GET /api/traces")
+        _, trace_summary = admin_client.json(
+            "GET", f"/api/traces/{trace_run['id']}/summary")
+        assert trace_summary["run"]["id"] == trace_run["id"]
+        assert "first_error" in trace_summary
+        hit("GET /api/traces/{run_id}/summary")
+        _, trace_events = admin_client.json(
+            "GET", f"/api/traces/{trace_run['id']}/events?limit=50")
+        assert trace_events["items"], "轨迹没有事件"
+        assert any(e["type"] == "model_request" for e in trace_events["items"])
+        assert any(e["type"] == "model_response" for e in trace_events["items"])
+        hit("GET /api/traces/{run_id}/events")
+        status, raw, headers = admin_client.request(
+            "GET", f"/api/traces/{trace_run['id']}/download")
+        assert status == 200 and "ndjson" in headers.get("content-type", "")
+        assert raw and b'"run_id"' in raw
+        hit("GET /api/traces/{run_id}/download")
+        admin_client.json("GET", "/api/traces/NOTATRACE/summary", expected=404)
 
         _, audit = admin_client.json("GET", "/api/audit?page=1&page_size=10")
         assert audit["total"] > 0

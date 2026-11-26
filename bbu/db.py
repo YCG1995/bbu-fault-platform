@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 20
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS task_drafts (
   title TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
   mode TEXT NOT NULL DEFAULT 'fast',
+  skill_name TEXT NOT NULL DEFAULT '',
   model_override INTEGER,
   include_canary INTEGER NOT NULL DEFAULT 0,
   files_json TEXT NOT NULL DEFAULT '[]',
@@ -575,6 +576,28 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_tool_calls_task ON tool_calls(task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_decision ON tool_calls(decision, started_at DESC);
 
+CREATE TABLE IF NOT EXISTS trace_runs (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  ref_id TEXT NOT NULL,
+  user_id INTEGER,
+  attempt_no INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  model_calls INTEGER NOT NULL DEFAULT 0,
+  tool_calls INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  trace_path TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_trace_runs_ref ON trace_runs(kind, ref_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trace_runs_status ON trace_runs(status, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS tool_approvals (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -693,6 +716,9 @@ class Database:
             if "channel" not in skill_cols:
                 conn.execute("ALTER TABLE skills ADD COLUMN channel TEXT NOT NULL DEFAULT 'stable'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_channel ON skills(channel, status)")
+            draft_cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_drafts)")}
+            if "skill_name" not in draft_cols:
+                conn.execute("ALTER TABLE task_drafts ADD COLUMN skill_name TEXT NOT NULL DEFAULT ''")
             task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
             if "resume_count" not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0")

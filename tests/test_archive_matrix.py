@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from bbu.storage import extract_archive
@@ -27,6 +28,63 @@ class ArchiveMatrixTests(unittest.TestCase):
         stats = extract_archive(src, dest, LIMITS)
         self.assertEqual(stats["files"], 1)
         self.assertEqual((dest / "clock.log").read_text(), "CLK032 PLL unlocked\nline2\n")
+
+    def test_path_traversal_and_absolute_members_are_skipped(self):
+        src = self.tmp / "evil.zip"
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("../escape.txt", "must not escape")
+            zf.writestr("/absolute.txt", "must not be absolute")
+            zf.writestr("safe.log", "CLK032 normal")
+        dest = self.tmp / "out"
+        stats = extract_archive(src, dest, LIMITS)
+        self.assertEqual(stats["files"], 1)
+        self.assertEqual(len(stats["skipped"]), 2)
+        self.assertTrue((dest / "safe.log").is_file())
+        self.assertFalse((self.tmp / "escape.txt").exists())
+        self.assertFalse(Path("/absolute.txt").exists())
+
+    def test_zip_bomb_hits_declared_budget_before_writing(self):
+        src = self.tmp / "bomb.zip"
+        with zipfile.ZipFile(src, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("big.log", b"0" * (2 * 1024 * 1024))
+        dest = self.tmp / "out"
+        with self.assertRaises(Exception) as caught:
+            extract_archive(src, dest, {"max_files": 1000, "max_bytes": 1024 * 1024})
+        self.assertIn("上限", str(caught.exception))
+
+    def test_corrupt_zip_is_skipped_without_becoming_a_log(self):
+        src = self.tmp / "broken.zip"
+        src.write_bytes(b"PK\x03\x04this is not a zip")
+        dest = self.tmp / "out"
+        stats = extract_archive(src, dest, LIMITS)
+        self.assertEqual(stats["files"], 0)
+        self.assertEqual(len(stats["skipped"]), 1)
+        self.assertFalse((dest / "broken.zip").exists())
+
+    @unittest.skipUnless(shutil.which("zip"), "zip CLI not installed")
+    def test_encrypted_zip_is_skipped(self):
+        work = self.tmp / "work"; work.mkdir()
+        (work / "secret.log").write_text("CLK032 secret\n")
+        src = self.tmp / "encrypted.zip"
+        subprocess.run(["zip", "-q", "-P", "secret", str(src), "secret.log"],
+                       cwd=work, check=True, capture_output=True)
+        dest = self.tmp / "out"
+        stats = extract_archive(src, dest, LIMITS)
+        self.assertEqual(stats["files"], 0)
+        self.assertTrue(stats["skipped"])
+        self.assertFalse(any(dest.rglob("secret.log")))
+
+    def test_nested_zip_extracts_inner_file_and_depth_limit(self):
+        inner = self.tmp / "inner.zip"
+        with zipfile.ZipFile(inner, "w") as zf:
+            zf.writestr("clock.log", "CLK032 nested\n")
+        outer = self.tmp / "outer.zip"
+        with zipfile.ZipFile(outer, "w") as zf:
+            zf.write(inner, "nested/inner.zip")
+        dest = self.tmp / "out"
+        stats = extract_archive(outer, dest, LIMITS)
+        self.assertTrue(any(p.name == "clock.log" for p in dest.rglob("clock.log")))
+        self.assertGreaterEqual(stats["files"], 2)
 
     @unittest.skipUnless(shutil.which("zstd") or importlib.util.find_spec("zstandard"),
                          "zstd decoder not installed")

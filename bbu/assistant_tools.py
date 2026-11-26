@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -19,7 +20,7 @@ from .external_im import ExternalIMService
 from .model_roles import MODEL_ROLES
 from .notifications import create_notification
 from .security import SecretBox, delete_user_sessions
-from .util import iso_now, new_id
+from .util import iso_now, new_id, safe_filename, sha256_file, unique_path, within_directory
 
 TASK_STATUSES = ("queued", "running", "done", "failed", "needs_data", "cancelled")
 MESSAGE_SCOPES = ("notifications", "task_events", "audit", "external")
@@ -328,6 +329,23 @@ class ToolRegistry:
                     "required": []},
             handler=lambda reg, ctx, a: reg._list_tasks(ctx, a),
             summary=lambda a: "列出最近任务",
+        ))
+        self._add(ToolSpec(
+            name="create_skill_diagnosis", title="创建指定技能诊断",
+            description="复用某个已有任务的日志与描述，创建一个只执行指定技能的新诊断任务；"
+                        "不复制日志内容给模型，技能仍按沙箱规则运行。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {
+                        "source_task_id": {"type": "string", "maxLength": 64},
+                        "skill": {"type": "string", "maxLength": 120},
+                        "title": {"type": "string", "maxLength": 120},
+                        "description": {"type": "string", "maxLength": 20000},
+                    },
+                    "required": ["source_task_id", "skill"]},
+            handler=lambda reg, ctx, a: reg._create_skill_diagnosis(ctx, a),
+            risk="medium", mcp="write",
+            summary=lambda a: f"用技能 {a.get('skill', '')} 创建诊断"
+                              f"（日志来源 {a.get('source_task_id', '')}）",
         ))
         self._add(ToolSpec(
             name="search_skills", title="检索技能",
@@ -645,6 +663,75 @@ class ToolRegistry:
         if report:
             item["report_excerpt"] = _truncate(report, 1800)
         return {"task": item, "summary": f"任务 {task_id} 当前为 {task['status']}",
+                "links": [{"label": "打开任务详情", "href": _task_link(task_id)}]}
+
+    def _create_skill_diagnosis(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        source_id = str(args.get("source_task_id") or "").strip()
+        skill_name = str(args.get("skill") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", source_id):
+            raise ToolError("来源任务 ID 格式非法")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", skill_name):
+            raise ToolError("技能名称格式非法")
+        source = self.app.db.one("SELECT * FROM tasks WHERE id=?", (source_id,))
+        if not source or not _can_view_task(ctx.user, source):
+            raise ToolError("来源任务不存在或无权查看", 404)
+        if source.get("user_id") != ctx.user.get("id") and not ctx.is_admin:
+            raise ToolError("只能复用自己创建的任务日志", 403)
+        if source.get("inputs_state") not in (None, "", "available"):
+            raise ToolError("来源任务的原始日志已释放，不能复用", 409)
+        skill = self.app.db.one(
+            "SELECT * FROM skills WHERE name=? AND status IN ('ready','degraded')", (skill_name,))
+        if not skill:
+            raise ToolError("指定技能不存在或不可用", 400)
+        source_inputs = _loads(source.get("input_json"), [])
+        if not isinstance(source_inputs, list) or not source_inputs:
+            raise ToolError("来源任务没有可复用的日志包", 409)
+        data_dir = Path(self.app.config.data_dir)
+        upload_root = data_dir / "uploads"
+        for item in source_inputs:
+            path = Path(str(item.get("stored_path") or ""))
+            if not path.is_file() or not within_directory(upload_root, path):
+                raise ToolError("来源任务日志缺失或路径非法", 409)
+        stats = self.app.worker.stats()
+        if stats["queued"] >= stats.get("max_queue", 32):
+            raise ToolError(f"任务队列已满（{stats['queued']}/{stats.get('max_queue', 32)}）", 429)
+        description = str(args.get("description") or source.get("description") or "").strip()
+        if not description:
+            raise ToolError("来源任务没有故障描述，请传入 description")
+        if len(description) > 20000:
+            raise ToolError("故障描述过长（上限 20000 字）")
+        title = str(args.get("title") or "").strip()
+        if not title:
+            title = _truncate(f"{source.get('title') or source_id}（指定技能）", 120)
+        task_id = new_id("T")
+        target_dir = upload_root / task_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for item in source_inputs:
+            src = Path(str(item.get("stored_path") or ""))
+            target = unique_path(target_dir, safe_filename(str(item.get("name") or src.name)))
+            shutil.copy2(src, target)
+            copied.append({"name": item.get("name") or target.name,
+                           "stored_name": target.name, "stored_path": str(target),
+                           "size": target.stat().st_size, "sha256": sha256_file(target)})
+        now = iso_now()
+        options = {"mode": "skill", "skill_name": skill_name, "skill_names": [skill_name],
+                   "model_override": source.get("model_override"),
+                   "include_canary": False, "created_via": ctx.source}
+        self.app.db.execute(
+            "INSERT INTO tasks(id,user_id,title,description,title_source,status,stage,progress,mode,"
+            "model_override,input_json,options_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (task_id, ctx.user["id"], title, description, "manual", "queued", "queued", 0,
+             "skill", source.get("model_override"),
+             json.dumps(copied, ensure_ascii=False),
+             json.dumps(options, ensure_ascii=False), now))
+        self.app.worker.submit(task_id)
+        self.app.db.audit(ctx.user["id"], ctx.user["username"], "task.create",
+                          task_id, {"mode": "skill", "skill": skill_name,
+                                    "source_task_id": source_id, "via": ctx.source}, ctx.ip)
+        row = self.app.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+        return {"task": _task_summary(row),
+                "summary": f"已创建任务 {task_id}，指定技能 {skill_name}；来源 {source_id}",
                 "links": [{"label": "打开任务详情", "href": _task_link(task_id)}]}
 
     def _list_tasks(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

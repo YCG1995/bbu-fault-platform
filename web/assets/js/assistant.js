@@ -344,7 +344,7 @@ function buildPanel() {
     <div class="assistant-log" id="assistant-log" role="log" aria-live="polite"></div>
     <form class="assistant-compose" id="assistant-form">
       <textarea id="assistant-input" rows="1" maxlength="2000"
-        placeholder="问平台用法，或查任务、通知、审计…"></textarea>
+        aria-label="给小助手发消息"></textarea>
       <button type="submit" class="btn btn-primary assistant-send" id="assistant-send" aria-label="发送">${icon('send')}</button>
     </form>`;
   document.body.appendChild(fab);

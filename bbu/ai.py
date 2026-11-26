@@ -27,7 +27,14 @@ from .util import utc_now
 
 
 class AIError(RuntimeError):
-    pass
+    """模型错误保留结构化 HTTP 信息，轨迹页需要原始响应体定位网关问题。"""
+
+    def __init__(self, message: str, *, http_status: int = 0,
+                 response_body: str = "", retryable: bool = True) -> None:
+        super().__init__(message)
+        self.http_status = int(http_status or 0)
+        self.response_body = str(response_body or "")
+        self.retryable = bool(retryable)
 
 
 class NoModelError(AIError):
@@ -510,7 +517,8 @@ class AIGateway:
                  retries_per_model: int | None = None,
                  stage: str = "",
                  stream: bool = False,
-                 attempt_sink: Callable[[dict[str, Any]], None] | None = None) -> AIResult:
+                 attempt_sink: Callable[[dict[str, Any]], None] | None = None,
+                 trace: Any = None) -> AIResult:
         models = self.choose(role, model_override, user_id=self._uid())
         if not models:
             status = self.model_status()
@@ -579,6 +587,16 @@ class AIGateway:
                             model_schema = {"type": "json_object"}
                             prompt_user = (user + "\n\n请只输出严格 JSON 对象，"
                                            "不要 Markdown 代码块或解释；字段和类型必须符合上面的 JSON Schema。")
+                    if trace:
+                        try:
+                            trace.model_request(
+                                role=role, model=model, provider=provider_name(model),
+                                purpose=purpose, stage=attempt_stage, attempt=attempt + 1,
+                                system=system, user=prompt_user, json_schema=model_schema,
+                                temperature=(model.get("temperature") if temperature is None else temperature),
+                                max_tokens=max_tokens, stream=stream, phase=attempt_stage)
+                        except Exception:
+                            pass
                     try:
                         result = self._call(model, system, prompt_user, model_schema,
                                             max_tokens, temperature, purpose, stream)
@@ -592,8 +610,19 @@ class AIGateway:
                         budget.settle(reservation, result.usage)
                     reservation = None
                     self.breaker.ok(key)
+                    parsed = extract_json(result.text) if json_schema else None
+                    if trace:
+                        try:
+                            trace.model_response(
+                                role=role, model=model, provider=provider_name(model),
+                                purpose=purpose, stage=attempt_stage, attempt=attempt + 1,
+                                text=result.text, parsed=parsed, usage=result.usage,
+                                latency_ms=result.latency_ms, stream=result.stream_used,
+                                phase=attempt_stage)
+                        except Exception:
+                            pass
                     if json_schema:
-                        data = extract_json(result.text)
+                        data = parsed
                         problems = (["模型未返回合法 JSON"] if data is None
                                     else validate_schema(data, json_schema))
                         if not problems:
@@ -603,6 +632,13 @@ class AIGateway:
                             return result
                         note_attempt(model, "error", result.latency_ms, result.usage,
                                      "JSON 校验失败: " + "；".join(problems[:3]))
+                        if trace:
+                            try:
+                                trace.validation(phase=attempt_stage, name="model_json_schema",
+                                                 ok=False, errors=problems[:20],
+                                                 details={"text": result.text})
+                            except Exception:
+                                pass
                         # 只修复一次，修复失败直接换下一个模型/交给调用方降级
                         if attempt == 0:
                             repair_user = (
@@ -614,6 +650,18 @@ class AIGateway:
                             if budget:
                                 repair_reservation = budget.reserve(
                                     max(1, (len(system) + len(repair_user)) // 3))
+                            if trace:
+                                try:
+                                    trace.model_request(
+                                        role=role, model=model, provider=provider_name(model),
+                                        purpose=purpose + ":repair", stage=attempt_stage,
+                                        attempt=attempt + 1, system=system, user=repair_user,
+                                        json_schema=model_schema,
+                                        temperature=(model.get("temperature") if temperature is None else temperature),
+                                        max_tokens=max_tokens, stream=stream, repair=True,
+                                        phase=attempt_stage)
+                                except Exception:
+                                    pass
                             try:
                                 repair = self._call(model, system, repair_user, model_schema,
                                                     max_tokens, temperature,
@@ -628,15 +676,33 @@ class AIGateway:
                                 budget.settle(repair_reservation, repair.usage)
                             repair_reservation = None
                             repaired = extract_json(repair.text)
-                            if repaired is not None and not validate_schema(repaired, json_schema):
+                            repair_problems = (["模型未返回合法 JSON"] if repaired is None
+                                               else validate_schema(repaired, json_schema))
+                            if trace:
+                                try:
+                                    trace.model_response(
+                                        role=role, model=model, provider=provider_name(model),
+                                        purpose=purpose + ":repair", stage=attempt_stage,
+                                        attempt=attempt + 1, text=repair.text, parsed=repaired,
+                                        usage=repair.usage, latency_ms=repair.latency_ms,
+                                        stream=repair.stream_used, repair=True,
+                                        phase=attempt_stage)
+                                    trace.validation(
+                                        phase=attempt_stage, name="model_json_repair",
+                                        ok=not repair_problems,
+                                        errors=repair_problems[:20],
+                                        details={"text": repair.text})
+                                except Exception:
+                                    pass
+                            if repaired is not None and not repair_problems:
                                 repair.data = repaired
                                 self.breaker.ok(key)
                                 note_attempt(model, "success", repair.latency_ms, repair.usage,
                                              stream_used=repair.stream_used)
                                 return repair
                             note_attempt(model, "error", repair.latency_ms, repair.usage,
-                                         "JSON 校验失败: " + "；".join(problems[:3]))
-                            errors.append(f"{model['name']}: JSON 校验失败 {problems[:3]}")
+                                         "JSON 校验失败: " + "；".join(repair_problems[:3]))
+                            errors.append(f"{model['name']}: JSON 校验失败 {repair_problems[:3]}")
                             self._note_model(model, False, error="JSON 校验失败")
                             break
                         errors.append(f"{model['name']}: JSON 校验失败 {problems[:3]}")
@@ -648,9 +714,22 @@ class AIGateway:
                 except BudgetExceeded:
                     raise
                 except (AIError, urllib.error.URLError, socket.timeout, TimeoutError) as exc:
-                    note_attempt(model, "error", int((time.monotonic() - call_started) * 1000),
+                    latency_ms = int((time.monotonic() - call_started) * 1000)
+                    note_attempt(model, "error", latency_ms,
                                  error=str(exc),
                                  input_estimate=max(1, (len(system) + len(prompt_user)) // 3))
+                    if trace:
+                        try:
+                            trace.model_error(
+                                role=role, model=model, provider=provider_name(model),
+                                purpose=purpose, stage=attempt_stage, attempt=attempt + 1,
+                                exc=exc, latency_ms=latency_ms,
+                                http_status=int(getattr(exc, "http_status", 0) or 0),
+                                response_body=str(getattr(exc, "response_body", "") or ""),
+                                retryable=bool(getattr(exc, "retryable", True)),
+                                phase=attempt_stage)
+                        except Exception:
+                            pass
                     errors.append(f"{model['name']}: {exc}")
                     self._note_model(model, False, error=str(exc))
                     self.breaker.fail(key)
@@ -723,19 +802,23 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
     req.add_header("Content-Type", "application/json")
     for key, value in headers.items():
         req.add_header(key, value)
+    raw = b""
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             return json.loads(raw.decode("utf-8", errors="replace")), resp.status
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        raise AIError(f"HTTP {exc.code}: {raw[:500]}") from exc
+        raw_text = exc.read().decode("utf-8", errors="replace")
+        raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
+                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
     except urllib.error.URLError as exc:
-        raise AIError(f"网络错误: {exc.reason}") from exc
+        raise AIError(f"网络错误: {exc.reason}", retryable=True) from exc
     except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
-        raise AIError(f"模型响应中断: {type(exc).__name__}") from exc
+        raise AIError(f"模型响应中断: {type(exc).__name__}", retryable=True) from exc
     except json.JSONDecodeError as exc:
-        raise AIError(f"响应不是合法 JSON: {exc}") from exc
+        text = raw.decode("utf-8", errors="replace") if raw else ""
+        raise AIError(f"响应不是合法 JSON: {exc}", response_body=text[:2000],
+                      retryable=False) from exc
 
 
 def _strict_output_schema(schema: dict[str, Any], name: str = "bbu_structured") -> dict[str, Any]:
@@ -794,6 +877,7 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
     req.add_header("Accept", "text/event-stream")
     for key, value in headers.items():
         req.add_header(key, value)
+    raw = b""
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             ctype = str(resp.headers.get("Content-Type") or "").lower()
@@ -834,14 +918,17 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
                 raise AIError("流式响应无文本")
             return text, _usage_from_openai(usage_raw)
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        raise AIError(f"HTTP {exc.code}: {raw[:500]}") from exc
+        raw_text = exc.read().decode("utf-8", errors="replace")
+        raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
+                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
     except urllib.error.URLError as exc:
-        raise AIError(f"网络错误: {exc.reason}") from exc
+        raise AIError(f"网络错误: {exc.reason}", retryable=True) from exc
     except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
-        raise AIError(f"模型流式响应中断: {type(exc).__name__}") from exc
+        raise AIError(f"模型流式响应中断: {type(exc).__name__}", retryable=True) from exc
     except json.JSONDecodeError as exc:
-        raise AIError(f"响应不是合法 JSON: {exc}") from exc
+        text = raw.decode("utf-8", "replace") if raw else ""
+        raise AIError(f"响应不是合法 JSON: {exc}", response_body=text[:2000],
+                      retryable=False) from exc
 
 
 def _call_openai(model: dict[str, Any], system: str, user: str,

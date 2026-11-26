@@ -35,7 +35,8 @@ def compose_markdown(task: dict[str, Any], results: list[dict[str, Any]],
     lines.append("# BBU 故障诊断报告")
     lines.append("")
     lines.append(f"> 任务 `{task.get('id')}` ｜ 提交人 {task.get('username') or '-'} ｜ "
-                 f"提交时间 {local_display(task.get('created_at'))} ｜ 模式 {'深度分析' if task.get('mode') == 'deep' else '快速定位'}")
+                 f"提交时间 {local_display(task.get('created_at'))} ｜ 模式 "
+                 f"{ {'deep': '深度分析', 'skill': '指定技能'}.get(task.get('mode'), '快速定位') }")
     lines.append("")
     lines.append("## 一、结论")
     lines.append("")

@@ -777,3 +777,67 @@ table.data tr.row-hover:hover td { background: #f8fafc; }
 .modal-body .field textarea:focus,
 .modal-body .field input:focus,
 .modal-body .field select:focus { border-color: #5eead4; box-shadow: 0 0 0 3px rgba(13,148,136,.1); }
+
+/* 管理员执行轨迹 */
+.trace-event { margin-bottom: 10px; border-left: 3px solid var(--border, #e2e8f0); }
+.trace-event-failed { border-left-color: #dc2626; background: #fffafa; }
+.trace-event-head { gap: 8px; align-items: flex-start; }
+.trace-event-body { margin-top: 8px; }
+.trace-meta { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 5px; }
+.trace-json { margin-top: 8px; }
+.trace-json summary { cursor: pointer; font-size: 12px; color: #475569; font-weight: 600; }
+.trace-pre { margin: 6px 0 0; padding: 10px; max-height: 420px; overflow: auto;
+  background: #0f172a; color: #e2e8f0; border-radius: 6px; font-size: 12px;
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.trace-list { display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 720px) {
+  .trace-event-head { flex-direction: column; }
+  .trace-pre { max-height: 300px; }
+}
+
+
+/* 证据链按根因/规则聚合 */
+.evidence-controls {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e8edf4;
+  background: #fbfcfe;
+}
+.evidence-controls .search { min-width: 260px; flex: 1 1 260px; }
+.evidence-list .evidence-group {
+  border: 1px solid #e8edf4;
+  border-left: 3px solid #0f766e;
+  border-radius: 8px;
+  margin: 10px 12px;
+  background: #fff;
+  overflow: hidden;
+}
+.evidence-list .evidence-group.evidence-extra { display: none; }
+.evidence-list.show-all .evidence-group.evidence-extra { display: block; }
+.evidence-group > summary {
+  cursor: pointer;
+  padding: 9px 12px;
+  background: #f8fafc;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.evidence-group > summary strong { font-size: 12px; }
+.evidence-group .evidence-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  background: #0f172a;
+  color: #dbeafe;
+  padding: 8px;
+  border-radius: 6px;
+  max-height: 260px;
+  overflow: auto;
+  margin: 6px 0 0;
+}
+.evidence-group .evidence-table th { font-size: 11px; }
+.evidence-group .evidence-table td { vertical-align: top; }
+@media (max-width: 760px) {
+  .evidence-controls .search { min-width: 0; flex-basis: 100%; }
+  .evidence-group > summary { align-items: flex-start; }
+}

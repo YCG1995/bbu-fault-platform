@@ -30,7 +30,8 @@ DOC_FILES: tuple[tuple[str, str, str], ...] = (
     ("windows", "docs/Windows运行说明.md", "Windows 启动、服务与升级入口"),
     ("upgrade-sudo", "docs/升级助手sudo故障修复.md", "sudo setuid/nosuid 与升级助手修复"),
     ("workshop", "docs/技能工坊AI生成优化建议.md", "技能工坊生成、评审与配方"),
-    ("release-1.20.3", "docs/版本说明-1.20.3.md", "当前版本知识库检索 P0/P1、BM25F 与评测"),
+    ("release-1.22.0", "docs/版本说明-1.22.0.md", "当前版本指定技能、全量证据、执行轨迹与归档加固"),
+    ("release-1.20.3", "docs/版本说明-1.20.3.md", "1.20.3 知识库检索 P0/P1、BM25F 与评测"),
     ("release-1.20.2", "docs/版本说明-1.20.2.md", "上一版本服务单元 NoNewPrivileges 修复与升级助手"),
     ("diagnostic-data", "docs/诊断推理数据说明.md", "推理数据、证据与案例字段"),
 )
@@ -39,7 +40,7 @@ DOC_PRIORITY = {
     "user-guide": 3.5, "deploy-guide": 2.0, "oneclick-deploy": 2.0,
     "upgrade-rollback": 2.5, "upgrade-sudo": 1.5, "architecture": 1.5,
     "windows": 1.5, "workshop": 1.5, "diagnostic-data": 1.0,
-    "readme": 0.5, "release-1.20.3": 0.2, "release-1.20.2": 0.2,
+    "readme": 0.5, "release-1.22.0": 0.2, "release-1.20.3": 0.2, "release-1.20.2": 0.2,
 }
 
 STOPWORDS = frozenset({
@@ -151,6 +152,11 @@ _QUERY_RULES: tuple[_IntentRule, ...] = (
         re.compile(r"no\s*new\s*privileges.*(?:修复|解决)|"
                    r"(?:修复|解决).*no\s*new\s*privileges"),
         "upgrade-sudo", 14.0, ("4. root 一键修复",),
+    ),
+    _IntentRule(
+        "1.22.0 新特性",
+        re.compile(r"1\.22\.0|指定技能|全量证据|执行轨迹|create_skill_diagnosis"),
+        "release-1.22.0", 12.0,
     ),
     _IntentRule(
         "1.20.3 检索优化",

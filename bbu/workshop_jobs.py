@@ -17,11 +17,13 @@ from .util import iso_now, new_id
 
 
 class WorkshopJobService:
-    def __init__(self, db: Database, config: Any, workshop: Any, gateway: Any) -> None:
+    def __init__(self, db: Database, config: Any, workshop: Any, gateway: Any,
+                 traces: Any = None) -> None:
         self.db = db
         self.config = config
         self.workshop = workshop
         self.gateway = gateway
+        self.traces = traces
         self.max_workers = max(1, int(config.get("workshop_max_workers", 1)))
         self.max_queue = max(self.max_workers, int(config.get("workshop_max_queue", 16)))
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers,
@@ -101,6 +103,13 @@ class WorkshopJobService:
         args = self._loads(job.get("args_json"), {})
         self._update(job_id, status="running", stage="starting", progress=3,
                      message="正在启动工坊任务", started_at=iso_now())
+        trace = None
+        if self.traces:
+            trace = self.traces.start(
+                kind="workshop", ref_id=job_id, user_id=int(job.get("user_id") or 0),
+                meta={"draft_id": job.get("draft_id"), "job_kind": job.get("kind"),
+                      "trigger": "job", "args_keys": sorted(args.keys())})
+        result: Any = None
         try:
             kind = job["kind"]
             draft_id = job["draft_id"]
@@ -108,15 +117,16 @@ class WorkshopJobService:
             with self.gateway.user_context(int(job["user_id"])):
                 if kind == "analyze":
                     result = self.workshop.analyze(
-                        draft_id, progress=self._callback(job_id), model_override=model_override)
+                        draft_id, progress=self._callback(job_id, trace),
+                        model_override=model_override, trace=trace)
                 elif kind == "logs":
                     result = self.workshop.attach_logs(
-                        draft_id, args.get("files") or [], progress=self._callback(job_id),
-                        model_override=model_override)
+                        draft_id, args.get("files") or [], progress=self._callback(job_id, trace),
+                        model_override=model_override, trace=trace)
                 elif kind == "refine":
                     result = self.workshop.refine(
-                        draft_id, str(args.get("text") or ""), progress=self._callback(job_id),
-                        model_override=model_override)
+                        draft_id, str(args.get("text") or ""), progress=self._callback(job_id, trace),
+                        model_override=model_override, trace=trace)
                 elif kind == "case":
                     result = self.workshop.attach_case(
                         draft_id, args.get("files") or [], args.get("expected") or {})
@@ -126,7 +136,19 @@ class WorkshopJobService:
                     raise ValueError(f"未知工坊任务类型: {kind}")
             self._update(job_id, status="done", stage="done", progress=100,
                          message="任务完成", result=result, finished_at=iso_now())
+            if trace:
+                ok = result.get("ok", True) if isinstance(result, dict) else True
+                trace.finish("success" if ok else "failed",
+                             error_code="" if ok else "workshop_result_failed",
+                             error_summary="" if ok else str((result or {}).get("error") or "工坊结果未通过"))
         except Exception as exc:  # noqa: BLE001 - 任务状态必须完整落库
+            if trace:
+                trace.error(phase="workshop", code="workshop_job_failed",
+                            message=f"{kind if 'kind' in locals() else ''}: {exc}",
+                            exc=exc, retryable=True,
+                            details={"job_id": job_id, "draft_id": job.get("draft_id")})
+                trace.finish("failed", error_code="workshop_job_failed",
+                             error_summary=str(exc)[:4000])
             self._update(job_id, status="failed", stage="failed", progress=100,
                          message="任务失败", error=str(exc)[:1200], finished_at=iso_now())
             try:
@@ -137,10 +159,13 @@ class WorkshopJobService:
             except Exception:
                 pass
 
-    def _callback(self, job_id: str):
+    def _callback(self, job_id: str, trace: Any = None):
         def report(stage: str, progress: int, message: str) -> None:
-            self._update(job_id, stage=stage, progress=max(0, min(99, int(progress))),
-                         message=message)
+            progress = max(0, min(99, int(progress)))
+            self._update(job_id, stage=stage, progress=progress, message=message)
+            if trace:
+                trace.append("stage", phase=stage, status="running", progress=progress,
+                             message=message)
         return report
 
     def _update(self, job_id: str, *, result: Any = None, **fields: Any) -> None:

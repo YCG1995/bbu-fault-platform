@@ -84,7 +84,7 @@ class AssistantMCPTests(unittest.TestCase):
         admin_status = self.app.assistant.status(self.admin)
         eng_status = self.app.assistant.status(self.engineer)
         self.assertTrue(admin_status["enabled"])
-        self.assertEqual(admin_status["docs"], 12)
+        self.assertEqual(admin_status["docs"], 13)
         self.assertGreaterEqual(admin_status["tools"], 18)
         self.assertLess(eng_status["tools"], admin_status["tools"])
         self.assertIn("search_docs", eng_status["tool_names"])
@@ -179,6 +179,62 @@ class AssistantMCPTests(unittest.TestCase):
         self.assertIn("不存在", str(caught.exception))
         self.assertTrue(self.app.assistant.registry.get("apply_update").requires_password)
 
+    def test_create_skill_diagnosis_tool_reuses_source_inputs(self) -> None:
+        source_id = "T-SKILL-SRC"
+        source_dir = Path(self.cfg.data_dir) / "uploads" / source_id
+        source_dir.mkdir(parents=True, exist_ok=True)
+        target = source_dir / "clock-demo.zip"
+        shutil.copy2(ROOT / "tests" / "fixtures" / "logs" / "clock-demo.zip", target)
+        now = "2026-11-26T00:00:00Z"
+        self.app.db.execute(
+            "INSERT INTO tasks(id,user_id,title,description,title_source,status,stage,progress,mode,"
+            "input_json,options_json,created_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source_id, self.engineer["id"], "CLK032 时钟失锁", "PLL 无法锁定，需要指定技能复核",
+             "manual", "done", "done", 100, "fast",
+             json.dumps([{"name": target.name, "stored_name": target.name,
+                          "stored_path": str(target), "size": target.stat().st_size,
+                          "sha256": ""}], ensure_ascii=False), "{}", now, now))
+        ctx = ToolContext(user=self.engineer, ip="127.0.0.1", confirmed=True)
+        result = self.app.assistant.registry.execute("create_skill_diagnosis", {
+            "source_task_id": source_id, "skill": "demo-bbu-clock-loss"}, ctx)
+        task = result["task"]
+        self.assertEqual(task["mode"], "skill")
+        row = self.app.db.one("SELECT * FROM tasks WHERE id=?", (task["id"],))
+        options = json.loads(row["options_json"])
+        self.assertEqual(options["skill_name"], "demo-bbu-clock-loss")
+        self.assertEqual(options["skill_names"], ["demo-bbu-clock-loss"])
+        copied = json.loads(row["input_json"])[0]
+        self.assertNotEqual(copied["stored_path"], str(target))
+        self.assertEqual(Path(copied["stored_path"]).read_bytes(), target.read_bytes())
+        self.assertTrue(Path(copied["stored_path"]).is_file())
+        with self.assertRaises(Exception) as caught:
+            self.app.assistant.registry.execute("create_skill_diagnosis", {
+                "source_task_id": source_id, "skill": "missing-skill"}, ctx)
+        self.assertIn("不存在或不可用", str(caught.exception))
+        audit = self.app.db.all(
+            "SELECT action,target,detail_json FROM audit_logs WHERE target=? ORDER BY id DESC",
+            (task["id"],))[0]
+        self.assertEqual(audit["action"], "task.create")
+        self.assertEqual(json.loads(audit["detail_json"])["via"], "assistant")
+
+        # MCP 写 Token 才能看到并按 confirm=true 调用；只读 Token 不可见。
+        read_token = self.app.mcp.rotate_token(self.engineer, "read")["token"]
+        result = self.app.mcp.handle_http(_Req("POST", _rpc("tools/list"), token=read_token))
+        names = [tool["name"] for tool in json.loads(result[2])["result"]["tools"]]
+        self.assertNotIn("create_skill_diagnosis", names)
+        write_token = self.app.mcp.rotate_token(self.engineer, "write")["token"]
+        result = self.app.mcp.handle_http(_Req("POST", _rpc("tools/list"), token=write_token))
+        names = [tool["name"] for tool in json.loads(result[2])["result"]["tools"]]
+        self.assertIn("create_skill_diagnosis", names)
+        call = self.app.mcp.handle_http(_Req("POST", _rpc("tools/call", {
+            "name": "create_skill_diagnosis",
+            "arguments": {"source_task_id": source_id, "skill": "demo-bbu-clock-loss",
+                          "confirm": True},
+        }), token=write_token))
+        payload = json.loads(call[2])
+        self.assertFalse(payload["result"].get("isError"), payload)
+        self.assertIn("已创建任务", payload["result"]["content"][0]["text"])
+
     # ------------------------------------------------------------ MCP
     def test_token_hash_rotation_revoke_and_local_only(self) -> None:
         info = self.app.mcp.rotate_token(self.admin, "read")
@@ -261,7 +317,7 @@ class AssistantMCPTests(unittest.TestCase):
     def test_mcp_resources_and_docs_tools(self) -> None:
         token = self.app.mcp.rotate_token(self.admin, "read")["token"]
         docs = self.app.assistant.kb.list_docs()
-        self.assertEqual(len(docs), 12)
+        self.assertEqual(len(docs), 13)
         result = self.app.mcp.handle_http(_Req("POST", _rpc("resources/list"), token=token))
         resources = json.loads(result[2])["result"]["resources"]
         self.assertGreaterEqual(len(resources), 11)

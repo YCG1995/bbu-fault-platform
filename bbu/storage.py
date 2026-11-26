@@ -59,6 +59,9 @@ def extract_archive(path: Path, dest: Path, limits: dict[str, int],
         _extract_zstd(path, dest, limits, stats, depth)
     elif path.suffix.lower() in (".7z", ".rar"):
         _extract_7z(path, dest, limits, stats, depth)
+    elif path.suffix.lower() in (".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".zst"):
+        # 已声明为归档但无法识别：视为损坏/伪装文件，不能当普通日志放行。
+        stats["skipped"].append(f"{path.name}: 归档损坏或格式不受支持")
     else:
         shutil.copy2(path, dest / safe_filename(path.name))
         stats["files"] += 1
@@ -262,7 +265,11 @@ def _maybe_nested(target: Path, limits: dict[str, int], stats: dict[str, Any], d
 
 
 def _safe_member_path(dest: Path, member: str) -> Path | None:
-    member = member.replace("\\", "/").lstrip("/")
+    raw = member.replace("\\", "/")
+    # 绝对路径、盘符路径、UNC 路径一律拒绝；不能先 lstrip 再判断。
+    if raw.startswith("/") or raw.startswith("//") or (len(raw) >= 2 and raw[1] == ":"):
+        return None
+    member = raw.lstrip("/")
     if not member or member.startswith("../") or "/../" in member:
         return None
     target = (dest / member).resolve()

@@ -5,6 +5,8 @@ import {
 } from './core.js';
 
 const listState = { status: '', review_status: '', q: '', page: 1, page_size: 20 };
+const MODE_LABELS = { fast: '快速定位', deep: '深度分析', skill: '指定技能' };
+function modeLabel(mode) { return MODE_LABELS[mode] || mode || '—'; }
 
 const TASK_TABS = [
   ['', '全部'], ['running', '运行中'], ['queued', '排队'], ['done', '已完成'],
@@ -54,7 +56,7 @@ export async function renderTaskList() {
           <th>任务</th><th>状态</th><th>根因</th><th>置信度</th><th>耗时</th><th>提交时间</th></tr></thead>
           <tbody>${data.items.map((t) => `
             <tr class="row-hover" data-href="#/tasks/${encodeURIComponent(t.id)}">
-              <td data-label="任务"><div style="font-weight:600">${esc(t.title)}</div>
+              <td data-label="任务"><div style="font-weight:600">${esc(t.title)} <span class="badge muted" style="font-weight:400">${esc(modeLabel(t.mode))}</span></div>
                   <div class="mono muted tiny">${esc(t.id)}</div></td>
               <td data-label="状态">${statusBadge(t.status)}</td>
               <td data-label="根因"><div>${t.verdict?.primary && t.verdict.primary !== 'NONE'
@@ -108,7 +110,7 @@ export async function renderTaskList() {
 }
 
 export async function renderNewTask() {
-  const view = mount('新建诊断', '上传日志包并描述现场现象，平台会自动盘点、AI 规划并按波次并行调用子技能',
+  const view = mount('新建诊断', '上传日志包并描述现场现象，平台会盘点日志并按诊断模式规划执行',
     `<span id="draft-status" class="small muted"></span><a class="btn" href="#/tasks">${icon('chevron')}返回任务列表</a>`);
   const isAdmin = state.user?.role === 'admin';
   let models = [];
@@ -128,6 +130,8 @@ export async function renderNewTask() {
     if (preselected) sessionStorage.removeItem('bbu.diagnose_skill');
   } catch { /* ignore */ }
   try { restored = (await api('/api/task-drafts/current')).draft || null; } catch { restored = null; }
+  const initialMode = preselected ? 'skill' : (['fast', 'deep', 'skill'].includes(restored?.mode) ? restored.mode : 'fast');
+  const initialSkill = preselected || restored?.skill_name || '';
 
   const initFiles = (restored?.files || []).map((f, i) => ({
     key: `d${i}`, draftFile: f, file: null, name: f.name, size: f.size,
@@ -157,12 +161,22 @@ export async function renderNewTask() {
           </div>
           <div class="form-row">
             <label class="label">诊断模式</label>
-            <div class="grid grid-2" id="mode-group">
-              <label class="radio-card ${restored?.mode !== 'deep' ? 'active' : ''}"><input type="radio" name="mode" value="fast" ${restored?.mode !== 'deep' ? 'checked' : ''}>
+            <div class="grid grid-3" id="mode-group">
+              <label class="radio-card ${initialMode === 'fast' ? 'active' : ''}"><input type="radio" name="mode" value="fast" ${initialMode === 'fast' ? 'checked' : ''}>
                 <div><strong>快速定位</strong><span>命中规则先行，适合现场抢修；证据不足时明确提示补采</span></div></label>
-              <label class="radio-card ${restored?.mode === 'deep' ? 'active' : ''}"><input type="radio" name="mode" value="deep" ${restored?.mode === 'deep' ? 'checked' : ''}>
+              <label class="radio-card ${initialMode === 'deep' ? 'active' : ''}"><input type="radio" name="mode" value="deep" ${initialMode === 'deep' ? 'checked' : ''}>
                 <div><strong>深度分析</strong><span>扩大检索与交叉验证，耗时略长，适合复盘和根因分析</span></div></label>
+              <label class="radio-card ${initialMode === 'skill' ? 'active' : ''}"><input type="radio" name="mode" value="skill" ${initialMode === 'skill' ? 'checked' : ''}>
+                <div><strong>指定技能</strong><span>只执行选定技能，不触发 AI 扩选与补规划，适合定向复核</span></div></label>
             </div>
+          </div>
+          <div class="form-row" id="skill-mode-box" ${initialMode === 'skill' ? '' : 'hidden'}>
+            <label class="label" for="f-skill">选择技能 <span class="hint">指定技能模式必须且只能选择一个</span></label>
+            <select class="select" id="f-skill" name="skill_name" ${skills.length ? '' : 'disabled'}>
+              <option value="">请选择可用技能</option>
+              ${skills.map((s) => `<option value="${esc(s.name)}" ${initialSkill === s.name ? 'selected' : ''}>${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
+            </select>
+            <div class="help">${skills.length ? '只执行该技能，不自动追加其他技能；仍会生成证据、报告与执行轨迹。' : '当前没有 ready / degraded 状态的技能。'}</div>
           </div>
           ${models.length ? `<div class="form-row">
             <label class="label" for="f-model">本次使用的模型 <span class="hint">留空则按角色路由自动选择</span></label>
@@ -171,13 +185,6 @@ export async function renderNewTask() {
               ${models.map((m) => `<option value="${esc(m.id)}" ${String(restored?.model_override || '') === String(m.id) ? 'selected' : ''}>${esc(m.name)} · ${esc(m.model)}（${esc(m.provider)}）</option>`).join('')}
             </select>
           </div>` : `<div class="alert info" style="margin-bottom:16px">${icon('info')}<div>还没有配置模型。平台会用确定性路径完成诊断；到「模型接入」添加 OpenAI 兼容或 Anthropic 服务后可启用 AI 研判。</div></div>`}
-          <div class="form-row">
-            <label class="label" for="f-skills">指定技能 <span class="hint">可选；选中后只执行这些技能，不自动追加其他技能</span></label>
-            <select class="select" id="f-skills" name="skill_names" multiple size="${Math.min(5, Math.max(2, skills.length))}" ${skills.length ? '' : 'disabled'}>
-              ${skills.map((s) => `<option value="${esc(s.name)}" ${preselected === s.name ? 'selected' : ''}>${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
-            </select>
-            <div class="help">${skills.length ? '按住 Ctrl / Command 可多选；不选则由 AI 规划自动扩选。' : '当前没有 ready / degraded 状态的技能。'}</div>
-          </div>
           ${isAdmin ? `<label class="check"><input type="checkbox" name="include_canary" value="1" ${restored?.include_canary ? 'checked' : ''}> 包含灰度技能（只在对照验证时勾选，普通任务默认只用稳定版）</label>` : ''}
           <div class="between" style="margin-top:18px">
             <span class="small muted" id="submit-hint">提交后自动进入队列，可在任务详情实时查看进度</span>
@@ -233,6 +240,7 @@ export async function renderNewTask() {
       title: '',
       description: form.elements.description.value.trim(),
       mode: form.elements.mode.value,
+      skill_name: form.elements.mode.value === 'skill' ? (form.elements.skill_name?.value || '') : '',
       model_override: form.elements.model_id?.value || null,
       include_canary: !!form.elements.include_canary?.checked,
     };
@@ -414,9 +422,13 @@ export async function renderNewTask() {
     view.querySelectorAll('#mode-group .radio-card').forEach((card) => {
       card.classList.toggle('active', card.querySelector('input').checked);
     });
+    const box = view.querySelector('#skill-mode-box');
+    const skill = form.elements.skill_name;
+    if (box) box.hidden = form.elements.mode.value !== 'skill';
+    if (form.elements.mode.value !== 'skill' && skill) skill.value = '';
     scheduleSave();
   });
-  ['title', 'description', 'model_id', 'include_canary'].forEach((name) => {
+  ['title', 'description', 'model_id', 'include_canary', 'skill_name'].forEach((name) => {
     const el = form.elements[name];
     if (!el) return;
     el.addEventListener('input', scheduleSave);
@@ -452,7 +464,9 @@ export async function renderNewTask() {
     if (submitting) return;
     const description = form.elements.description.value.trim();
     if (!description) { toast('请填写故障描述，至少包括现象和告警信息', 'warn'); return; }
-    if (!description) { toast('请填写故障描述，至少包括现象和告警信息', 'warn'); return; }
+    const mode = form.elements.mode.value;
+    const skillName = form.elements.skill_name?.value || '';
+    if (mode === 'skill' && !skillName) { toast('指定技能模式必须选择一个技能', 'warn'); return; }
     if (!files.length) { toast('请至少上传一个日志包', 'warn'); return; }
     if (files.some((f) => f.status === 'uploading')) { toast('日志包仍在上传，请等待完成或取消后重试', 'warn'); return; }
     if (files.some((f) => f.status !== 'done')) { toast('有日志包未上传成功，请重试或移除后再提交', 'warn'); return; }
@@ -462,12 +476,11 @@ export async function renderNewTask() {
       await saveDraft(true);
       const fd = new FormData();
       fd.append('description', description);
-      fd.append('mode', form.elements.mode.value);
+      fd.append('mode', mode);
+      if (mode === 'skill') fd.append('skill_name', skillName);
       fd.append('draft_id', draftId);
       const modelId = form.elements.model_id?.value;
       if (modelId) fd.append('model_id', modelId);
-      const selectedSkills = [...(form.elements.skill_names?.selectedOptions || [])].map((o) => o.value);
-      if (selectedSkills.length) fd.append('skill_names', selectedSkills.join(','));
       if (form.elements.include_canary?.checked) fd.append('include_canary', '1');
       const data = await api('/api/tasks', { method: 'POST', body: fd });
       dirty = false;

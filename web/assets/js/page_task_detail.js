@@ -16,9 +16,11 @@ const GATE_LABEL = {
   previous_low_confidence: '前序低置信度', previous_gap: '前序证据缺口',
 };
 const TERMINAL = ['done', 'failed', 'cancelled', 'needs_data'];
+let evidenceShowAll = false;
 
 function modeLabel(mode) {
-  return { fast: '快速定位', deep: '深度分析', triage: '快速定位', verified: '深度分析' }[mode] || mode || '—';
+  return { fast: '快速定位', deep: '深度分析', skill: '指定技能',
+    triage: '快速定位', verified: '深度分析' }[mode] || mode || '—';
 }
 
 function eventTime(ts) {
@@ -462,28 +464,144 @@ function pathBasename(value) {
   return text.split('/').filter(Boolean).pop() || text;
 }
 
-function evidenceTable(task) {
+function evidenceTable(task, payload = null) {
   const candidates = task.result?.arbitration?.candidates || [];
-  const rows = [];
-  let n = 0;
-  for (const c of candidates) {
-    for (const e of c.evidence || []) {
-      n += 1;
-      rows.push({ n, skill: c.skill, ...e });
+  const causeBySkill = new Map(candidates.map((c) => [
+    c.skill, c.root_cause || c.primary || '未归因',
+  ]));
+  let rows = [];
+  let total = 0;
+  let note = '';
+  if (payload?.items?.length) {
+    total = Number(payload.total || payload.items.length);
+    rows = payload.items.map((e, i) => {
+      const skill = String(e.source?.tool || '').replace(/^skill\./, '');
+      return {
+        n: i + 1,
+        skill,
+        root: causeBySkill.get(skill) || '未归因',
+        rule_id: e.value?.rule_id || String(e.name || '').split('.').pop() || '—',
+        file: e.source?.path || '',
+        line_no: e.source?.line_start,
+        text: e.excerpt || '',
+        timestamp: e.event_time?.value || '',
+        site: e.entity?.site || '',
+      };
+    });
+  } else {
+    for (const c of candidates) {
+      for (const e of c.evidence || []) {
+        rows.push({ n: rows.length + 1, skill: c.skill,
+          root: c.root_cause || c.primary || '未归因', ...e });
+      }
     }
+    total = rows.length;
+    if (payload?.error) note = `证据库读取失败：${payload.error}；以下仅显示仲裁候选中的代表证据。`;
+    else if (payload && !payload.complete) note = `证据库共 ${payload.total} 条，当前只加载 ${payload.items.length} 条；请刷新重试。`;
   }
   if (!rows.length) {
     return `<div class="empty" style="padding:24px">${icon('search')}<p>暂无可定位证据，或技能未命中规则</p></div>`;
   }
-  return `<div class="table-wrap"><table class="data evidence-table"><thead><tr>
-    <th>#</th><th>规则</th><th>文件:行</th><th>片段</th></tr></thead><tbody>
-    ${rows.slice(0, 30).map((r) => `<tr>
-      <td><span class="cite">E${r.n}</span></td>
-      <td><span class="mono">${esc(r.rule_id || '—')}</span><div class="tiny muted">${esc(r.skill)}</div></td>
-      <td class="mono tiny evidence-path"><details><summary>${esc(pathBasename(r.file) || '—')}${r.line_no ? `:${r.line_no}` : ''}</summary>
-        <div class="evidence-full-path">${esc(r.file || '—')}</div></details></td>
-      <td class="small evidence-text">${esc((r.text || '').slice(0, 120))}${(r.text || '').length > 120 ? '…' : ''}</td>
-    </tr>`).join('')}</tbody></table></div>`;
+  const groups = [];
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = `${r.root || '未归因'}\u0000${r.skill || '—'}\u0000${r.rule_id || '—'}`;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { root: r.root || '未归因', skill: r.skill || '—', rule_id: r.rule_id || '—',
+        entries: [], sites: new Set(), search: '' };
+      byKey.set(key, g); groups.push(g);
+    }
+    g.entries.push(r);
+    if (r.site) g.sites.add(r.site);
+    g.search += ` ${r.root || ''} ${r.skill || ''} ${r.rule_id || ''} ${r.file || ''} ${r.text || ''}`.toLowerCase();
+  }
+  const rootOptions = [...new Set(groups.map((g) => g.root))].sort();
+  const skillOptions = [...new Set(groups.map((g) => g.skill))].sort();
+  const groupHtml = groups.map((g, gi) => {
+    const sites = [...g.sites].slice(0, 4);
+    return `<details class="evidence-group ${gi >= 5 ? 'evidence-extra' : ''}" open="${gi < 5 ? 'open' : ''}"
+      data-search="${esc(g.search)}" data-skill="${esc(g.skill)}" data-root="${esc(g.root)}">
+      <summary>
+        <span class="badge warn">${esc(g.root)}</span>
+        <strong>${esc(g.rule_id)}</strong>
+        <span class="muted tiny">${esc(g.skill)} · ${g.entries.length} 条证据</span>
+        ${sites.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}
+      </summary>
+      <div class="table-wrap"><table class="data evidence-table"><thead><tr>
+        <th>#</th><th>规则</th><th>文件:行</th><th>片段</th></tr></thead><tbody>
+        ${g.entries.map((r) => `<tr>
+          <td><span class="cite">E${r.n}</span></td>
+          <td><span class="mono">${esc(r.rule_id || '—')}</span><div class="tiny muted">${esc(r.skill)}</div></td>
+          <td class="mono tiny evidence-path"><details><summary>${esc(pathBasename(r.file) || '—')}${r.line_no ? `:${r.line_no}` : ''}</summary>
+            <div class="evidence-full-path">${esc(r.file || '—')}</div></details>
+            ${r.timestamp ? `<div class="tiny muted">${esc(r.timestamp)}</div>` : ''}</td>
+          <td class="small evidence-text">${esc((r.text || '').slice(0, 180))}${(r.text || '').length > 180 ? '…' : ''}
+            ${(r.text || '').length > 180 ? `<details><summary>展开原文</summary><pre class="evidence-pre">${esc(r.text)}</pre></details>` : ''}</td>
+        </tr>`).join('')}</tbody></table></div>
+    </details>`;
+  }).join('');
+  const hidden = Math.max(0, groups.length - 5);
+  return `<div id="evidence-controls" class="evidence-controls">
+    <div class="inline" style="gap:8px;flex-wrap:wrap">
+      <div class="search">${icon('search')}<input class="input" id="evidence-query" placeholder="搜索根因 / 规则 / 文件 / 片段"></div>
+      <select class="select" id="evidence-skill-filter"><option value="">全部技能</option>${skillOptions.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+      <select class="select" id="evidence-root-filter"><option value="">全部根因</option>${rootOptions.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+      ${groups.length > 5 ? `<button class="btn btn-sm" id="evidence-show-all">${evidenceShowAll ? '收起后 5 组' : `查看全部 ${groups.length} 组`}</button>` : ''}
+    </div>
+    <div class="help" style="margin:8px 0 12px">证据库共 <strong>${total}</strong> 条，聚合为 <strong>${groups.length}</strong> 组（根因 + 规则）；当前显示 <span id="evidence-visible">${Math.min(5, groups.length)}</span> 组。${note ? `<span class="danger-text">${esc(note)}</span>` : ''}</div>
+  </div>
+  <div class="evidence-list ${evidenceShowAll ? 'show-all' : ''}">${groupHtml}</div>`;
+}
+
+function applyEvidenceFilters(view) {
+  const list = view.querySelector('.evidence-list');
+  if (!list) return;
+  const q = (view.querySelector('#evidence-query')?.value || '').trim().toLowerCase();
+  const skill = view.querySelector('#evidence-skill-filter')?.value || '';
+  const root = view.querySelector('#evidence-root-filter')?.value || '';
+  let visible = 0;
+  list.querySelectorAll('.evidence-group').forEach((g) => {
+    const ok = (!q || (g.dataset.search || '').includes(q))
+      && (!skill || g.dataset.skill === skill)
+      && (!root || g.dataset.root === root);
+    g.classList.toggle('hide', !ok);
+    if (ok) visible += 1;
+  });
+  if (q || skill || root) list.classList.add('show-all');
+  if (!q && !skill && !root && !evidenceShowAll) visible = Math.min(visible, 5);
+  const counter = view.querySelector('#evidence-visible');
+  if (counter) counter.textContent = String(visible);
+}
+
+function decisionCardsPanel(task) {
+  const cards = task.result?.arbitration?.decision_cards || [];
+  if (!cards.length) return '';
+  const stateLabel = { supported: '证据支持', contradicted: '存在反证', missing_data: '缺少数据', unknown: '未判定' };
+  const stateBadge = { supported: 'ok', contradicted: 'danger', missing_data: 'warn', unknown: 'muted' };
+  return `<div class="card" style="margin-top:16px">
+    <div class="card-head"><h2>根因决策卡</h2><span class="sub">必要证据、反证与近邻鉴别；缺扫描不等于反证</span></div>
+    <div class="card-body"><div class="stack" style="gap:10px">
+      ${cards.map((c) => {
+        const necessary = (c.necessary_evidence || []).map((e) =>
+          `<span class="badge ${e.present ? 'ok' : 'muted'}">${e.present ? '已命中' : '缺失'} · ${esc(e.rule)}</span>`).join(' ');
+        const counters = (c.counter_evidence || []).map((e) =>
+          `<span class="badge ${e.present ? 'danger' : 'muted'}">${e.present ? '反证命中' : '未见反证'} · ${esc(e.rule)}</span>`).join(' ');
+        return `<details class="evidence-group" open>
+          <summary><span class="badge ${stateBadge[c.state] || 'muted'}">${esc(stateLabel[c.state] || c.state || '未判定')}</span>
+            <strong>${esc(c.root_cause || c.root_id || '—')}</strong>
+            <span class="mono tiny">${esc(c.condition || '')}</span></summary>
+          <div class="small" style="padding:8px 12px 12px">
+            <div style="margin-bottom:4px"><strong>必要证据：</strong>${necessary || '<span class="muted">未定义</span>'}</div>
+            <div style="margin-bottom:4px"><strong>反证：</strong>${counters || '<span class="muted">未定义</span>'}</div>
+            ${(c.near_miss || []).length ? `<div style="margin-bottom:4px"><strong>近邻鉴别：</strong>${c.near_miss.map((x) => `<span class="chip">${esc(x.fault || '')}${x.differentiator ? `：${esc(x.differentiator)}` : ''}</span>`).join(' ')}</div>` : ''}
+            ${(c.missing_evidence || []).length ? `<div class="tiny muted">缺失规则：${esc((c.missing_evidence || []).join('、'))}</div>` : ''}
+            ${(c.limitations || []).length ? `<div class="tiny muted">${esc((c.limitations || []).join('；'))}</div>` : ''}
+          </div>
+        </details>`;
+      }).join('')}
+    </div></div>
+  </div>`;
 }
 
 function timelineHtml(events) {
@@ -503,6 +621,7 @@ const DETAIL_TABS = [
   ['evidence', '证据与技能'],
   ['report', '诊断报告'],
   ['runtime', '运行详情'],
+  ['trace', '执行过程'],
 ];
 
 function supplementPanel(task) {
@@ -542,13 +661,14 @@ function supplementPanel(task) {
   </div>`;
 }
 
-function renderBody(task, activeTab = 'overview') {
+function renderBody(task, activeTab = 'overview', evidencePayload = null) {
   const inventory = task.result?.inventory || {};
   const hints = inventory.detected_hints || [];
   const files = task.inputs || [];
+  const visibleTabs = DETAIL_TABS.filter(([k]) => k !== 'trace' || state.user?.role === 'admin');
   const tabBtn = (key, label) => `<button type="button" class="${activeTab === key ? 'active' : ''}" data-detail-tab="${key}">${label}</button>`;
   return `
-  <nav class="tabs detail-tabs" aria-label="任务详情分区" style="margin-top:16px">${DETAIL_TABS.map(([k, v]) => tabBtn(k, v)).join('')}</nav>
+  <nav class="tabs detail-tabs" aria-label="任务详情分区" style="margin-top:16px">${visibleTabs.map(([k, v]) => tabBtn(k, v)).join('')}</nav>
   <section class="detail-panel ${activeTab === 'overview' ? '' : 'hide'}" data-detail-panel="overview">
     <div class="grid" style="grid-template-columns:minmax(0,1.45fr) minmax(0,.75fr);margin-top:16px">
       <div class="card">
@@ -582,9 +702,10 @@ function renderBody(task, activeTab = 'overview') {
         </div>
       </div>
       <div class="stack">
+        ${decisionCardsPanel(task)}
         <div class="card">
-          <div class="card-head"><h2>证据链</h2><span class="sub">可回查 文件:行</span></div>
-          <div class="card-body tight">${evidenceTable(task)}</div>
+          <div class="card-head"><h2>证据链</h2><span class="sub">按根因与规则聚合，可回查 文件:行</span></div>
+          <div class="card-body tight">${evidenceTable(task, evidencePayload)}</div>
         </div>
       </div>
     </div>
@@ -604,7 +725,13 @@ function renderBody(task, activeTab = 'overview') {
       <div class="card-head"><h2>执行时间线</h2><span class="sub">实时事件（SSE）</span></div>
       <div class="card-body">${timelineHtml(task.events)}</div>
     </div>
-  </section>`;
+  </section>
+
+  ${state.user?.role === 'admin' ? `<section class="detail-panel ${activeTab === 'trace' ? '' : 'hide'}" data-detail-panel="trace">
+    <div class="card" style="margin-top:16px"><div class="card-head"><h2>执行过程</h2>
+      <span class="sub">模型完整输入输出、工具调用与校验失败详情</span></div>
+      <div class="card-body" id="task-trace-panel"><div class="muted small">${icon('refresh')} 正在读取轨迹…</div></div></div>
+  </section>` : ''}`;
 }
 
 function reportPanel(task) {
@@ -635,6 +762,9 @@ export async function renderTaskDetail(taskId) {
   let lastSeq = 0;
   let activeDetailTab = null;
   let reportView = 'html';
+  let evidencePayload = null;
+  let evidenceLoading = false;
+  evidenceShowAll = false;
 
   function loadReportHtml() {
     if (!task?.has_report) return;
@@ -663,6 +793,29 @@ export async function renderTaskDetail(taskId) {
     else loadReportMarkdown();
   }
 
+  async function ensureEvidence(force = false) {
+    if (evidenceLoading || (!force && evidencePayload)) return evidencePayload;
+    evidenceLoading = true;
+    try {
+      const items = [];
+      let total = 0;
+      let offset = 0;
+      for (let page = 0; page < 40; page += 1) {
+        const data = await api(`/api/tasks/${encodeURIComponent(task.id)}/evidence?limit=500&offset=${offset}`);
+        total = Number(data.total || 0);
+        items.push(...(data.items || []));
+        if (!data.items?.length || items.length >= total) break;
+        offset += data.items.length;
+      }
+      evidencePayload = { items, total, complete: items.length >= total };
+	} catch (err) {
+      evidencePayload = { items: [], total: 0, complete: false, error: err.message };
+    } finally {
+      evidenceLoading = false;
+    }
+    return evidencePayload;
+  }
+
   function setDetailTab(name) {
     activeDetailTab = name;
     view.querySelectorAll('[data-detail-tab]').forEach((btn) => {
@@ -672,6 +825,30 @@ export async function renderTaskDetail(taskId) {
       panel.classList.toggle('hide', panel.dataset.detailPanel !== name);
     });
     if (name === 'report') setReportView(reportView);
+    if (name === 'trace') loadTaskTracePanel();
+    if (name === 'evidence' && !evidencePayload) {
+      ensureEvidence().then(() => { if (activeDetailTab === 'evidence') render(); });
+    }
+  }
+
+  async function loadTaskTracePanel() {
+    const host = view.querySelector('#task-trace-panel');
+    if (!host || !task) return;
+    try {
+      const data = await api(`/api/traces?kind=diagnosis&ref_id=${encodeURIComponent(task.id)}&limit=20`);
+      const items = data.items || [];
+      host.innerHTML = items.length ? `<div class="stack">${items.map((item) => `<div class="between" style="gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid #eef2f7">
+        <div><a href="#/traces/${encodeURIComponent(item.id)}"><strong>${esc(item.id)}</strong></a>
+          <span class="badge info" style="margin-left:6px">第 ${esc(item.attempt_no || 1)} 次</span>
+          <span class="badge ${item.status === 'success' ? 'ok' : item.status === 'failed' ? 'danger' : 'muted'}" style="margin-left:4px">${esc(item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : item.status)}</span>
+          <div class="tiny muted" style="margin-top:4px">${fmtDate(item.started_at)} · ${esc(item.event_count || 0)} 个事件 · ${esc(item.model_calls || 0)} 次模型 · ${esc(item.tool_calls || 0)} 次工具</div>
+          ${item.error_summary ? `<div class="small" style="margin-top:4px;color:#b91c1c">${esc(item.error_summary)}</div>` : ''}
+        </div>
+        <a class="btn btn-sm" href="#/traces/${encodeURIComponent(item.id)}">查看完整过程</a>
+      </div>`).join('')}</div>` : `<div class="empty" style="padding:24px">${icon('history')}<h3>还没有执行轨迹</h3><p>任务运行后会自动记录；如果刚刚启动，请稍后刷新。</p></div>`;
+    } catch (err) {
+      host.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
+    }
   }
 
   function render() {
@@ -683,7 +860,7 @@ export async function renderTaskDetail(taskId) {
     const wasAtBottom = oldTimeline ? (oldTimeline.scrollHeight - oldTimeline.scrollTop - oldTimeline.clientHeight < 40) : true;
     const scrollTop = oldTimeline ? oldTimeline.scrollTop : 0;
     const pageScroll = window.scrollY;
-    view.innerHTML = renderHeader(task) + renderBody(task, activeDetailTab);
+    view.innerHTML = renderHeader(task) + renderBody(task, activeDetailTab, evidencePayload);
     const newTimeline = view.querySelector('#timeline');
     if (newTimeline) {
       newTimeline.scrollTop = wasAtBottom ? newTimeline.scrollHeight : scrollTop;
@@ -833,6 +1010,21 @@ export async function renderTaskDetail(taskId) {
     view.querySelectorAll('[data-report-tab]').forEach((btn) => {
       btn.addEventListener('click', () => setReportView(btn.dataset.reportTab));
     });
+    const evidenceControls = view.querySelector('#evidence-controls');
+    if (evidenceControls) {
+      const runFilter = () => applyEvidenceFilters(view);
+      view.querySelector('#evidence-query')?.addEventListener('input', runFilter);
+      view.querySelector('#evidence-skill-filter')?.addEventListener('change', runFilter);
+      view.querySelector('#evidence-root-filter')?.addEventListener('change', runFilter);
+      view.querySelector('#evidence-show-all')?.addEventListener('click', () => {
+        evidenceShowAll = !evidenceShowAll;
+        const list = view.querySelector('.evidence-list');
+        list?.classList.toggle('show-all', evidenceShowAll);
+        const btn = view.querySelector('#evidence-show-all');
+        if (btn) btn.textContent = evidenceShowAll ? '收起后 5 组' : `查看全部 ${view.querySelectorAll('.evidence-group').length} 组`;
+        applyEvidenceFilters(view);
+      });
+    }
     setDetailTab(activeDetailTab);
   }
 
@@ -862,6 +1054,7 @@ export async function renderTaskDetail(taskId) {
         try { task.recovery_runs = (await api(`/api/tasks/${encodeURIComponent(taskId)}/recovery-runs`)).runs; }
         catch { task.recovery_runs = []; }
       }
+      if (data.status === 'done') await ensureEvidence(true);
       const maxSeq = Math.max(0, ...(data.events || []).map((e) => e.seq));
       lastSeq = Math.max(lastSeq, maxSeq);
       (data.events || []).forEach((e) => seen.add(e.seq));

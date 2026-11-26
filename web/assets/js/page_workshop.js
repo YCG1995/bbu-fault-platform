@@ -172,6 +172,15 @@ export async function renderWorkshop() {
 
   const handlers = {
     'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes),
+    'view-job-trace': async (btn) => {
+      try {
+        const jobId = btn.dataset.job;
+        const data = await api(`/api/traces?kind=workshop&ref_id=${encodeURIComponent(jobId)}&limit=5`);
+        const item = (data.items || [])[0];
+        if (!item) { toast('该工坊任务还没有轨迹记录', 'warn'); return; }
+        location.hash = `#/traces/${encodeURIComponent(item.id)}`;
+      } catch (err) { toast(err.message, 'error'); }
+    },
     'workshop-step': (btn) => {
       workshopStep = Math.max(1, Math.min(5, Number(btn.dataset.step) || 1));
       detailEl.querySelectorAll('[data-workshop-panel]').forEach((panel) => {
@@ -520,10 +529,11 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
       </div>
       <div id="job-status" class="alert info" ${activeJob ? '' : 'hidden'}>${activeJob ? `${icon('activity')}<div>${esc(activeJob.message || '后台任务执行中')} · ${Number(activeJob.progress || 0)}%</div>` : ''}</div>
       ${(draft.jobs || []).length ? `<details style="margin-bottom:10px"><summary class="small muted">后台任务详情（${draft.jobs.length}）</summary>
-        <div class="table-wrap"><table class="data"><thead><tr><th>类型</th><th>状态</th><th>阶段</th><th>进度</th><th>更新时间</th><th>错误</th></tr></thead><tbody>
+        <div class="table-wrap"><table class="data"><thead><tr><th>类型</th><th>状态</th><th>阶段</th><th>进度</th><th>更新时间</th><th>错误</th>${isAdmin ? '<th>过程</th>' : ''}</tr></thead><tbody>
         ${draft.jobs.slice(0, 8).map((j) => `<tr><td>${esc(j.kind || '—')}</td><td>${statusBadge(j.status)}</td>
           <td>${esc(j.stage || '—')}</td><td>${Number(j.progress || 0)}%</td><td class="tiny">${fmtDate(j.updated_at || j.created_at)}</td>
-          <td class="tiny" style="color:#b91c1c">${esc((j.error || '').slice(0, 120))}</td></tr>`).join('')}
+          <td class="tiny" style="color:#b91c1c">${esc((j.error || '').slice(0, 120))}</td>
+          ${isAdmin ? `<td><button class="btn btn-sm" data-act="view-job-trace" data-job="${esc(j.id)}">${icon('history')}查看过程</button></td>` : ''}</tr>`).join('')}
         </tbody></table></div></details>` : ''}
       ${modelNoticeHtml(draft.model_status?.notice, { compact: true })}
       <div class="alert ${quality.ok === false ? 'warn' : 'info'}">${icon('info')}<div><strong>当前下一步：</strong>${esc(nextStep)}
