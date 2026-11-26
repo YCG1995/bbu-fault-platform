@@ -19,6 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "cases_dir": "cases",
     "examples_dir": "examples",
     "meta_skill_dir": "meta/bbu-fault-skill-builder",
+    "domain_pack": "bbu",
     "max_workers": 4,
     "max_queue": 32,
     "max_skill_parallel": 4,
@@ -118,6 +119,7 @@ ENV_OVERRIDES = {
     "BBU_DATA_DIR": ("data_dir", str),
     "BBU_SKILLS_DIR": ("skills_dir", str),
     "BBU_CASES_DIR": ("cases_dir", str),
+    "BBU_META_DOMAIN_PACK": ("domain_pack", str),
     "BBU_MAX_WORKERS": ("max_workers", int),
     "BBU_SESSION_HOURS": ("session_hours", int),
     "BBU_SESSION_WARN_SEC": ("session_warn_sec", int),
@@ -326,6 +328,11 @@ class Config:
     @property
     def meta_skill_dir(self) -> Path:
         return Path(self.values["meta_skill_dir"])
+
+    @property
+    def domain_pack(self) -> str:
+        """平台默认域包；子技能 manifest/profile 可覆盖。"""
+        return str(self.values.get("domain_pack") or "bbu")
 
     @property
     def db_path(self) -> Path:

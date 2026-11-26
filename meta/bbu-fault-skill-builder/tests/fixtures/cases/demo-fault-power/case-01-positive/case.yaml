@@ -1,0 +1,13 @@
+id: case-01-positive
+skill: demo-fault-power
+description: "输出电压低于门限"
+device: DEMO
+tags: [demo]
+kind: positive
+input:
+  archive: input/psu.log
+pipeline: [unpack, search]
+expected:
+  root_cause: C1
+  hit_rules: [R1]
+  not_hit_rules: []

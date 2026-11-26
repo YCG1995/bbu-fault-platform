@@ -1,0 +1,32 @@
+skill:
+  name: demo-fault-power
+  title: 电源模块输出电压异常
+  version: 0.1.0
+  execution_mode: script
+category: 硬件故障
+fault:
+  name: 电源模块输出电压异常
+  aliases: [输出电压低]
+  domain:
+    device_types: [DEMO]
+symptoms:
+  description_keywords: [电压低, 电源异常]
+analysis:
+  steps:
+    - id: S1
+      name: 检查输出电压
+      rules:
+        - id: R1
+          type: text
+          description: 输出电压低于门限
+          globs: ["*.log"]
+          all_of: ["voltage.*low"]
+          verified: true
+root_causes:
+  - id: C1
+    name: 电源模块输出异常
+    condition: R1
+    confidence: high
+    mechanism: 电源模块输出电压低于门限
+    actions: [更换电源模块]
+    verify: []

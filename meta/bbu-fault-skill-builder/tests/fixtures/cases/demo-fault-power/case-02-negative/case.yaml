@@ -1,0 +1,13 @@
+id: case-02-negative
+skill: demo-fault-power
+description: "输出电压正常"
+device: DEMO
+tags: [demo]
+kind: negative
+input:
+  archive: input/psu.log
+pipeline: [unpack, search]
+expected:
+  root_cause: NONE
+  hit_rules: []
+  not_hit_rules: [R1]

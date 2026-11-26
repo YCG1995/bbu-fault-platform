@@ -1,0 +1,33 @@
+schema: skill-domain-pack/1
+id: bbu
+version: 1.0.0
+title: BBU 基站
+description: "BBU/ITBBU/SDR 基站的日志包、时钟、CloudMAT、FM 告警与报告用语。"
+requires:
+  contract: ">=2,<3"
+  engine: ">=2.13,<3"
+applies_to:
+  device_types: [BBU, ITBBU, SDR, CloudMAT]
+  vendors: [ZTE]
+profile_extensions:
+  allow:
+    - fault.domain
+    - components
+    - evidence.parsers
+  defaults:
+    components: [parse_clock, parse_cloudmat, fm_alarm_align]
+components:
+  parsers: [parse_clock, parse_cloudmat, fm_alarm_align]
+  assets: [alarm_dict, clk_dict, common_rules]
+format_policy:
+  detect_by: magic
+  opaque_name_patterns: ["*verprotect*", "*gnssoriginalmsg*"]
+  force_text: ["BspMoni.log", "uartlog*.txt"]
+  force_opaque: []
+routing:
+  name_prefix: bbu-fault
+  triggers: [BspMoni, VSW, CloudMAT, 单板通讯链路, 时钟失锁, 光模块, 复位]
+  category_enum: [硬件故障, 时钟, 电源, 链路, 复位, 升级, CloudMAT]
+report:
+  default_locale: zh-CN
+  labels: report-labels.zh.yaml

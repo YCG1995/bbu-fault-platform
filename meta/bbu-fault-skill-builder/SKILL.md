@@ -1,13 +1,15 @@
 ---
 name: bbu-fault-skill-builder
-description: "把 ITRAN/SDR 等基站的时钟、电源、光模块、链路、复位、升级、CloudMAT 拷机等故障诊断经验生成可复用子 Skill。用于创建、更新、同步 BBU 故障分析 Skill，或从真实案例、专家经验、黑匣子/蜂鸟规则库构建 fault-profile；不用于直接分析单次故障。输入日志与故障描述，输出根因、证据和处理方案报告。"
+description: "把领域专家的故障诊断经验生成可复用、可回归、可迁移的技能包。核心不绑定具体领域；通过 domain-pack 注入设备模型、日志格式、规则词典与报告用语。内置 BBU 域包作为参考实现，可替换为其它日志域。用于创建、更新、同步诊断 Skill，或从真实案例、专家经验、规则库构建 fault-profile；不用于直接分析单次故障。"
 ---
 
-# BBU 故障分析 Skill 生成器
+# 诊断技能生成器
 
 ## 目标与边界
 
-生成 `bbu-fault-<slug>` 子 Skill，不直接分析故障。一个子 Skill 只覆盖一类故障及其判别分支。
+生成 `<domain-pack.routing.name_prefix>-<slug>` 子 Skill，不直接分析故障。一个子 Skill 只覆盖一类故障及其判别分支。
+
+**域包边界**：本 Skill 的内核（`scripts/` 通用构建/运行部分）不知道 BBU、BspMoni、CloudMAT、时钟或单板；这些属于 `domains/<id>/` 域包。默认域包为 `bbu`，换域时只换域包，不改内核。
 
 **交付门槛**：至少 1 个可访问的正例（日志、已知根因、预期证据）；根因条件只引用已在真实案例验证的规则；处理方案来自用户或专家确认。缺正例时只整理访谈与候选 profile，不生成"已验证"技能。
 
@@ -41,9 +43,18 @@ description: "把 ITRAN/SDR 等基站的时钟、电源、光模块、链路、�
 
 ## 构建流程
 
+### 0. 确认域包
+
+```bash
+python3 scripts/domain_pack.py --list
+python3 scripts/domain_pack.py --describe bbu
+```
+
+默认 `bbu`；也可以用 `--domain-pack <id|path>` 指定其它域包。域包提供设备枚举、组件默认值、格式策略、报告用语和 `routing.name_prefix`。若域包不存在，明确报 `DOMAIN_PACK_NOT_FOUND`，不要静默回退 BBU。
+
 ### 1. 受理并准备 profile
 
-1. 确认故障范围、设备/版本、采集方式和正例。按 `references/workflow/intake-questionnaire.md` 补齐缺失字段；对外收集用 `references/workflow/submission-template.md`；日志包结构查 `references/platform/log-package-map.md`；单板域知识按单板域到 `references/domains/` 取用，不跨单板套用，也不在主线展开。
+1. 确认故障范围、设备/版本、采集方式和正例。按 `references/workflow/intake-questionnaire.md` 补齐缺失字段；对外收集用 `references/workflow/submission-template.md`。若使用 BBU 域包，日志包结构查 `references/platform/log-package-map.md`，单板域知识按单板域到 `references/domains/` 取用，不跨单板套用；其它域包查 `domains/<id>/references/`。
 2. 复制 `assets/templates/child-skill/assets/fault-profile.yaml` 为工作 profile，填写规则、根因 `condition`、`mechanism`、处置动作和案例。字段含义仅在需要时查 `references/spec/child-skill-spec.md`。
 3. 已有黑匣子/蜂鸟规则库时，用 `scripts/import_rule_library.py` 生成**候选** profile（`mode: triage`）；候选规则仍须案例验证，不能直接交付。
 
@@ -54,7 +65,7 @@ description: "把 ITRAN/SDR 等基站的时钟、电源、光模块、链路、�
 在本 Skill 目录执行：
 
 ```bash
-python3 scripts/publish.py --profile <fault-profile.yaml> --path <skills根> --cases-dir <案例库根>
+python3 scripts/publish.py --profile <fault-profile.yaml> --path <skills根> --cases-dir <案例库根> --domain-pack <域包id>
 ```
 
 `publish.py` 在同文件系统临时目录依次完成 profile 校验、子 Skill 生成、规范校验、全案例判定、根因/规则覆盖门禁和关键案例端到端报告门禁，全部通过后才原子替换正式目录，再打包（可附 CHANGELOG）和同步安装位；失败不覆盖旧版本，并自动保留完整阶段日志。只要产物、不打包用 `build_child_skill.py`，参数相同。完整参数（`--zip-out` / `--install-dir` / `--sync-skills` / `--dry-run` / `--log-dir`）见 `references/workflow/toolkit.md`「一键入口」。
@@ -87,13 +98,14 @@ python3 scripts/skill_sync.py --reclaim <子Skill目录> --apply
 
 | 文件 | 何时读取 |
 |---|---|
-| `references/spec/child-skill-spec.md` | profile schema、组件、verdict、报告契约 |
+| `domains/bbu/domain-pack.yaml` | BBU 域包：设备枚举、组件、格式策略、报告标签；换域时参考此结构 |
+| `references/spec/child-skill-spec.md` | profile schema、组件、verdict、报告契约（域包扩展字段以此为准） |
 | `references/workflow/intake-questionnaire.md` | agent 追问口径：规则、机理、处置与案例的验收标准 |
 | `references/workflow/submission-template.md` | 发给业务/领域专家填写的对外表单 |
 | `references/workflow/validation-protocol.md` | 建案例库、写稳定断言、处理回归失败 |
 | `references/workflow/toolkit.md` | 高级脚本参数、规则库导入、同步与排错 |
-| `references/platform/log-package-map.md` | 写 glob，识别 DCM/SDR/设备侧/CloudMAT/FM 数据格式 |
+| `references/platform/log-package-map.md` | **BBU 域包**：写 glob，识别 DCM/SDR/设备侧/CloudMAT/FM 数据格式 |
 | `references/platform/input-collection-contract.md` | 平台对接：输入参数、DCM 采集项、缺项降级、场景模板覆盖、router 索引字段 |
-| `references/domains/` | 单板域知识，按单板取用：VSWe 工装测试 → `clk-fixture-map.md`；VSWe 现场/网管维测 → `vswe-clock-maintenance.md`；ITRAN 寄存器 → `fpga-register-map.md`。分不清时看各文件头的"何时读本文件" |
+| `references/domains/` | **BBU 域包**：单板域知识，按单板取用：VSWe 工装测试 → `clk-fixture-map.md`；VSWe 现场/网管维测 → `vswe-clock-maintenance.md`；ITRAN 寄存器 → `fpga-register-map.md`。分不清时看各文件头的"何时读本文件" |
 
 所有命令路径相对本 SKILL.md 目录；跨目录执行时改用绝对路径。Windows 用 `python`，不要在 PowerShell 中拼接 `&&` 或合并 stdout/stderr。

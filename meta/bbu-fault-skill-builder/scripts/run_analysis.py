@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the BBU child-skill pipeline once and emit a verified user-facing report."""
+"""Run the diagnostic child-skill pipeline once and emit a run-result envelope + report."""
 import argparse
 import hashlib
 import json
@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -54,6 +55,69 @@ def run_stage(stage, cmd, logs):
     if proc.returncode:
         detail = log_tail(err) or log_tail(out)
         raise StageError(f"{stage} 失败（退出码 {proc.returncode}）。日志: {err}\n{detail}")
+
+
+def coverage_of(ev: dict) -> dict:
+    results = ev.get("results") or []
+    scanned = sum(1 for r in results if int(r.get("files_scanned") or 0) > 0)
+    matched = sum(1 for r in results if int(r.get("match_count") or 0) > 0)
+    skipped = sum(int(r.get("skipped_count") or 0) for r in results)
+    return {
+        "rules_total": len(results),
+        "rules_scanned": scanned,
+        "rules_matched": matched,
+        "files_skipped": skipped,
+        "complete": bool(results) and scanned == len(results),
+    }
+
+
+def derive_status(ev: dict) -> str:
+    verdict = ev.get("verdict") or {}
+    if ev.get("mode") == "triage":
+        return "triage"
+    status = str(verdict.get("status") or "unmatched")
+    cov = coverage_of(ev)
+    if status == "unmatched" and cov["rules_total"] and cov["rules_scanned"] == 0:
+        return "insufficient_data"
+    return status
+
+
+def write_result(out: Path, payload: dict, explicit: str | None = None) -> Path:
+    target = Path(explicit).expanduser().resolve() if explicit else out / "run-result.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def result_payload(ev: dict, *, ok: bool, complete: bool, out: Path,
+                   error: str = "", degradations: list[str] | None = None,
+                   duration_ms: int = 0) -> dict:
+    manifest = read_json(ASSETS / "skill-manifest.json", {}) or {}
+    verdict = ev.get("verdict") or {}
+    status = derive_status(ev) if ev else "error"
+    primary = verdict.get("primary") or "NONE"
+    return {
+        "schema": "run-result/1",
+        "ok": ok,
+        "complete": complete,
+        "skill": {"name": manifest.get("name", ""),
+                  "version": manifest.get("version", ""),
+                  "domain": manifest.get("domain") or {}},
+        "status": status,
+        "primary": primary,
+        "verdict": verdict,
+        "coverage": coverage_of(ev) if ev else {},
+        "degradations": degradations or [],
+        "artifacts": {
+            "report_md": str(out / "report.md") if (out / "report.md").exists() else "",
+            "report_html": str(out / "report.html") if (out / "report.html").exists() else "",
+            "evidence_json": str(out / "evidence.json") if (out / "evidence.json").exists() else "",
+            "evidence_brief": str(out / "evidence.brief.md") if (out / "evidence.brief.md").exists() else "",
+            "summary": str(out / "run-summary.json") if (out / "run-summary.json").exists() else "",
+        },
+        "error": error or None,
+        "duration_ms": duration_ms,
+    }
 
 
 def archive_name(path):
@@ -188,9 +252,9 @@ def save_cache(cache_dir, sig, products):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="一键执行 BBU 日志分析并校验最终报告")
+    ap = argparse.ArgumentParser(description="一键执行诊断日志分析并校验最终报告")
     ap.add_argument("inputs", nargs="+", help="日志包、单个日志或已解压目录；可多给文件")
-    ap.add_argument("--description", required=True, help="用户故障描述原文")
+    ap.add_argument("--description", default="", help="用户故障描述原文（可选；缺失时报告标注未提供）")
     ap.add_argument("--out", help="输出目录（默认取首个输入的同级目录 <输入名>.analysis，不落在 skill 目录下）")
     ap.add_argument("--site", help="仅输出 verdict.groups 中的指定站点")
     ap.add_argument("--specialized", help="gen_specialized.py 生成的复核 JSON")
@@ -202,10 +266,13 @@ def main():
                     help="禁用增量缓存（unpack/search/clock/cloudmat 全量重跑）")
     ap.add_argument("--no-precheck", action="store_true",
                     help="禁用 common-rules 采集完整性预检（存在 common-rules.yaml 时默认启用）")
+    ap.add_argument("--result-json", help="结果信封路径（默认 <out>/run-result.json）")
     args = ap.parse_args()
+    started = time.time()
 
     out = None
     logs = None
+    ev = None
     try:
         # 显式输出目录尽早确定：即使后续输入/资源检查失败，也能留下失败摘要。
         if args.out:
@@ -334,37 +401,58 @@ def main():
             cmd += ["--specialized", args.specialized]
         if args.site:
             cmd += ["--site", args.site]
-        run_stage("verify", cmd, logs)
+        verify_error = ""
+        try:
+            run_stage("verify", cmd, logs)
+        except StageError as exc:
+            # 报告门禁失败不等于诊断失败：结论、证据保留，complete=false。
+            verify_error = str(exc)
 
         mf = (read_json(manifest_path, {}) or {}) if manifest_path else {}
-        verdict = ev.get("verdict") or {}
+        status = derive_status(ev)
+        primary = str((ev.get("verdict") or {}).get("primary") or "NONE")
+        degradations = list((mf.get("warnings") or []) + notes)
+        if verify_error:
+            degradations.append("REPORT_GATE_FAILED: " + verify_error)
         summary = {
-            "ok": True,
+            "ok": not verify_error,
+            "complete": not verify_error,
             "cached": cached,
             "mode": ev.get("mode") or "normal",
-            "status": "triage" if ev.get("mode") == "triage" else verdict.get("status", "unmatched"),
-            "primary": verdict.get("primary", "NONE"),
+            "status": status,
+            "primary": primary,
             "sites": ev.get("detected_sites") or [s.get("root") for s in mf.get("sites", [])
                                                   if isinstance(s, dict)],
-            "report_md": str(report_md),
-            "report_html": str(report_html),
+            "report_md": str(report_md) if report_md.exists() else "",
+            "report_html": str(report_html) if report_html.exists() else "",
             "evidence_brief": str(out / "evidence.brief.md"),
             "manifest_summary": str(work / "manifest.summary.json") if (work / "manifest.summary.json").exists() else None,
-            "warnings": (mf.get("warnings") or []) + notes,
+            "warnings": degradations,
             "unsupported_archives": len(mf.get("unsupported_archives") or []),
             "glob_fallback": len(ev.get("glob_fallback") or []),
         }
         (out / "run-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2),
                                                encoding="utf-8")
-        print(json.dumps(summary, ensure_ascii=False))
+        payload = result_payload(ev, ok=True, complete=not verify_error, out=out,
+                                 error=verify_error, degradations=degradations,
+                                 duration_ms=int((time.time() - started) * 1000))
+        payload["summary"] = summary
+        write_result(out, payload, args.result_json)
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
     except (StageError, OSError) as exc:
-        error = {"ok": False, "error": str(exc), "logs": str(logs) if logs else None}
+        payload = result_payload(ev or {}, ok=False, complete=False, out=out or Path("."),
+                                 error=str(exc), duration_ms=int((time.time() - started) * 1000))
+        payload["logs"] = str(logs) if logs else None
+        error = {"ok": False, "complete": False, "status": payload.get("status", "error"),
+                 "primary": payload.get("primary", "NONE"), "error": str(exc),
+                 "logs": str(logs) if logs else None}
         if out is not None:
             try:
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "run-summary.json").write_text(
                     json.dumps(error, ensure_ascii=False, indent=2), encoding="utf-8")
+                write_result(out, payload, args.result_json)
             except OSError:
                 # 输出目录不可写时仍保留 stderr 的机器可读错误，不能再抛出二次异常。
                 pass

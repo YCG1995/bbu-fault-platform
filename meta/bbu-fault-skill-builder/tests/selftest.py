@@ -454,8 +454,8 @@ def main():
         check(not list(sd.rglob("__pycache__")) and not list(sd.rglob("*.pyc")), "子 Skill 无 __pycache__/pyc")
         r = run([SCRIPTS / "validate_skill_md.py", sd])
         check(r.returncode == 0, "子 Skill frontmatter 符合 Agent Skills 规范（仅 name/description）")
-        check("compatibility:" not in skill_md and "metadata:" not in skill_md,
-              "frontmatter 仅含 name/description（compatibility/metadata 已收敛）")
+        check("compatibility:" in skill_md and "metadata:" in skill_md,
+              "frontmatter 含 compatibility/metadata（通用技能契约）")
         # 别名含 YAML 特殊字符（: # "）时 frontmatter 仍可解析
         spicy = json.loads(json.dumps(_load_profile_json()))
         spicy["skill"]["name"] = "bbu-fault-spicy"
@@ -492,7 +492,7 @@ def main():
               and stamp["files"].get("scripts/search_evidence.py"),
               "版本戳: 全新生成=第1代，幂等 update 不递增 + 受管文件哈希")
         skill_md2 = (sd / "SKILL.md").read_text(encoding="utf-8")
-        check(stamp["digest"] in skill_md2 and "bbu-fault-skill-builder v" in skill_md2,
+        check(stamp["digest"] in skill_md2 and "diagnostic-skill-builder v" in skill_md2,
               "SKILL.md 尾部含版本戳注释")
         r = run([SCRIPTS / "scaffold_child_skill.py", "--inspect", sd])
         check(r.returncode == 0 and "同步" in r.stdout, "--inspect 全新子 skill 判定同步（rc=0）")

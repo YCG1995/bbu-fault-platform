@@ -143,6 +143,14 @@ def manifest_for_skill(skill: Any, config: Any) -> ToolManifest:
     raw = profile.get("tool") if isinstance(profile.get("tool"), dict) else {}
     if not raw and isinstance(profile.get("tool_contract"), dict):
         raw = profile["tool_contract"]
+    if not raw:
+        skill_manifest = getattr(skill, "manifest", {}) or {}
+        permissions = skill_manifest.get("permissions")
+        if isinstance(permissions, dict):
+            raw = dict(permissions)
+            limits = skill_manifest.get("limits") or {}
+            if limits.get("timeout_sec"):
+                raw.setdefault("timeout_sec", limits["timeout_sec"])
     risk = str(raw.get("risk") or profile.get("risk") or "low").strip().lower()
     risk = _RISK_ALIASES.get(risk, risk)
     if risk not in RISK_LEVELS:
