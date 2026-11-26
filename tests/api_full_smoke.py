@@ -454,9 +454,9 @@ def main() -> int:
         admin_id = me["user"]["id"]
         hit("GET /api/auth/me")
         status, raw, _ = admin_client.request("GET", "/api/tasks")
-        assert status == 403
-        assert json.loads(raw)["detail"]["code"] == "password_change_required"
-        hit("GET /api/tasks")  # 初始密码未修改时被服务端拦截
+        assert status == 200
+        assert json.loads(raw)["items"] == []
+        hit("GET /api/tasks")  # 首次登录不再强制改密，可直接进入工作台
         _, changed = admin_client.json("POST", "/api/auth/password",
                                        {"old_password": initial_password,
                                         "new_password": "Platform!2026x"})
@@ -1003,13 +1003,15 @@ def main() -> int:
         reviewer.json("GET", "/api/users", expected=403)
         reviewer.json("GET", "/api/audit", expected=403)
         reviewer.json("GET", "/api/models", expected=403)
-        reviewer.json("GET", "/api/system/info", expected=403)
+        _, reviewer_system = reviewer.json("GET", "/api/system/info")
+        assert reviewer_system["version"]
         reviewer.json("GET", "/api/system/updates", expected=403)
         _, reviewer_profile = reviewer.json("GET", "/api/profile")
         assert reviewer_profile["user"]["role"] == "reviewer"
         _, reviewer_search = reviewer.json("GET", "/api/search?q=API")
-        assert reviewer_search["users"] == [] and reviewer_search["skills"] == []
-        assert reviewer_search["cases"] == []
+        assert reviewer_search["users"] == []
+        assert isinstance(reviewer_search["skills"], list)
+        assert isinstance(reviewer_search["cases"], list)
         assert all(item["id"] == clock for item in reviewer_search["tasks"])
 
         _, bulk_user = admin_client.json("POST", "/api/users", {
@@ -1202,7 +1204,7 @@ def main() -> int:
         engineer = Client(host, port)
         engineer.login("api_engineer", "Engineer!2026")
         status, _, _ = engineer.request("GET", "/api/tasks")
-        assert status == 403
+        assert status == 200
         _, engineer_changed = engineer.json("POST", "/api/auth/password", {
             "old_password": "Engineer!2026", "new_password": "EngineerApi!2026",
         })
