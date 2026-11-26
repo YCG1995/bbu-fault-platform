@@ -647,21 +647,44 @@ function renderMigrationPanel(panel, data) {
             <div class="help">导出在后台执行，完成后在下方任务记录中下载 .bbumig；请通过安全渠道传递迁移包和口令。</div>
           </div></div>
         </div>
-        <div class="card" style="margin-top:14px;background:#fff7ed;border-color:#fed7aa"><div class="card-head"><h2 class="small">覆盖恢复</h2><span class="sub">高风险</span></div><div class="card-body">
-          <div class="alert warn">${icon('alert')}<div>导入会用迁移包替换目标工作目录的 data / skills / cases，不做增量合并；当前业务数据会先备份到 <code>backups/import-任务ID</code>，健康检查失败会自动恢复旧目录。请确认这是新实例或已做好停机准备。</div></div>
-          <div class="form-grid" style="margin-top:10px">
-            <div class="form-row"><label class="label" for="migration-import-file">迁移包</label>
-              <input type="file" id="migration-import-file" accept=".bbumig,application/octet-stream" ${active ? 'disabled' : ''}></div>
-            <div class="form-row"><label class="label" for="migration-import-pass">迁移口令</label>
-              <input class="input mono" id="migration-import-pass" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+        <section class="migration-danger">
+          <div class="migration-danger-aside">
+            <div class="migration-danger-icon">${icon('alert')}</div>
+            <div class="migration-danger-title"><h3>覆盖恢复</h3><span class="badge danger">高风险</span></div>
+            <p>导入会用迁移包替换目标工作目录的 data / skills / cases，不做增量合并。请确认这是新实例或已做好停机准备。</p>
+            <ul class="migration-danger-list">
+              <li>当前业务数据先备份到 <code>backups/import-任务ID</code></li>
+              <li>健康检查失败自动恢复旧目录</li>
+              <li>迁移包与口令确认后才开始上传</li>
+            </ul>
+            <div class="migration-danger-tip">${icon('shield')}建议先在测试实例验证迁移包</div>
           </div>
-          <div class="form-row"><label class="label" for="migration-import-pass2">再次输入迁移口令</label>
-            <input class="input mono" id="migration-import-pass2" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
-          <button class="btn btn-danger" id="migration-import-btn" style="margin-top:10px" ${active ? 'disabled' : ''}>${icon('upload')}上传并恢复</button>
-          <div id="migration-import-state" class="small muted" style="margin-top:8px"></div>
-        </div></div>
-        <div style="margin-top:16px"><div class="between"><strong class="small">迁移记录</strong><span class="tiny muted">保留最近 30 条，导出包需手动删除</span></div>
-          ${items.length ? items.map(migrationJobCard).join('') : '<div class="empty" style="padding:24px"><p>暂无迁移任务。</p></div>'}
+          <div class="migration-danger-form">
+            <label class="migration-dropzone ${active ? 'is-disabled' : ''}" id="migration-import-file-box">
+              <input class="migration-file-input" type="file" id="migration-import-file"
+                accept=".bbumig,application/octet-stream" ${active ? 'disabled' : ''}>
+              <span class="migration-drop-icon">${icon('upload')}</span>
+              <span class="migration-drop-copy">
+                <strong id="migration-import-file-name">选择迁移包</strong>
+                <span id="migration-import-file-meta">支持 .bbumig，单包上限 ${data.max_migration_mb || '—'} MB</span>
+              </span>
+              <span class="btn btn-sm">浏览文件</span>
+            </label>
+            <div class="migration-pass-grid">
+              <div class="form-row"><label class="label" for="migration-import-pass">迁移口令</label>
+                <input class="input mono" id="migration-import-pass" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+              <div class="form-row"><label class="label" for="migration-import-pass2">再次输入迁移口令</label>
+                <input class="input mono" id="migration-import-pass2" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+            </div>
+            <div class="migration-import-actions">
+              <div id="migration-import-state" class="small muted">选择迁移包并填写两次口令后上传。</div>
+              <button class="btn btn-danger" id="migration-import-btn" ${active ? 'disabled' : ''}>${icon('upload')}上传并恢复</button>
+            </div>
+          </div>
+        </section>
+        <div class="migration-records">
+          <div class="migration-records-head"><div><h3>迁移记录</h3><span class="sub">导出、切换与恢复任务</span></div><span class="tiny muted">保留最近 30 条 · 导出包需手动删除</span></div>
+          ${items.length ? `<div class="migration-record-list">${items.map(migrationJobCard).join('')}</div>` : `<div class="migration-empty">${icon('history')}<div><strong>暂无迁移任务</strong><p>导出、切换工作目录或覆盖恢复后，任务进度会显示在这里。</p></div></div>`}
         </div>
       </div>
     </div>`;
@@ -729,11 +752,21 @@ function bindMigrationActions(panel, data) {
   });
 
   const fileInput = panel.querySelector('#migration-import-file');
-  fileInput?.addEventListener('change', () => {
-    const file = fileInput.files?.[0];
-    panel.querySelector('#migration-import-state').textContent = file
-      ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : '';
-  });
+  const fileBox = panel.querySelector('#migration-import-file-box');
+  const fileName = panel.querySelector('#migration-import-file-name');
+  const fileMeta = panel.querySelector('#migration-import-file-meta');
+  const importHint = `支持 .bbumig，单包上限 ${data.max_migration_mb || '—'} MB`;
+  const renderImportFile = () => {
+    const file = fileInput?.files?.[0];
+    fileBox?.classList.toggle('has-file', Boolean(file));
+    if (fileName) fileName.textContent = file ? file.name : '选择迁移包';
+    if (fileMeta) fileMeta.textContent = file
+      ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 点击可重新选择` : importHint;
+    const stateEl = panel.querySelector('#migration-import-state');
+    if (stateEl) stateEl.textContent = file
+      ? '已选择迁移包，填写两次口令后上传并恢复。' : '选择迁移包并填写两次口令后上传。';
+  };
+  fileInput?.addEventListener('change', renderImportFile);
   panel.querySelector('#migration-import-btn')?.addEventListener('click', () => {
     const file = fileInput?.files?.[0];
     const pass = panel.querySelector('#migration-import-pass')?.value || '';

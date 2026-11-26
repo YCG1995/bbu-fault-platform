@@ -1016,3 +1016,91 @@ table.data tr.row-hover:hover td { background: #f8fafc; }
   .storage-table td[data-label="操作"]::before { display: none; }
   .storage-table td.storage-no-action { display: none; }
 }
+
+/* 迁移：覆盖恢复的危险操作区与记录空态 */
+.migration-danger {
+  display: grid; grid-template-columns: minmax(280px, .9fr) minmax(0, 2.1fr);
+  margin-top: 14px; border: 1px solid #fed7aa; border-radius: 12px;
+  background: #fffdf9; overflow: hidden;
+}
+.migration-danger-aside { padding: 20px; background: #fff7ed; border-right: 1px solid #fed7aa; }
+.migration-danger-icon {
+  width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px;
+  color: #c2410c; background: #ffedd5; margin-bottom: 10px;
+}
+.migration-danger-icon svg { width: 20px; height: 20px; }
+.migration-danger-title { display: flex; align-items: center; gap: 8px; }
+.migration-danger-title h3 { margin: 0; font-size: 15px; letter-spacing: -.01em; }
+.migration-danger-aside > p { margin: 7px 0 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.75; }
+.migration-danger-list { margin: 12px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 12px; }
+.migration-danger-list li { position: relative; padding-left: 15px; margin-top: 5px; line-height: 1.65; }
+.migration-danger-list li::before { content: ""; position: absolute; left: 1px; top: .62em; width: 5px; height: 5px; border-radius: 50%; background: #fb923c; }
+.migration-danger-list code { color: var(--ink-2); background: #ffedd5; padding: 1px 4px; border-radius: 4px; }
+.migration-danger-tip {
+  display: flex; align-items: center; gap: 6px; margin-top: 14px; padding: 8px 10px;
+  color: #9a3412; background: #ffedd5; border-radius: 7px; font-size: 11.5px;
+}
+.migration-danger-tip svg { width: 14px; height: 14px; }
+.migration-danger-form { padding: 18px 20px; min-width: 0; }
+.migration-dropzone {
+  position: relative; display: flex; align-items: center; gap: 12px; min-height: 76px;
+  padding: 13px 15px; border: 1px dashed #fdba74; border-radius: 10px;
+  background: #fff; cursor: pointer; transition: border-color .15s, background .15s;
+}
+.migration-dropzone:hover { border-color: #fb923c; background: #fffaf3; }
+.migration-dropzone.has-file { border-style: solid; border-color: #fdba74; background: #fff7ed; }
+.migration-dropzone.is-disabled { opacity: .65; cursor: not-allowed; pointer-events: none; }
+.migration-file-input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+.migration-drop-icon {
+  width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center;
+  color: #c2410c; background: #ffedd5; border-radius: 9px;
+}
+.migration-drop-icon svg { width: 18px; height: 18px; }
+.migration-drop-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.migration-drop-copy strong { display: block; font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migration-drop-copy span { display: block; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migration-dropzone > .btn { flex: 0 0 auto; pointer-events: none; }
+.migration-pass-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; margin-top: 14px; }
+.migration-import-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+.migration-import-actions #migration-import-state { flex: 1 1 240px; }
+.migration-records { margin-top: 18px; }
+.migration-records-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.migration-records-head h3 { margin: 0; font-size: 13px; }
+.migration-records-head .sub { margin-left: 6px; font-size: 11.5px; }
+.migration-record-list .card { margin-top: 10px; }
+.migration-empty {
+  display: flex; align-items: center; gap: 14px; padding: 22px 24px;
+  background: var(--panel-2); border: 1px dashed var(--line-2); border-radius: 10px;
+}
+.migration-empty svg { width: 30px; height: 30px; opacity: .35; flex: 0 0 auto; }
+.migration-empty strong { display: block; color: var(--ink-2); font-size: 13px; }
+.migration-empty p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 900px) {
+  .migration-danger { grid-template-columns: minmax(0, 1fr); }
+  .migration-danger-aside { border-right: 0; border-bottom: 1px solid #fed7aa; }
+  .migration-pass-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+@media (max-width: 640px) {
+  .migration-danger-aside, .migration-danger-form { padding: 16px; }
+  .migration-dropzone { flex-wrap: wrap; }
+  .migration-dropzone > .btn { margin-left: 50px; }
+  .migration-import-actions .btn { width: 100%; }
+  .migration-records-head { align-items: flex-start; flex-direction: column; gap: 2px; }
+}
+
+@media (max-width: 640px) {
+  .migration-drop-copy span { white-space: normal; line-height: 1.45; }
+}
+
+@media (min-width: 721px) {
+  .migration-import-actions { padding-right: 96px; }
+}
+
+@media (max-width: 640px) {
+  .migration-dropzone { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; }
+  .migration-drop-icon { grid-column: 1; grid-row: 1; }
+  .migration-drop-copy { grid-column: 2; grid-row: 1; }
+  .migration-dropzone > .btn { grid-column: 1 / -1; width: 100%; margin: 8px 0 0; justify-content: center; }
+}

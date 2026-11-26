@@ -21,6 +21,16 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.4 迁移页覆盖恢复布局
+
+本版本优化“系统信息 → 迁移”页面的覆盖恢复和迁移记录区域；数据库 schema 保持 21。
+
+- **危险区左右分区**：左侧显示高风险说明、备份与回滚规则，右侧集中放置导入表单。
+- **迁移包选择**：原生文件输入改为可点击的拖放区，选中后显示文件名与包大小，可重新选择。
+- **口令并排**：迁移口令与确认口令在桌面两列、移动端单列；上传按钮与状态文案同排，避开悬浮助手。
+- **记录空态**：空记录改为带图标的说明卡，标题旁保留 30 条与手动删除提示。
+- 验证：新迁移 UI 冒烟通过；单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.4.md`。
+
 ## 1.24.3 任务空间布局优化
 
 本版本优化“系统信息 → 任务空间”页面的信息层级与操作区；数据库 schema 保持 21。
@@ -288,13 +298,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.3-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.4-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.3-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.4-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 
