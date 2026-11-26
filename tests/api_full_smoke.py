@@ -139,6 +139,7 @@ EXPECTED_ROUTES = {
     "DELETE /api/models/{id}",
     "POST /api/models/{id}/test",
     "POST /api/models/{id}/capabilities",
+    "POST /api/models/discover",
     "POST /api/models/test",
     "GET /api/users",
     "POST /api/users",
@@ -272,6 +273,12 @@ class Client:
 
 
 class _OpenAIMock(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        if self.path.rstrip("/").endswith("/models"):
+            self._send({"data": [{"id": "test-model"}, {"id": "test-model-2"}]})
+            return
+        self.send_error(404)
+
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
@@ -522,6 +529,17 @@ def main() -> int:
         })
         assert draft_tested["ok"], draft_tested
         hit("POST /api/models/test")
+        _, discovered = admin_client.json("POST", "/api/models/discover", {
+            "provider": "openai", "base_url": f"http://127.0.0.1:{openai_port}/v1",
+            "api_key": "api-test-key",
+        })
+        assert discovered["models"] == ["test-model", "test-model-2"], discovered
+        _, discovered_existing = admin_client.json("POST", "/api/models/discover", {
+            "model_id": model_id, "provider": "openai",
+            "base_url": f"http://127.0.0.1:{openai_port}/v1",
+        })
+        assert discovered_existing["models"] == ["test-model", "test-model-2"], discovered_existing
+        hit("POST /api/models/discover")
         _, updated = admin_client.json("PUT", f"/api/models/{model_id}",
                                        {"name": "api-openai-updated", "priority": 1})
         assert updated["model"]["name"] == "api-openai-updated"

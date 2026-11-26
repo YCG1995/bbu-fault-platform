@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .db import Database
 from .model_capabilities import ModelCapabilityStore
@@ -912,6 +913,88 @@ def _parse_openai_payload(data: dict[str, Any]) -> tuple[str, Usage]:
         raise AIError(f"响应结构异常: {str(data)[:300]}") from exc
     return text, _usage_from_openai(data.get("usage") or {})
 
+
+def _models_url(model: dict[str, Any]) -> str:
+    base = str(model.get("base_url") or "").rstrip("/")
+    provider = str(model.get("provider") or "")
+    if provider == "anthropic":
+        base = base or "https://api.anthropic.com"
+        if base.endswith("/v1/messages"):
+            base = base[:-len("/v1/messages")]
+        if base.endswith("/v1"):
+            return base + "/models"
+        return base + "/v1/models"
+    base = base or "https://api.openai.com/v1"
+    if base.endswith("/chat/completions"):
+        base = base[:-len("/chat/completions")]
+    return base + "/models"
+
+
+def _get_json(url: str, headers: dict[str, str], timeout: int) -> Any:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise AIError("模型列表地址必须是 http/https URL", retryable=False)
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Accept", "application/json")
+    for key, value in headers.items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw.decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        raw_text = exc.read().decode("utf-8", errors="replace")
+        raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
+                      response_body=raw_text, retryable=False) from exc
+    except urllib.error.URLError as exc:
+        raise AIError(f"网络错误: {exc.reason}", retryable=False) from exc
+    except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
+        raise AIError(f"模型列表响应中断: {type(exc).__name__}", retryable=False) from exc
+    except json.JSONDecodeError as exc:
+        raw_text = raw.decode("utf-8", errors="replace") if raw else ""
+        raise AIError(f"模型列表不是合法 JSON: {exc}", response_body=raw_text[:2000],
+                      retryable=False) from exc
+
+
+def list_models(model: dict[str, Any], timeout: int = 15) -> list[str]:
+    """读取 OpenAI/Anthropic 兼容的模型列表；只返回模型名，不触发推理。"""
+    provider = str(model.get("provider") or "")
+    if provider == "mock":
+        return ["mock"]
+    if provider not in ("openai", "anthropic"):
+        raise AIError(f"未知 provider: {provider}", retryable=False)
+    headers = {}
+    if provider == "openai":
+        headers["Authorization"] = f"Bearer {model.get('api_key') or ''}"
+    else:
+        headers["x-api-key"] = str(model.get("api_key") or "")
+        headers["anthropic-version"] = str(
+            (model.get("extra") or {}).get("anthropic_version") or "2023-06-01")
+    headers.update(_headers_extra(model))
+    data = _get_json(_models_url(model), headers, max(5, min(int(timeout or 15), 30)))
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("data") or data.get("models") or []
+    else:
+        items = []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict):
+            name = str(item.get("id") or item.get("name") or "").strip()
+        else:
+            name = ""
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+        if len(names) >= 200:
+            break
+    if not names:
+        raise AIError("接口未返回模型列表（请确认 Base URL 和 API Key）", retryable=False)
+    return names
 
 def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, str],
                         timeout: int) -> tuple[str, Usage]:

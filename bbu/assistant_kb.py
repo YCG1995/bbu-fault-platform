@@ -30,7 +30,8 @@ DOC_FILES: tuple[tuple[str, str, str], ...] = (
     ("windows", "docs/Windows运行说明.md", "Windows 启动、服务与升级入口"),
     ("upgrade-sudo", "docs/升级助手sudo故障修复.md", "sudo setuid/nosuid 与升级助手修复"),
     ("workshop", "docs/技能工坊AI生成优化建议.md", "技能工坊生成、评审与配方"),
-    ("release-1.24.7", "docs/版本说明-1.24.7.md", "当前版本 Windows 网页上传升级：zip 预检、待重启与启动替换"),
+    ("release-1.24.8", "docs/版本说明-1.24.8.md", "当前版本模型配置：平台预设、Base URL/模型下拉、获取模型列表与 max_tokens 建议"),
+    ("release-1.24.7", "docs/版本说明-1.24.7.md", "Windows 网页上传升级：zip 预检、待重启与启动替换"),
     ("release-1.24.6", "docs/版本说明-1.24.6.md", "个人模型弹窗：打开互斥、关闭一次生效与状态复位"),
     ("release-1.24.5", "docs/版本说明-1.24.5.md", "1.24.5 MCP 客户端配置：说明/代码分区、复制 JSON 与移动端布局"),
     ("release-1.24.4", "docs/版本说明-1.24.4.md", "1.24.4 迁移页布局：覆盖恢复分区、自定义迁移包选择与记录空态"),
@@ -49,7 +50,7 @@ DOC_PRIORITY = {
     "user-guide": 3.5, "deploy-guide": 2.0, "oneclick-deploy": 2.0,
     "upgrade-rollback": 2.5, "upgrade-sudo": 1.5, "architecture": 1.5,
     "windows": 1.5, "workshop": 1.5, "diagnostic-data": 1.0,
-    "readme": 0.5, "release-1.24.7": 0.4, "release-1.24.6": 0.3, "release-1.24.5": 0.3, "release-1.24.4": 0.3, "release-1.24.3": 0.3, "release-1.24.2": 0.3, "release-1.24.1": 0.3, "release-1.24.0": 0.2,
+    "readme": 0.5, "release-1.24.8": 0.4, "release-1.24.7": 0.3, "release-1.24.6": 0.3, "release-1.24.5": 0.3, "release-1.24.4": 0.3, "release-1.24.3": 0.3, "release-1.24.2": 0.3, "release-1.24.1": 0.3, "release-1.24.0": 0.2,
     "release-1.20.3": 0.2, "release-1.20.2": 0.2,
 }
 
@@ -162,6 +163,12 @@ _QUERY_RULES: tuple[_IntentRule, ...] = (
         re.compile(r"no\s*new\s*privileges.*(?:修复|解决)|"
                    r"(?:修复|解决).*no\s*new\s*privileges"),
         "upgrade-sudo", 14.0, ("4. root 一键修复",),
+    ),
+    _IntentRule(
+        "1.24.8 模型配置平台预设与模型发现",
+        re.compile(r"1\.24\.8|模型.*(?:平台预设|base\s*url|获取模型|模型列表|max_tokens|下拉)|"
+                   r"(?:平台预设|获取模型|模型列表).*(?:配置|模型)|base\s*url.*(?:下拉|预设)"),
+        "release-1.24.8", 12.0,
     ),
     _IntentRule(
         "1.24.7 Windows 网页上传更新",

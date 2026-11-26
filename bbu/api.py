@@ -30,7 +30,7 @@ from .accounts import (activate_invite, create_invite, list_invites as list_invi
                        normalize_status, public_user, register_user, revoke_invite)
 from .assistant import AssistantError, AssistantService
 from .backups import BackupManager
-from .ai import AIGateway
+from .ai import AIGateway, list_models
 from .config import Config
 from .db import Database
 from .evaluation import EvaluationService, RealCaseStore
@@ -504,6 +504,7 @@ class App:
         r.add("POST", r"/api/models", h_model_create)
         r.add("PUT", r"/api/models/(?P<model_id>[0-9]+)", h_model_update)
         r.add("DELETE", r"/api/models/(?P<model_id>[0-9]+)", h_model_delete)
+        r.add("POST", r"/api/models/discover", h_model_discover)
         r.add("POST", r"/api/models/test", h_model_test_draft)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/test", h_model_test)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/capabilities", h_model_capabilities)
@@ -3244,6 +3245,62 @@ def h_model_capabilities(app: App, req, model_id: str):
                  req.ip)
     return response_json({"capabilities": caps})
 
+
+def h_model_discover(app: App, req):
+    """列出当前 Base URL 可用的模型名，不创建/修改配置。"""
+    user = _admin(app, req)
+    data = req.json()
+    existing = None
+    if data.get("model_id"):
+        try:
+            existing = _model_row(app, int(data["model_id"]))
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, "model_id 非法") from exc
+    provider = str(data.get("provider") or (existing or {}).get("provider") or "openai")
+    if provider not in ("openai", "anthropic", "mock"):
+        raise HTTPError(400, "provider 必须是 openai / anthropic / mock")
+    base_url = str(data.get("base_url") or (existing or {}).get("base_url") or "").strip()
+    if provider == "openai" and not base_url:
+        base_url = str(app.config.get("personal_model_base_url") or "")
+    if provider == "anthropic" and not base_url:
+        base_url = "https://api.anthropic.com"
+    api_key = str(data.get("api_key") or "")
+    if not api_key and existing and existing.get("api_key"):
+        try:
+            api_key = app.secret_box.decrypt(existing["api_key"])
+        except ValueError as exc:
+            raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
+    if provider != "mock" and not api_key:
+        raise HTTPError(400, "请填写 API Key")
+    if provider == "mock":
+        return response_json({"models": ["mock"], "count": 1})
+    extra = data.get("extra")
+    if extra is None and existing:
+        extra = _loads(existing.get("extra"), {})
+    if extra is None:
+        extra = {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra) if extra.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise HTTPError(400, f"扩展参数不是合法 JSON: {exc}") from exc
+    if not isinstance(extra, dict):
+        raise HTTPError(400, "扩展参数必须是 JSON 对象")
+    try:
+        timeout_sec = int(data.get("timeout_sec") or 15)
+    except (TypeError, ValueError) as exc:
+        raise HTTPError(400, "timeout_sec 必须是整数") from exc
+    model = {
+        "provider": provider, "base_url": base_url, "api_key": api_key,
+        "extra": extra, "timeout_sec": timeout_sec,
+    }
+    try:
+        names = list_models(model, timeout=timeout_sec)
+    except Exception as exc:
+        raise HTTPError(400, f"获取模型列表失败: {str(exc)[:600]}") from exc
+    app.db.audit(user["id"], user["username"], "model.discover", "",
+                 {"provider": provider, "base_url": base_url, "count": len(names)}, req.ip)
+    return response_json({"models": names, "count": len(names)})
 
 def h_model_test_draft(app: App, req):
     """Test the current form values without creating or updating a model row."""

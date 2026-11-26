@@ -3,6 +3,7 @@ import {
   api, bindActions, bindTopbar, confirmDialog, esc, fmtDate, fmtDur, fmtSize, icon, modal, mount,
   providerName, roleLabel, setBusy, state, statusBadge, toast,
 } from './core.js';
+import { PLATFORM_PRESETS, allPopularModels } from './model_presets.js';
 
 const ROLE_LABELS = { default: '默认', planner: '规划', router: '路由', arbiter: '仲裁', writer: '报告', workshop: '工坊', assistant: '助手' };
 
@@ -85,27 +86,83 @@ function openModelModal(model, onDone) {
   const maasBase = state.publicConfig?.personal_model_base_url || 'https://nebulacoder-maas.zte.com.cn/v1';
   const maasModel = state.publicConfig?.personal_model_default || 'deepseek-v4-flash';
   const maasModels = state.publicConfig?.personal_model_models || [maasModel];
+  const companyPreset = {
+    ...PLATFORM_PRESETS[0],
+    base_url: maasBase,
+    models: [...new Set(maasModels.map(String))].map((name) => [name, 8192]),
+  };
+  const presets = [companyPreset, ...PLATFORM_PRESETS.slice(1)];
+  const allCandidates = () => {
+    const seen = new Set();
+    const out = [];
+    for (const preset of presets) {
+      for (const [name, maxTokens] of preset.models) {
+        if (!seen.has(name)) { seen.add(name); out.push([name, maxTokens]); }
+      }
+    }
+    for (const [name, maxTokens] of allPopularModels()) {
+      if (!seen.has(name)) { seen.add(name); out.push([name, maxTokens]); }
+    }
+    return out;
+  };
+  const normalize = (value) => String(value || '').trim().replace(/\/+$/, '');
+  const findPreset = (baseUrl) => presets.find((preset) => normalize(preset.base_url) === normalize(baseUrl)) || null;
+  const findById = (id) => presets.find((preset) => preset.id === id) || null;
+  const findModel = (baseUrl, name) => {
+    const preset = findPreset(baseUrl);
+    const candidates = preset ? preset.models : allCandidates();
+    return candidates.find(([modelName]) => modelName === name) || null;
+  };
+  const initialBase = model?.base_url || maasBase;
+  const initialPreset = findPreset(initialBase);
+  const initialModels = initialPreset ? initialPreset.models : allCandidates();
+  const initialModel = model?.model || maasModel;
+  const initialSuggestion = findModel(initialBase, initialModel);
+  const initialMax = model?.max_tokens ?? (initialSuggestion ? initialSuggestion[1] : 8192);
+  const platformValue = model ? (initialPreset?.id || 'custom') : companyPreset.id;
+
   const m = modal({
     title: model ? '编辑模型配置' : '添加模型配置',
     wide: true,
     body: `<form id="model-form">
-      <div class="alert info" style="margin-bottom:14px">${icon('info')}<div>新建配置默认使用公司 MaaS；也可以切换为 OpenAI 兼容或 Anthropic 服务。</div></div>
+      <div class="alert info" style="margin-bottom:14px">${icon('info')}<div>
+        可直接选择常用平台，自动带出 Base URL、模型名和建议 <code>max_tokens</code>；仍可手动修改，或点击“获取”读取服务端模型列表。
+      </div></div>
+      <div class="form-row"><label class="label">配置名称</label>
+        <input class="input" name="name" id="model-config-name" value="${esc(model?.name || '公司 MaaS')}" placeholder="例如：公司 MaaS" required>
+      </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">配置名称</label><input class="input" name="name" value="${esc(model?.name || '公司 MaaS')}" placeholder="例如：公司 MaaS" required></div>
+        <div class="form-row"><label class="label">平台预设 <span class="hint">选择后自动填充，可再修改</span></label>
+          <select class="select" id="model-platform">
+            ${presets.map((p) => `<option value="${p.id}" ${platformValue === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
+            <option value="custom" ${platformValue === 'custom' ? 'selected' : ''}>自定义 / 手动填写</option>
+          </select>
+        </div>
         <div class="form-row"><label class="label">协议</label>
           <select class="select" name="provider" id="provider-select">
             ${['openai', 'anthropic', 'mock'].map((p) => `<option value="${p}" ${(model?.provider || 'openai') === p ? 'selected' : ''}>${providerName(p)}</option>`).join('')}
           </select></div>
       </div>
-      <div class="form-row"><label class="label">Base URL <span class="hint">公司 MaaS 已预填；OpenAI 兼容通常以 /v1 结尾</span></label>
-        <input class="input mono" name="base_url" id="base-url" value="${esc(model?.base_url || maasBase)}" placeholder="${esc(maasBase)}"></div>
+      <div class="form-row"><label class="label">Base URL <span class="hint">可手动输入，也可从常用平台下拉选择</span></label>
+        <input class="input mono" name="base_url" id="base-url" list="base-url-options" value="${esc(initialBase)}" placeholder="${esc(maasBase)}">
+        <datalist id="base-url-options">${presets.filter((p) => p.base_url).map((p) => `<option value="${esc(p.base_url)}" label="${esc(p.label)}"></option>`).join('')}</datalist>
+        <div class="help" id="platform-note">${esc(initialPreset?.note || '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。')}</div>
+      </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">模型名</label><input class="input mono" name="model" list="company-model-options" value="${esc(model?.model || maasModel)}" placeholder="${esc(maasModel)}" required>
-          <datalist id="company-model-options">${maasModels.map((x) => `<option value="${esc(x)}"></option>`).join('')}</datalist>
+        <div class="form-row"><label class="label">模型名 <span class="hint">选择常用模型，或点击获取</span></label>
+          <div class="inline" style="gap:8px;align-items:stretch">
+            <input class="input mono" name="model" id="model-name" list="model-options" value="${esc(initialModel)}" placeholder="${esc(maasModel)}" required style="flex:1;min-width:0">
+            <button class="btn" type="button" id="model-discover" data-act="discover">${icon('refresh')}获取</button>
+          </div>
+          <datalist id="model-options">${initialModels.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(`${name} · 建议 ${maxTokens}`)}"></option>`).join('')}</datalist>
+          <div class="help" id="model-discover-hint">${initialSuggestion ? `建议 max_tokens ${initialSuggestion[1]}` : '获取后可下拉选择，也可直接输入模型名。'}</div>
         </div>
-        <div class="form-row"><label class="label">API Key <span class="hint">编辑时留空=保持原密钥</span></label>
+        <div class="form-row"><label class="label">max_tokens <span class="hint">选择模型自动填入，可修改</span></label>
+          <input class="input" type="number" name="max_tokens" id="max-tokens" value="${initialMax}" min="1" max="200000">
+        </div>
+      </div>
+      <div class="form-row"><label class="label">API Key <span class="hint">编辑时留空=保持原密钥</span></label>
           <input class="input mono" name="api_key" type="password" autocomplete="new-password" placeholder="${model?.api_key_masked ? esc(model.api_key_masked) : '公司 MaaS 个人 API Key'}">
-        </div>
       </div>
       <div class="form-row"><label class="label">承担角色</label>
         <div class="inline" style="gap:14px;flex-wrap:wrap">
@@ -115,7 +172,6 @@ function openModelModal(model, onDone) {
         <div class="help">不选则默认 default。平台按角色选择模型，没配对应角色时回退到 default。</div>
       </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">max_tokens</label><input class="input" type="number" name="max_tokens" value="${model?.max_tokens ?? 4096}" min="1" max="200000"></div>
         <div class="form-row"><label class="label">temperature</label><input class="input" type="number" step="0.1" name="temperature" value="${model?.temperature ?? 0.2}" min="0" max="2"></div>
         <div class="form-row"><label class="label">超时（秒）</label><input class="input" type="number" name="timeout_sec" value="${model?.timeout_sec ?? 180}" min="5" max="600"></div>
         <div class="form-row"><label class="label">优先级 <span class="hint">数字越小越先尝试</span></label><input class="input" type="number" name="priority" value="${model?.priority ?? 0}" min="0"></div>
@@ -128,16 +184,90 @@ function openModelModal(model, onDone) {
       <button class="btn btn-primary" data-act="save">${model ? '保存' : '添加'}</button>`,
   });
   const form = m.body.querySelector('#model-form');
+  const nameInput = m.body.querySelector('#model-config-name');
   const baseInput = m.body.querySelector('#base-url');
   const providerSelect = m.body.querySelector('#provider-select');
-  const defaults = {
-    openai: maasBase,
-    anthropic: 'https://api.anthropic.com',
-    mock: '',
-  };
+  const platformSelect = m.body.querySelector('#model-platform');
+  const modelInput = m.body.querySelector('#model-name');
+  const modelOptions = m.body.querySelector('#model-options');
+  const maxInput = m.body.querySelector('#max-tokens');
+  const platformNote = m.body.querySelector('#platform-note');
+  const discoverHint = m.body.querySelector('#model-discover-hint');
+  const discoverButton = m.body.querySelector('#model-discover');
+  let discovering = false;
+
+  function renderModelOptions(items) {
+    modelOptions.innerHTML = items.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}"></option>`).join('');
+  }
+
+  function applyModelMax() {
+    const suggestion = findModel(baseInput.value, modelInput.value);
+    if (suggestion) {
+      maxInput.value = suggestion[1];
+      discoverHint.textContent = `建议 max_tokens ${suggestion[1]}，可按账号额度修改。`;
+    } else if (modelInput.value) {
+      discoverHint.textContent = '自定义模型名，max_tokens 请按服务端限制填写。';
+    }
+  }
+
+  function autoName(preset) {
+    if (!preset) return;
+    const current = nameInput.value.trim();
+    const isAuto = !current || current === '公司 MaaS'
+      || presets.some((item) => item.label === current);
+    if (isAuto) nameInput.value = preset.id === 'zte-maas' ? '公司 MaaS' : preset.label;
+  }
+
+  function usePlatform(preset, { setModel = true } = {}) {
+    if (!preset) return;
+    platformSelect.value = preset.id;
+    providerSelect.value = preset.provider;
+    baseInput.value = preset.base_url;
+    platformNote.textContent = preset.note || '';
+    renderModelOptions(preset.models);
+    autoName(preset);
+    if (setModel) {
+      modelInput.value = preset.models[0]?.[0] || '';
+      applyModelMax();
+    }
+  }
+
+  function syncFromBase() {
+    const preset = findPreset(baseInput.value);
+    if (preset) {
+      platformSelect.value = preset.id;
+      providerSelect.value = preset.provider;
+      platformNote.textContent = preset.note || '';
+      renderModelOptions(preset.models);
+      autoName(preset);
+      if (!modelInput.value) {
+        modelInput.value = preset.models[0]?.[0] || '';
+      }
+      applyModelMax();
+    } else {
+      platformSelect.value = 'custom';
+      platformNote.textContent = '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。';
+      renderModelOptions(allCandidates());
+      applyModelMax();
+    }
+  }
+
+  platformSelect.addEventListener('change', () => {
+    if (platformSelect.value === 'custom') {
+      platformNote.textContent = '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。';
+      renderModelOptions(allCandidates());
+      return;
+    }
+    usePlatform(findById(platformSelect.value));
+  });
+  baseInput.addEventListener('change', syncFromBase);
+  modelInput.addEventListener('change', applyModelMax);
+
   providerSelect.addEventListener('change', () => {
+    const defaults = { openai: maasBase, anthropic: 'https://api.anthropic.com', mock: '' };
     if (!baseInput.value || Object.values(defaults).includes(baseInput.value) || baseInput.value === 'https://api.openai.com/v1') {
       baseInput.value = defaults[providerSelect.value] || '';
+      syncFromBase();
     }
   });
 
@@ -155,6 +285,43 @@ function openModelModal(model, onDone) {
 
   m.mask.addEventListener('click', async (e) => {
     if (e.target.closest('[data-act="cancel"]')) m.close();
+    if (e.target.closest('#model-discover')) {
+      if (discovering) return;
+      let payload;
+      try { payload = collect(); } catch (err) { toast(err.message, 'error'); return; }
+      if (payload.provider === 'mock') { toast('Mock 模型不需要获取列表', 'info'); return; }
+      if (!payload.base_url) { toast('请先填写 Base URL', 'error'); return; }
+      if (!payload.api_key && !model) { toast('请先填写 API Key', 'error'); return; }
+      if (model) payload.model_id = model.id;
+      discovering = true;
+      setBusy(discoverButton, true, '获取中…');
+      try {
+        const res = await api('/api/models/discover', { method: 'POST', body: payload });
+        if (!document.body.contains(m.mask)) return;
+        if (normalize(baseInput.value) !== normalize(payload.base_url)
+            || providerSelect.value !== payload.provider) {
+          toast('Base URL 或协议已变更，已忽略上一次获取结果', 'warn');
+          return;
+        }
+        const items = (res.models || []).map((name) => {
+          const suggestion = findModel(payload.base_url, name);
+          return [name, suggestion ? suggestion[1] : ''];
+        });
+        if (!items.length) { toast('接口未返回模型列表', 'error'); return; }
+        renderModelOptions(items);
+        if (!modelInput.value) {
+          modelInput.value = items[0][0];
+          applyModelMax();
+        }
+        discoverHint.textContent = `获取到 ${items.length} 个模型，可从下拉选择或手动输入。`;
+        toast(`获取到 ${items.length} 个模型`, 'ok');
+      } catch (err) {
+        if (document.body.contains(m.mask)) toast(err.message, 'error', 8000);
+      } finally {
+        discovering = false;
+        setBusy(discoverButton, false);
+      }
+    }
     if (e.target.closest('[data-act="save"]')) {
       const btn = e.target.closest('[data-act="save"]');
       let payload;

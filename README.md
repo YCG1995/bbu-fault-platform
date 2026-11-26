@@ -21,6 +21,17 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.8 模型配置平台预设与模型发现
+
+本版本优化「模型接入 → 添加/编辑模型配置」，schema 保持 21。
+
+- **平台预设**：内置公司 MaaS、OpenAI、DeepSeek、通义千问、Anthropic、Kimi、智谱、硅基流动、Gemini 兼容模式、火山方舟、腾讯混元、本地 Ollama 与自定义；选择后自动带出 Base URL、协议和常用模型。
+- **Base URL 可下拉**：保留手动输入，同时提供常用平台地址 datalist，避免手抄内网/兼容端点。
+- **模型名可选择或获取**：模型名支持下拉选择；点击「获取」按当前 Base URL、协议和 Key 请求 `{base}/models`（Anthropic 为原生 `/v1/models`），更新实际可用模型列表。
+- **max_tokens 自动建议**：选择常用模型自动填入建议值，仍可手动修改；该值是建议值，不是账号额度硬限制。
+- **安全边界**：发现接口仅管理员可用，只允许 http/https，15 秒超时、最多 200 个模型；API Key 只在服务端使用，不进入响应或审计。
+- 验证：**228 passed**、REST **153/153**、模型预设 UI 冒烟通过。详见 `docs/版本说明-1.24.8.md`。
+
 ## 1.24.7 Windows 网页上传更新（重启生效）
 
 本版本为 Windows 增加「网页上传升级包 + 下次启动生效」，schema 保持 21。
@@ -328,13 +339,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.7-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.8-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.7-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.8-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 
