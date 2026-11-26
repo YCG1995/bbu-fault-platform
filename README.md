@@ -21,6 +21,15 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.2 技能工坊空态布局
+
+本版本优化技能工坊无草稿时的首屏：去掉“左侧空草稿列表 + 右侧空详情”的重复空态，改为全宽起始卡；数据库 schema 保持 21。
+
+- **全宽引导**：无草稿时直接展示“从一段真实故障资料开始”，提供主按钮与资料支持说明。
+- **流程可见**：右侧列出粘贴资料、AI 语义提取、确定性编译、案例回归、发布五个步骤。
+- **不再重复空态**：草稿列表仅在已有草稿时显示；新建第一份草稿后恢复左侧列表 + 右侧详情的工坊工作区。
+- 验证：单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.2.md`。
+
 ## 1.24.1 用户每日用量图表
 
 本版本把 1.24.0 的用户每日用量表升级为图表视图；数据库 schema 保持 21，接口字段不变。
@@ -268,13 +277,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.1-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.2-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.1-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.2-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

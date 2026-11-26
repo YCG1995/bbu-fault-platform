@@ -34,6 +34,33 @@ export async function renderWorkshop() {
     view.querySelector('#draft-detail').innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return view;
   }
+  if (!drafts.length) {
+    view.innerHTML = `<div class="card workshop-starter">
+      <div class="workshop-starter-main">
+        <div class="workshop-starter-icon">${icon('flask')}</div>
+        <div class="workshop-starter-copy">
+          <div class="eyebrow">技能工坊 · 0 个草稿</div>
+          <h2>从一段真实故障资料开始</h2>
+          <p>粘贴故障描述、日志样例、判断思路、根因和案例，系统会自动识别资料并生成可审查、可回归的技能草稿；无需逐格填写。</p>
+          <div class="workshop-starter-actions">
+            <button class="btn btn-primary" data-act="new-draft">${icon('plus')}粘贴资料生成技能</button>
+            <span class="sub">支持文本、日志片段与 ZIP / tar.gz 日志包</span>
+          </div>
+        </div>
+      </div>
+      <ol class="workshop-starter-steps">
+        <li><span>01</span><div><strong>粘贴资料</strong><p>故障描述、日志样例、判断思路、根因与案例</p></div></li>
+        <li><span>02</span><div><strong>AI 语义提取</strong><p>识别故障对象、证据线索和候选根因</p></div></li>
+        <li><span>03</span><div><strong>确定性编译</strong><p>生成规则、正则、阈值和证据门槛</p></div></li>
+        <li><span>04</span><div><strong>案例回归</strong><p>用真实日志验证命中与误报</p></div></li>
+        <li><span>05</span><div><strong>发布技能</strong><p>通过质量门禁后进入技能库</p></div></li>
+      </ol>
+    </div>`;
+    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes) };
+    bindActions(view, handlers); bindTopbar(handlers);
+    return view;
+  }
+
   if (!selectedId || !drafts.some((d) => d.id === selectedId)) selectedId = drafts[0]?.id || null;
   const listEl = view.querySelector('#draft-list');
   view.querySelector('#draft-count').textContent = `${drafts.length} 个`;
