@@ -49,6 +49,9 @@ def run_stage(stage, cmd, logs):
     out = logs / f"{stage}.stdout.log"
     err = logs / f"{stage}.stderr.log"
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    policy = ASSETS / "format-policy.json"
+    if policy.exists():
+        env["SKILL_FORMAT_POLICY"] = str(policy)
     with out.open("w", encoding="utf-8") as so, err.open("w", encoding="utf-8") as se:
         proc = subprocess.run([sys.executable, *map(str, cmd)], stdout=so, stderr=se,
                               cwd=SKILL, env=env)
@@ -161,9 +164,17 @@ def prepare_workdir(out, pre_unpacked):
     return work
 
 
-def optional_cloudmat(root, out, logs):
+def cloudmat_enabled(manifest: dict | None = None) -> bool:
+    """组件开关优先；旧技能没有 manifest components 时保持原行为。"""
+    comps = (manifest or {}).get("components") or {}
+    if "parse_cloudmat" in comps:
+        return bool(comps.get("parse_cloudmat"))
+    return True
+
+
+def optional_cloudmat(root, out, logs, enabled=True):
     script = HERE / "parse_cloudmat.py"
-    if not script.exists():
+    if not enabled or not script.exists():
         return None, []
     candidates = sorted(p for p in root.rglob("*.log") if p.is_file())
     if not candidates:
@@ -302,7 +313,9 @@ def main():
                           ("manifest.json", work / "manifest.json"),
                           ("manifest.summary.json", work / "manifest.summary.json")]
         has_clock = (HERE / "parse_clock.py").exists()
-        has_cloudmat = (HERE / "parse_cloudmat.py").exists()
+        manifest_doc = read_json(ASSETS / "skill-manifest.json", {}) or {}
+        has_cloudmat = ((HERE / "parse_cloudmat.py").exists()
+                        and cloudmat_enabled(manifest_doc))
         if has_clock:
             cache_products += [("clock.json", out / "clock.json"),
                                ("clock.brief.md", out / "clock.brief.md")]
@@ -350,7 +363,8 @@ def main():
                 clock = out / "clock.json"
                 run_stage("parse_clock", [HERE / "parse_clock.py", root, "--merge",
                                           "--json", clock, "--brief", out / "clock.brief.md"], logs)
-            cloudmat, notes = optional_cloudmat(root, out, logs)
+            cloudmat, notes = optional_cloudmat(root, out, logs,
+                                                enabled=cloudmat_enabled(manifest_doc))
             if use_precheck:
                 run_stage("precheck", [HERE / "search_evidence.py", root,
                                        "--rules", common_rules, "--json", precheck,

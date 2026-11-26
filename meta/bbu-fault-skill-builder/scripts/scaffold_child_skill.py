@@ -46,7 +46,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent  # builder scripts/：脚本唯一
 SHARED_DIR = TEMPLATE_DIR.parent.parent / "shared"
 
 # 工具箱版本：模板/脚本/资产有对外行为变化时递增；digest 为内容哈希（自动生成）
-TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_VERSION = "2.14.0"
 CONTRACT_VERSION = "2"
 MANIFEST_YAML = "assets/skill-manifest.yaml"
 MANIFEST_JSON = "assets/skill-manifest.json"
@@ -94,7 +94,7 @@ FLAG_FOR_COMP = {
 CONFIDENCE_ENUM = {"high", "medium", "low"}
 EXECUTION_MODE_ENUM = {"script", "agent"}
 TREND_ENUM = {"exceed_threshold", "sustained_above", "monotonic_increase", "monotonic_decrease"}
-RULE_TYPE_ENUM = {"text", "numeric_trend"}
+RULE_TYPE_ENUM = {"text", "numeric_trend", "record_delta"}
 CASE_TYPE_ENUM = {"positive", "negative", "boundary", "corruption", "multisite"}
 
 
@@ -294,6 +294,7 @@ def _managed_rel_names(comps: dict, extra_scripts=(), has_quick=False):
     """
     rels = ["assets/evidence-rules.yaml",
             "assets/fault-profile.yaml",
+            "assets/format-policy.json",
             MANIFEST_YAML, MANIFEST_JSON,
             "references/fault-profile.md"]
     rels += list(BASE_SCRIPT_RELS)
@@ -415,6 +416,10 @@ def planned_file_hashes(dest: Path, profile: dict, comps: dict, extra,
             h["assets/common-rules.yaml"] = _sha256(cr_pre)
     h["references/fault-profile.md"] = hashlib.sha256(
         render_fault_profile_md(profile).encode("utf-8")).hexdigest()
+    if domain_pack:
+        h["assets/format-policy.json"] = hashlib.sha256(
+            json.dumps(format_policy_doc(domain_pack), ensure_ascii=False,
+                       indent=2, sort_keys=False).encode("utf-8")).hexdigest()
     if name and domain_pack:
         manifest = build_manifest(profile, name, domain_pack, dest)
         h[MANIFEST_YAML] = hashlib.sha256(
@@ -487,6 +492,25 @@ def engine_digest() -> str:
     return "eng-" + h.hexdigest()[:12]
 
 
+def format_policy_doc(domain_pack: dict) -> dict:
+    """域包格式策略的技能内快照；运行期只读它，不回头找域包目录。"""
+    pack = domain_pack or {}
+    return {
+        "schema": "skill-format-policy/1",
+        "domain": {"pack": str(pack.get("id") or DEFAULT_ID),
+                   "version": str(pack.get("version") or "")},
+        "format_policy": dict(pack.get("format_policy") or {}),
+    }
+
+
+def write_format_policy(dest: Path, domain_pack: dict) -> dict:
+    doc = format_policy_doc(domain_pack)
+    (dest / "assets").mkdir(parents=True, exist_ok=True)
+    (dest / "assets" / "format-policy.json").write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return doc
+
+
 def _major(version: str) -> int:
     try:
         return int(str(version).split(".")[0])
@@ -549,6 +573,8 @@ def build_manifest(profile: dict, name: str, domain_pack: dict, dest: Path) -> d
             "exclusions": [str(x) for x in fault.get("exclusions") or []],
             "quick_signatures": quick,
         },
+        "components": {str(k): bool(v) for k, v in infer_components(profile)[0].items()},
+        "format_policy": dict(pack.get("format_policy") or {}),
         "capabilities": {
             "domains": [str(pack.get("id") or DEFAULT_ID)],
             "archives": ["zip", "tar", "gzip", "bzip2", "xz"],
@@ -908,7 +934,8 @@ def export_rules(profile: dict):
             }
             for k in ("columns", "all_of", "any_of", "none_of", "time_extract",
                       "associate_by", "value_pattern", "trend", "threshold",
-                      "abs_threshold", "sustained_count", "window_minutes"):
+                      "abs_threshold", "sustained_count", "window_minutes",
+                      "record", "entity"):
                 if r.get(k) is not None:
                     rule[k] = r[k]
             for k in ("min_matches", "context_lines", "case_sensitive"):
@@ -997,6 +1024,22 @@ def validate(profile: dict):
                     _check_regex(errors, f"规则 {rid} value_pattern", r["value_pattern"])
                 if r.get("trend", "exceed_threshold") not in TREND_ENUM:
                     errors.append(f"规则 {rid} trend 非法: {r.get('trend')}")
+            elif rtype == "record_delta":
+                rec = r.get("record") or {}
+                if not isinstance(rec, dict) or not rec.get("start"):
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.start")
+                else:
+                    _check_regex(errors, f"规则 {rid} record.start", rec["start"])
+                fields = (rec or {}).get("fields") or {}
+                if not isinstance(fields, dict) or not fields:
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.fields")
+                else:
+                    for fname, fpat in fields.items():
+                        _check_regex(errors, f"规则 {rid} record.fields.{fname}", fpat)
+                if not (rec or {}).get("entity"):
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.entity")
+                if not ((rec or {}).get("require") or (rec or {}).get("any")):
+                    errors.append(f"record_delta 规则 {rid} 缺少 require/any 比较")
             elif not (r.get("all_of") or r.get("any_of")):
                 errors.append(f"规则 {rid} all_of/any_of 均为空，永远不会命中")
             for key in ("all_of", "any_of", "none_of"):
@@ -1215,6 +1258,11 @@ def render_fault_profile_md(profile: dict) -> str:
             lines.append(f"  - 路径：`{', '.join(r.get('globs', []))}`")
             if rtype == "numeric_trend":
                 lines.append(f"  - 数值模式：{r.get('value_pattern')}；趋势：{r.get('trend')}；阈值：{r.get('threshold')}")
+            elif rtype == "record_delta":
+                rec = r.get("record") or {}
+                lines.append(f"  - 记录起始：`{rec.get('start', '')}`；实体：{rec.get('entity')}")
+                lines.append(f"  - 字段：{sorted((rec.get('fields') or {}).keys())}；"
+                             f"必须满足：{rec.get('require') or {}}；任一满足：{rec.get('any') or {}}")
             for key in ("all_of", "any_of", "none_of"):
                 if r.get(key):
                     lines.append(f"  - {key}: {r[key]}")
@@ -1463,6 +1511,9 @@ def main():
 
     for s in (dest / "scripts").glob("*.py"):
         s.chmod(0o755)
+
+    # 格式策略快照：运行期由 log_format 读取，core 不再内置域文件名
+    write_format_policy(dest, domain_pack)
 
     # manifest：宿主读到的第一份文件；生成后再打戳（manifest 不含 stamp digest，避免自指）
     manifest = write_manifest(dest, profile, name, domain_pack)

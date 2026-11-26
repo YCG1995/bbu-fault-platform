@@ -141,7 +141,8 @@ def _sha256_file(path: Path) -> str:
 
 def write_attestation(skill_dir: Path, skill_name: str, version: str,
                       profile: dict, regression: dict | None, coverage: dict | None,
-                      e2e: dict | None, cases_dir: str | None) -> Path:
+                      e2e: dict | None, cases_dir: str | None,
+                      discrimination: dict | None = None) -> Path:
     manifest_path = skill_dir / "assets" / "skill-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     case_files = []
@@ -171,6 +172,7 @@ def write_attestation(skill_dir: Path, skill_name: str, version: str,
         },
         "regression": regression,
         "coverage": coverage,
+        "discrimination": discrimination,
         "e2e": e2e,
         "builder": {"name": "diagnostic-skill-builder", "version": TOOLKIT_VERSION},
         "built_at": __import__("datetime").datetime.now(
@@ -178,7 +180,9 @@ def write_attestation(skill_dir: Path, skill_name: str, version: str,
         "verification": {
             "status": "case_regression" if regression is not None else "none",
             "ok": bool(regression is not None and regression.get("failed", 1) == 0
-                       and regression.get("errors", 1) == 0),
+                       and regression.get("errors", 1) == 0
+                       and (coverage is None or coverage.get("ok") is True)
+                       and (discrimination is None or discrimination.get("ok") is True)),
         },
     }
     target = skill_dir / "assets" / "build-attestation.json"
@@ -250,6 +254,7 @@ def main():
 
             regression = None
             coverage = None
+            discrimination = None
             e2e = None
             if not args.skip_regression:
                 regression_json = logs / "regression.json"
@@ -260,11 +265,19 @@ def main():
                 raw = json.loads(regression_json.read_text(encoding="utf-8"))
                 regression = {k: raw.get(k, 0) for k in ("total", "passed", "failed", "errors")}
                 coverage = raw.get("coverage")
+                discrimination = raw.get("discrimination")
                 e2e = raw.get("e2e")
+                if discrimination is not None and not discrimination.get("ok"):
+                    raise RuntimeError("判别力门禁失败: " + "；".join(
+                        discrimination.get("blocking") or ["unknown"]))
+                if coverage is not None and not coverage.get("ok"):
+                    raise RuntimeError("覆盖率门禁失败: " + "；".join(
+                        coverage.get("errors") or ["unknown"]))
 
             version = str((profile.get("skill") or {}).get("version") or "0.1.0")
             attestation = write_attestation(staged_dest, name, version, attestation_profile,
-                                            regression, coverage, e2e, args.cases_dir)
+                                            regression, coverage, e2e, args.cases_dir,
+                                            discrimination)
 
             # 回归会执行子技能脚本，Python 可能生成 __pycache__；交付前清理运行缓存。
             for cache in list(staged_dest.rglob("__pycache__")):
@@ -277,7 +290,8 @@ def main():
             promote(staged_dest, dest, backup)
             result.update({
                 "ok": True, "verified": not args.skip_regression,
-                "regression": regression, "coverage": coverage, "e2e": e2e,
+                "regression": regression, "coverage": coverage,
+                "discrimination": discrimination, "e2e": e2e,
                 "case_sync": case_sync,
                 "attestation": str(dest / "assets" / "build-attestation.json"),
                 "domain": (json.loads((dest / "assets" / "skill-manifest.json")

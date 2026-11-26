@@ -22,7 +22,7 @@ components:
 format_policy:
   detect_by: magic
   opaque_name_patterns: ["*verprotect*", "*gnssoriginalmsg*"]
-  force_text: ["BspMoni.log", "uartlog*.txt"]
+  force_text: ["BspMoni.log*", "uartlog*.txt"]
   force_opaque: []
 routing:
   name_prefix: bbu-fault
