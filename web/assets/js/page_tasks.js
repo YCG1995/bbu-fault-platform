@@ -134,7 +134,7 @@ export async function renderNewTask() {
     status: 'done', progress: 100, xhr: null, error: '', speed: 0,
   }));
   view.innerHTML = `
-    <div style="display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,.75fr);gap:16px">
+    <div class="task-create-layout">
       <form class="card" id="task-form">
         <div class="card-head"><h2>现场信息</h2><span class="sub">AI 会根据描述和日志盘点自动生成任务标题</span></div>
         <div class="card-body">
