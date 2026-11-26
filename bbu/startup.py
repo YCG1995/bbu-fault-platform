@@ -1,7 +1,7 @@
-"""启动前应用 Windows 待激活的工作目录切换/覆盖恢复。
+"""启动前应用待激活的工作目录切换、覆盖恢复与 Windows 程序更新。
 
-Linux 由 root/systemd 助手完成同样动作；Windows 手动运行没有特权助手，
-因此在打开数据库和启动 App 之前完成文件切换，失败时恢复旧目录。
+Linux 升级由 root/systemd 助手完成；Windows 手动运行没有特权助手，
+因此在打开数据库和启动 App 之前完成文件切换/代码替换，失败时恢复旧目录。
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .util import iso_now
+from .util import iso_now, within_directory
 
 PENDING_NAME = "pending_maintenance.json"
 
@@ -145,6 +145,116 @@ def _apply_import(root: Path, pending: dict[str, Any]) -> None:
         raise exc
 
 
+UPDATE_EXCLUDES = {
+    "data", "skills", "cases", "updates", "backups", "config.json",
+    "pending_update.json", "pending_maintenance.json", ".git", "__pycache__", ".pytest_cache",
+    "venv", ".venv", ".update-import", ".update-stage",
+}
+
+
+def _mark_job(job: Path, phase: str, message: str, progress: int = 100,
+              **extra: Any) -> None:
+    path = job / "status.json"
+    if not path.parent.is_dir():
+        return
+    data = _read(path, {}) or {}
+    data.update({"phase": phase, "message": message, "progress": progress,
+                 "updated_at": iso_now()})
+    data.update(extra)
+    _write(path, data)
+
+
+def _runtime_names(root: Path, config) -> set[str]:
+    names = set(UPDATE_EXCLUDES)
+    for value in (config.data_dir, config.skills_dir, config.cases_dir,
+                  config.data_dir.parent / "updates", config.data_dir.parent / "backups"):
+        try:
+            path = Path(value).resolve()
+        except OSError:
+            continue
+        if path.parent == root:
+            names.add(path.name)
+    return names
+
+
+def _copy_tree_entry(src: Path, dst: Path) -> None:
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dst)
+
+
+def _remove_code_entries(root: Path, names: set[str]) -> None:
+    for item in root.iterdir():
+        if item.name in names or item.name.startswith(".update-stage"):
+            continue
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink(missing_ok=True)
+
+
+def _restore_code(root: Path, backup_code: Path, names: set[str]) -> None:
+    _remove_code_entries(root, names)
+    for item in backup_code.iterdir():
+        _copy_tree_entry(item, root / item.name)
+
+
+def _apply_update(root: Path, pending: dict[str, Any]) -> None:
+    from .config import Config
+
+    job = Path(str(pending.get("job_dir") or "")).resolve()
+    source = Path(str(pending.get("source_dir") or "")).resolve()
+    job_id = str(pending.get("job_id") or "")
+    if not job_id or not job.is_dir() or not (job / "status.json").is_file():
+        raise ValueError("更新任务目录不存在")
+    if not source.is_dir() or not within_directory(job.resolve() / "release", source):
+        raise ValueError("更新包解压目录越界或不存在")
+    if not (source / "run.py").is_file() or not (source / "bbu" / "__init__.py").is_file():
+        raise ValueError("更新包缺少程序文件")
+
+    config = Config(root)
+    names = _runtime_names(root, config)
+    backup_root = config.data_dir.parent / "backups" / f"update-{job_id}"
+    backup_code = backup_root / "code"
+    if backup_root.exists():
+        raise ValueError("更新备份目录已存在，请检查上次维护结果")
+    backup_root.mkdir(parents=True, exist_ok=False)
+    backup_code.mkdir(parents=True, exist_ok=False)
+    try:
+        for item in root.iterdir():
+            if item.name in names or item.name.startswith(".update-stage"):
+                continue
+            _copy_tree_entry(item, backup_code / item.name)
+        config_file = root / "config.json"
+        if config_file.is_file():
+            shutil.copy2(config_file, backup_root / "config.json")
+        _write(backup_root / "backup.json", {
+            "job_id": job_id,
+            "target_version": str(pending.get("target_version") or ""),
+            "old_version": str(_read(job / "status.json", {}).get("current_version") or ""),
+            "created_at": iso_now(),
+            "prefix": str(root),
+            "type": "windows-restart-update",
+        })
+        _remove_code_entries(root, names)
+        for item in source.iterdir():
+            if item.name in names or item.name.startswith(".update-stage"):
+                continue
+            _copy_tree_entry(item, root / item.name)
+    except Exception:
+        try:
+            _restore_code(root, backup_code, names)
+        except Exception:
+            pass
+        raise
+
+    _mark_job(job, "succeeded",
+              f"代码已替换为 v{pending.get('target_version')}，正在启动新进程", 100,
+              backup_dir=str(backup_root), requires_restart=False, error="")
+    (root / PENDING_NAME).unlink(missing_ok=True)
+
+
 def apply_pending(root: Path) -> dict[str, Any] | None:
     root = Path(root).resolve()
     path = root / PENDING_NAME
@@ -158,14 +268,21 @@ def apply_pending(root: Path) -> dict[str, Any] | None:
             _apply_workspace(root, data)
         elif action == "import":
             _apply_import(root, data)
+        elif action == "update":
+            _apply_update(root, data)
         else:
             raise ValueError("未知的待激活维护动作")
     except Exception as exc:
         try:
-            from .config import Config
-            source_root = Config(root).work_dir
-            _mark(source_root, job_id, "failed", "重启激活失败，已继续使用原数据",
-                  100, error=f"{type(exc).__name__}: {exc}", requires_restart=False)
+            job_dir = Path(str(data.get("job_dir") or "")) if action == "update" else None
+            if job_dir:
+                _mark_job(job_dir, "failed", "重启激活失败，已继续使用原程序",
+                          100, error=f"{type(exc).__name__}: {exc}", requires_restart=False)
+            else:
+                from .config import Config
+                source_root = Config(root).work_dir
+                _mark(source_root, job_id, "failed", "重启激活失败，已继续使用原数据",
+                      100, error=f"{type(exc).__name__}: {exc}", requires_restart=False)
         except Exception:
             pass
         path.unlink(missing_ok=True)

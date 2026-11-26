@@ -3858,7 +3858,7 @@ def h_update_upload(app: App, req):
     fields, uploads = req.parse_multipart(max_mb * 1024 * 1024 + 16 * 1024 * 1024,
                                           max_file_bytes=max_mb * 1024 * 1024)
     if not uploads:
-        raise HTTPError(400, "请选择 .tar.gz 离线升级包")
+        raise HTTPError(400, "请选择 .tar.gz / .tgz / .zip 离线升级包")
     item = uploads[0]
     try:
         status = updater.create_job(
@@ -3890,8 +3890,12 @@ def h_update_list(app: App, req):
         "disk_free_mb": updater.disk_free(app) // (1024 * 1024),
         "max_update_mb": int(app.config.get("max_update_mb", 512)),
         "supported": updater.supported(app),
-        "helper": ("root/systemd 一次性助手" if not app.config.get("upgrade_helper_cmd")
-                   else "测试助手命令") if updater.supported(app) else "Windows 手动更新",
+        "mode": updater.apply_mode(app),
+        "rollback_supported": updater.rollback_supported(app),
+        "pending_update": (updater.pending_update(app) or {}).get("job_id") or "",
+        "helper": ("Windows 网页上传 + 重启生效" if updater.apply_mode(app) == "restart"
+                   else "自定义升级助手" if app.config.get("upgrade_helper_cmd")
+                   else "root/systemd 一次性助手"),
     })
 
 

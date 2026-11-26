@@ -910,7 +910,8 @@ function updatePhaseLabel(phase) {
   return {
     uploaded: '已上传', verifying: '预检中', ready: '可升级', queued: '等待 root 助手',
     backup: '备份中', migrating: '迁移/替换中', restarting: '重启中',
-    health_check: '健康检查', succeeded: '升级成功', failed: '失败', rolled_back: '已回滚',
+    health_check: '健康检查', waiting_restart: '待重启生效',
+    succeeded: '升级成功', failed: '失败', rolled_back: '已回滚',
   }[phase] || phase || '—';
 }
 
@@ -926,7 +927,7 @@ function renderUpdatePanel(panel, updates, currentVersion) {
         <div class="card-head"><h2>离线升级</h2><span class="sub">当前 v${esc(currentVersion)}</span></div>
         <div class="card-body">
           <div class="alert info">${icon('shield')}<div>
-            Windows 版默认不启用网页自动升级。需要更新时请停止平台，备份 <code>data/</code> 与
+            当前环境未启用网页升级。请停止平台，备份 <code>data/</code> 与
             <code>config.json</code>，解压新版本后覆盖程序目录，再重新启动即可。
           </div></div>
         </div>
@@ -938,24 +939,29 @@ function renderUpdatePanel(panel, updates, currentVersion) {
   const ready = items.find((x) => x.phase === 'ready') || null;
   const focus = active || ready || items[0] || null;
   const busy = !!active;
-  const helper = updates.helper || 'root/systemd 一次性助手';
+  const locked = busy || !!updates.pending_update;
+  const restart = updates.mode === 'restart';
+  const rollbackEnabled = updates.rollback_supported !== false;
+  const helper = updates.helper || (restart ? 'Windows 网页上传 + 重启生效' : 'root/systemd 一次性助手');
   const history = items.filter((x) => x !== focus);
   panel.innerHTML = `
     <div class="card" style="margin-bottom:16px" id="update-card">
       <div class="card-head"><h2>离线升级</h2><span class="sub">当前 v${esc(currentVersion)} · ${esc(helper)}</span></div>
       <div class="card-body">
         <div class="alert ${updates.error ? 'danger' : 'info'}">${icon(updates.error ? 'alert' : 'shield')}<div>
-          ${updates.error ? esc(updates.error) : `升级只接受管理员上传的 .tar.gz 离线包，由 root/systemd 一次性助手执行固定脚本；主 Web 进程不提权。`}
+          ${updates.error ? esc(updates.error) : (restart
+            ? `Windows 网页上传只做校验和解压；确认后点击“准备重启生效”，关闭平台并重新启动，启动时会自动替换代码并保留 <code>data/</code> 与 <code>config.json</code>。`
+            : `升级只接受管理员上传的 .tar.gz 离线包，由 root/systemd 一次性助手执行固定脚本；主 Web 进程不提权。`)}
           ${updates.running_tasks ? `<br><strong>当前有 ${updates.running_tasks} 个诊断任务在排队/运行，升级会被阻止。</strong>` : ''}
           ${updates.disk_free_mb != null ? `<br>磁盘可用 ${updates.disk_free_mb} MB · 单包上限 ${updates.max_update_mb || '—'} MB` : ''}
         </div></div>
         <div class="between" style="margin-top:14px;gap:12px;flex-wrap:wrap">
           <div>
-            <label class="label" for="update-file">选择离线升级包（.tar.gz）</label>
-            <input type="file" id="update-file" accept=".tar.gz,application/gzip" ${busy ? 'disabled' : ''}>
+            <label class="label" for="update-file">选择离线升级包（${restart ? '.zip / .tar.gz' : '.tar.gz'}）</label>
+            <input type="file" id="update-file" accept=".tar.gz,.tgz,.zip,application/gzip,application/zip" ${locked ? 'disabled' : ''}>
             <div class="tiny muted" id="update-file-name">上传后服务端会计算 SHA256 并检查版本/结构，不会执行包内脚本。</div>
           </div>
-          <button class="btn btn-primary" data-act="upload-update" id="update-upload-btn" ${busy ? 'disabled' : ''}>${icon('upload')}上传并预检</button>
+          <button class="btn btn-primary" data-act="upload-update" id="update-upload-btn" ${locked ? 'disabled' : ''}>${icon('upload')}上传并预检</button>
         </div>
         <div id="update-upload-state" class="small muted" style="margin-top:8px"></div>
         ${focus ? `<div class="card" style="margin-top:14px;background:#f8fafc">
@@ -966,13 +972,17 @@ function renderUpdatePanel(panel, updates, currentVersion) {
             <div class="upload-progress" style="margin-top:10px"><div style="width:${Number(focus.progress || 0)}%"></div></div>
             <div class="between tiny muted" style="margin-top:5px"><span>${esc(focus.message || '')}</span><span>${Number(focus.progress || 0)}%</span></div>
             ${focus.error ? `<div class="alert danger" style="margin-top:10px">${icon('alert')}<div>${esc(focus.error)}</div></div>` : ''}
+            ${focus.phase === 'waiting_restart' ? `<div class="alert warn" style="margin-top:10px">${icon('refresh')}<div>
+              <strong>已准备，等待重启。</strong>关闭当前平台窗口后重新运行 <code>start_platform.bat</code> 或 <code>python run.py</code>；
+              启动时会自动替换程序目录并加载新版本。当前页面连接的是旧进程，重启后再刷新。
+            </div></div>` : ''}
             ${focus.package_sha256 ? `<div class="kv small" style="margin-top:8px"><div class="k">SHA256</div><div class="v mono">${esc(focus.package_sha256)}</div>
               <div class="k">包大小</div><div class="v">${((focus.size || 0) / 1024 / 1024).toFixed(2)} MB</div>
               ${focus.backup_dir ? `<div class="k">回滚快照</div><div class="v mono">${esc(focus.backup_dir)}</div>` : ''}</div>` : ''}
             ${focus.release_notes ? `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">查看版本说明</summary><pre class="small" style="white-space:pre-wrap;max-height:260px;overflow:auto">${esc(focus.release_notes)}</pre></details>` : ''}
             <div class="inline" style="margin-top:10px;flex-wrap:wrap">
-              ${focus.phase === 'ready' ? `<button class="btn btn-primary" data-act="apply-update" data-id="${esc(focus.id)}">${icon('play')}执行升级</button>` : ''}
-              ${(focus.phase === 'failed' || focus.phase === 'succeeded') && focus.backup_dir ? `<button class="btn btn-danger" data-act="rollback-update" data-id="${esc(focus.id)}">回滚到快照</button>` : ''}
+              ${focus.phase === 'ready' ? `<button class="btn btn-primary" data-act="apply-update" data-id="${esc(focus.id)}">${icon(restart ? 'refresh' : 'play')}${restart ? '准备重启生效' : '执行升级'}</button>` : ''}
+              ${(focus.phase === 'failed' || focus.phase === 'succeeded') && focus.backup_dir && rollbackEnabled ? `<button class="btn btn-danger" data-act="rollback-update" data-id="${esc(focus.id)}">回滚到快照</button>` : ''}
               ${focus.phase === 'failed' || focus.phase === 'ready' ? `<button class="btn btn-sm" data-act="verify-update" data-id="${esc(focus.id)}">重新预检</button>` : ''}
               ${focus.phase === 'succeeded' || focus.phase === 'rolled_back' ? `<button class="btn btn-sm" data-act="reload-after-update">刷新页面</button>` : ''}
             </div>
@@ -984,7 +994,7 @@ function renderUpdatePanel(panel, updates, currentVersion) {
               <td>${esc(updateActions(x))}</td>
               <td class="small">v${esc(x.current_version || '—')} → v${esc(x.target_version || '—')}</td>
               <td>${esc(updatePhaseLabel(x.phase))}${x.error ? `<div class="tiny danger-text">${esc(x.error).slice(0, 120)}</div>` : ''}</td>
-              <td>${x.phase === 'succeeded' && x.backup_dir ? `<button class="btn btn-sm" data-act="rollback-update" data-id="${esc(x.id)}">回滚</button>` : '—'}</td></tr>`).join('')
+              <td>${x.phase === 'succeeded' && x.backup_dir && rollbackEnabled ? `<button class="btn btn-sm" data-act="rollback-update" data-id="${esc(x.id)}">回滚</button>` : '—'}</td></tr>`).join('')
               : '<tr><td colspan="5" class="muted" style="text-align:center;padding:18px">暂无升级记录</td></tr>'}
           </tbody></table></div></div>
       </div>
@@ -997,10 +1007,10 @@ function renderUpdatePanel(panel, updates, currentVersion) {
   });
   panel.querySelector('[data-act="upload-update"]')?.addEventListener('click', () => {
     const file = fileInput?.files?.[0];
-    if (!file) { toast('请选择 .tar.gz 升级包', 'error'); return; }
+    if (!file) { toast('请选择 .tar.gz / .zip 升级包', 'error'); return; }
     uploadUpdatePackage(file, panel, currentVersion);
   });
-  panel.querySelector('[data-act="apply-update"]')?.addEventListener('click', (e) => openApplyUpdate(e.currentTarget.dataset.id));
+  panel.querySelector('[data-act="apply-update"]')?.addEventListener('click', (e) => openApplyUpdate(e.currentTarget.dataset.id, updates.mode));
   panel.querySelectorAll('[data-act="rollback-update"]').forEach((btn) => btn.addEventListener('click', () => openRollbackUpdate(btn.dataset.id)));
   panel.querySelectorAll('[data-act="verify-update"]').forEach((btn) => btn.addEventListener('click', () => verifyUpdate(btn.dataset.id, panel, currentVersion)));
   panel.querySelector('[data-act="reload-after-update"]')?.addEventListener('click', () => location.reload());
@@ -1040,27 +1050,39 @@ function uploadUpdatePackage(file, panel, currentVersion) {
   xhr.send(fd);
 }
 
-function openApplyUpdate(jobId) {
+function openApplyUpdate(jobId, mode = 'helper') {
+  const restart = mode === 'restart';
   const m = modal({
-    title: '执行离线升级',
-    body: `<div class="alert warn">${icon('alert')}<div>升级会停止服务、备份数据、迁移数据库并替换代码。请确认当前没有诊断任务运行，并已保留升级包。</div></div>
-      <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
-        <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`,
-    footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="apply">确认升级</button>`,
+    title: restart ? '准备重启生效' : '执行离线升级',
+    body: restart
+      ? `<div class="alert info">${icon('refresh')}<div>
+          <strong>确认后只会准备重启，不会立即替换代码。</strong><br>
+          关闭当前平台窗口并重新启动，启动时会先备份旧程序，再替换代码并加载新版本；<code>data/</code> 与 <code>config.json</code> 保留。
+        </div></div>
+        <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
+          <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`
+      : `<div class="alert warn">${icon('alert')}<div>升级会停止服务、备份数据、迁移数据库并替换代码。请确认当前没有诊断任务运行，并已保留升级包。</div></div>
+        <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
+          <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`,
+    footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="apply">${restart ? '准备重启' : '确认升级'}</button>`,
   });
   m.mask.addEventListener('click', async (e) => {
     if (e.target.closest('[data-act="cancel"]')) { m.close(); return; }
     const btn = e.target.closest('[data-act="apply"]'); if (!btn) return;
     const password = m.body.querySelector('#apply-password').value;
     if (!password) { toast('请输入管理员密码', 'error'); return; }
-    setBusy(btn, true, '提交中');
+    setBusy(btn, true, restart ? '准备中' : '提交中');
     try {
-      await api(`/api/system/updates/${encodeURIComponent(jobId)}/apply`, { method: 'POST', body: { password } });
-      m.close(); toast('已提交升级，正在等待 root 助手', 'ok');
+      const data = await api(`/api/system/updates/${encodeURIComponent(jobId)}/apply`, { method: 'POST', body: { password } });
+      const update = data.update || {};
+      const waiting = update.phase === 'waiting_restart';
+      m.close();
+      toast(waiting ? '已准备，重启平台后自动生效' : '已提交升级，正在等待 root 助手',
+            waiting ? 'warn' : 'ok', waiting ? 10000 : 4000);
       updatePollTimer = null;
       const panel = document.querySelector('#update-panel');
       await refreshUpdatePanel(panel, state.publicConfig.version || '');
-      startUpdatePoll(jobId, panel, state.publicConfig.version || '');
+      if (!waiting) startUpdatePoll(jobId, panel, state.publicConfig.version || '');
     } catch (err) { toast(err.message, 'error', 6000); setBusy(btn, false); }
   });
 }
@@ -1104,10 +1126,12 @@ function startUpdatePoll(jobId, panel, currentVersion) {
     try {
       const data = await api(`/api/system/updates/${encodeURIComponent(jobId)}`);
       const line = data.update;
-      if (line.phase === 'succeeded' || line.phase === 'failed' || line.phase === 'rolled_back') {
+      if (line.phase === 'succeeded' || line.phase === 'failed'
+          || line.phase === 'rolled_back' || line.phase === 'waiting_restart') {
         clearInterval(updatePollTimer); updatePollTimer = null;
         await refreshUpdatePanel(panel, currentVersion);
         if (line.phase === 'succeeded') toast('升级成功，请刷新页面使用新版本', 'ok', 8000);
+        if (line.phase === 'waiting_restart') toast('已准备，重启平台后自动生效', 'warn', 10000);
         return;
       }
       if (panel.querySelector('#update-card')) {

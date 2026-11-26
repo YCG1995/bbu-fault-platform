@@ -21,6 +21,17 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.7 Windows 网页上传更新（重启生效）
+
+本版本为 Windows 增加「网页上传升级包 + 下次启动生效」，schema 保持 21。
+
+- **上传与预检**：管理端可上传 `.zip` 或 `.tar.gz`，服务端校验 SHA256、版本、顶层目录、路径穿越/链接/特殊文件与必需文件，只解压、不执行包内脚本。
+- **准备重启**：Windows 无 root/systemd 助手时，点击「准备重启生效」只写入 `pending_maintenance.json`，不立即停服或替换代码。
+- **启动替换**：重新启动 `start_platform.bat` 或 `python run.py` 时，启动阶段先把旧程序备份到 `backups/update-<任务ID>`，再替换代码，保留 `data / skills / cases / updates / backups / config.json`，失败自动恢复旧程序。
+- **重新加载**：替换成功后入口通过 `os.execv` 重新执行自身，确保新进程加载新版本模块。
+- **首次安装**：1.24.6 旧版没有网页重启模式，第一次升级到 1.24.7 请手动覆盖一次程序目录；之后即可网页上传。
+- 验证：**226 passed**、REST **152/152**；新增 zip 预检、Windows 准备重启、启动替换与失败恢复测试。详见 `docs/版本说明-1.24.7.md`。
+
 ## 1.24.6 个人模型弹窗防叠层
 
 本版本修复“个人模型配置（公司内网 MaaS）”弹窗连续点击后叠出多份、关闭需要点很多下的问题；schema 保持 21。
@@ -317,13 +328,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.6-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.7-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.6-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.7-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

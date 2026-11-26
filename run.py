@@ -50,6 +50,15 @@ def main() -> int:
             print(f"[维护] 已应用待激活任务：{applied.get('action')} {applied.get('job_id')}")
         else:
             print(f"[维护] 待激活任务失败，继续使用原数据：{applied.get('error', '')}", file=sys.stderr)
+    if applied and applied.get("ok") and applied.get("action") == "update":
+        # 代码刚被替换，当前进程仍持有旧模块；重新执行入口以加载新版本。
+        print("[更新] 程序文件已替换，正在重新启动以加载新版本…")
+        sys.stdout.flush()
+        try:
+            os.execv(sys.executable, [sys.executable, str(BASE_DIR / "run.py"), *sys.argv[1:]])
+        except OSError as exc:
+            print(f"[错误] 无法重新启动新版本：{exc}", file=sys.stderr)
+            return 3
 
     stopping = threading.Event()
     server_ref = [None]
