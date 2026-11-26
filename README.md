@@ -21,6 +21,15 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.6 个人模型弹窗防叠层
+
+本版本修复“个人模型配置（公司内网 MaaS）”弹窗连续点击后叠出多份、关闭需要点很多下的问题；schema 保持 21。
+
+- **打开互斥**：接口返回前重复点击不会并发创建多个弹窗；已打开时再点只聚焦现有弹窗。
+- **关闭一次生效**：底部「关闭」在捕获阶段处理并阻止冒泡；X、遮罩、Esc、保存、清除均复用同一关闭复位逻辑。
+- **状态可恢复**：接口失败或关闭后状态复位，入口仍可正常再次打开。
+- 验证：个人模型弹窗 UI 冒烟通过（同步连点 3 次只产生 1 个弹窗）；**222 passed**、REST **152/152**。详见 `docs/版本说明-1.24.6.md`。
+
 ## 1.24.5 MCP 客户端配置布局
 
 本版本优化“系统信息 → MCP / 助手”的客户端配置；数据库 schema 保持 21，MCP 接口与 Token 流程不变。
@@ -308,13 +317,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.5-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.6-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.5-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.6-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 
