@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import threading
 import time
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import yaml
 
@@ -30,7 +31,7 @@ from .accounts import (activate_invite, create_invite, list_invites as list_invi
                        normalize_status, public_user, register_user, revoke_invite)
 from .assistant import AssistantError, AssistantService
 from .backups import BackupManager
-from .ai import AIGateway, list_models
+from .ai import AIGateway, list_models, AIError
 from .config import Config
 from .db import Database
 from .evaluation import EvaluationService, RealCaseStore
@@ -44,6 +45,7 @@ from .migration import (
 from .mcp_server import MCPService
 from .metrics import collect as collect_metrics, prometheus as prometheus_metrics
 from .model_roles import MODEL_ROLES
+from .netguard import OutboundPolicyError
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
@@ -3293,13 +3295,33 @@ def h_model_discover(app: App, req):
     model = {
         "provider": provider, "base_url": base_url, "api_key": api_key,
         "extra": extra, "timeout_sec": timeout_sec,
+        "allow_private": bool(app.config.get("model_discovery_allow_private", False)),
     }
     try:
         names = list_models(model, timeout=timeout_sec)
-    except Exception as exc:
+    except OutboundPolicyError as exc:
+        raise HTTPError(403, f"模型地址被安全策略拒绝: {str(exc)[:300]}") from exc
+    except AIError as exc:
+        text = str(exc)
+        if api_key:
+            text = text.replace(api_key, "***")
+        if exc.http_status == 403:
+            raise HTTPError(403, text[:600]) from exc
+        if exc.http_status == 413:
+            raise HTTPError(413, text[:600]) from exc
+        if exc.http_status == 401 or "http 401" in text.lower():
+            raise HTTPError(502, "上游模型服务认证失败（401），请检查 API Key") from exc
+        if "timed out" in text.lower() or "timeout" in text.lower():
+            raise HTTPError(504, "模型服务响应超时") from exc
+        raise HTTPError(502, f"获取模型列表失败: {text[:600]}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise HTTPError(504, "模型服务响应超时") from exc
+    except ValueError as exc:
         raise HTTPError(400, f"获取模型列表失败: {str(exc)[:600]}") from exc
+    parsed = urlparse(base_url)
     app.db.audit(user["id"], user["username"], "model.discover", "",
-                 {"provider": provider, "base_url": base_url, "count": len(names)}, req.ip)
+                 {"provider": provider, "base_url_host": parsed.hostname or "",
+                  "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
     return response_json({"models": names, "count": len(names)})
 
 def h_model_test_draft(app: App, req):

@@ -19,10 +19,21 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 from .db import Database
 from .model_capabilities import ModelCapabilityStore
+from .netguard import (
+    OutboundContentTypeError,
+    OutboundPolicy,
+    OutboundPolicyError,
+    OutboundResponseTooLarge,
+    error_body,
+    iter_limited,
+    open_url,
+    policy_from_config,
+    read_limited,
+    require_json_content_type,
+)
 from .schema_validate import validate_schema
 from .util import utc_now
 
@@ -357,6 +368,9 @@ class AIGateway:
                 row["api_key"] = self.secret_box.decrypt(row["api_key"])
             row["source"] = "admin"
             row["personal"] = False
+            row["allow_private"] = (
+                bool(self.config.get("model_discovery_allow_private", False))
+                if self.config is not None else True)
         return rows
 
     def _personal_model(self, user_id: int | None = None) -> dict[str, Any] | None:
@@ -376,6 +390,9 @@ class AIGateway:
             "extra": {},
             "source": "personal",
             "personal": True,
+            "allow_private": (
+                bool(self.config.get("model_discovery_allow_private", False))
+                if self.config is not None else True),
         })
         try:
             model["api_key"] = self.secret_box.decrypt(row["api_key"]) if self.secret_box else row["api_key"]
@@ -544,7 +561,8 @@ class AIGateway:
         }
         try:
             data, _ = _post_json(_openai_url(model["base_url"]), payload, headers,
-                                 min(30, int(model.get("timeout_sec") or 30)))
+                                 min(30, int(model.get("timeout_sec") or 30)),
+                                 allow_private=bool(model.get("allow_private", False)))
             base["json_mode"] = True
             base["usage"] = bool(data.get("usage"))
             return base
@@ -845,21 +863,33 @@ def _headers_extra(model: dict[str, Any]) -> dict[str, str]:
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
-               timeout: int) -> tuple[dict[str, Any], int]:
+               timeout: int, *, allow_private: bool = False,
+               max_bytes: int | None = None) -> tuple[dict[str, Any], int]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     for key, value in headers.items():
         req.add_header(key, value)
     raw = b""
+    policy = OutboundPolicy(allow_private=allow_private,
+                            max_bytes=max_bytes or 1024 * 1024)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        with open_url(req, timeout=timeout, policy=policy) as resp:
+            require_json_content_type(resp)
+            raw = read_limited(resp, policy.max_bytes)
             return json.loads(raw.decode("utf-8", errors="replace")), resp.status
     except urllib.error.HTTPError as exc:
-        raw_text = exc.read().decode("utf-8", errors="replace")
+        raw_text = error_body(exc, min(policy.max_bytes, 4096))
         raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
                       response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
+    except OutboundPolicyError as exc:
+        raise AIError(str(exc), http_status=403, retryable=False) from exc
+    except OutboundResponseTooLarge as exc:
+        raise AIError(str(exc), http_status=413, retryable=False) from exc
+    except OutboundContentTypeError as exc:
+        raise AIError(str(exc), retryable=False) from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise AIError("模型服务响应超时", retryable=True) from exc
     except urllib.error.URLError as exc:
         raise AIError(f"网络错误: {exc.reason}", retryable=True) from exc
     except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
@@ -930,22 +960,32 @@ def _models_url(model: dict[str, Any]) -> str:
     return base + "/models"
 
 
-def _get_json(url: str, headers: dict[str, str], timeout: int) -> Any:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise AIError("模型列表地址必须是 http/https URL", retryable=False)
+def _get_json(url: str, headers: dict[str, str], timeout: int, *,
+              allow_private: bool = False, max_bytes: int | None = None) -> Any:
+    policy = OutboundPolicy(allow_private=allow_private,
+                            max_bytes=max_bytes or 1024 * 1024)
     req = urllib.request.Request(url, method="GET")
     req.add_header("Accept", "application/json")
     for key, value in headers.items():
         req.add_header(key, value)
+    raw = b""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        with open_url(req, timeout=timeout, policy=policy) as resp:
+            require_json_content_type(resp)
+            raw = read_limited(resp, policy.max_bytes)
             return json.loads(raw.decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
-        raw_text = exc.read().decode("utf-8", errors="replace")
+        raw_text = error_body(exc, min(policy.max_bytes, 4096))
         raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
                       response_body=raw_text, retryable=False) from exc
+    except OutboundPolicyError as exc:
+        raise AIError(str(exc), http_status=403, retryable=False) from exc
+    except OutboundResponseTooLarge as exc:
+        raise AIError(str(exc), http_status=413, retryable=False) from exc
+    except OutboundContentTypeError as exc:
+        raise AIError(str(exc), retryable=False) from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise AIError("模型列表响应超时", retryable=False) from exc
     except urllib.error.URLError as exc:
         raise AIError(f"网络错误: {exc.reason}", retryable=False) from exc
     except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
@@ -971,7 +1011,8 @@ def list_models(model: dict[str, Any], timeout: int = 15) -> list[str]:
         headers["anthropic-version"] = str(
             (model.get("extra") or {}).get("anthropic_version") or "2023-06-01")
     headers.update(_headers_extra(model))
-    data = _get_json(_models_url(model), headers, max(5, min(int(timeout or 15), 30)))
+    data = _get_json(_models_url(model), headers, max(5, min(int(timeout or 15), 30)),
+                     allow_private=bool(model.get('allow_private', False)))
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
@@ -997,7 +1038,8 @@ def list_models(model: dict[str, Any], timeout: int = 15) -> list[str]:
     return names
 
 def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, str],
-                        timeout: int) -> tuple[str, Usage]:
+                        timeout: int, *, allow_private: bool = False,
+                        max_bytes: int | None = None) -> tuple[str, Usage]:
     """OpenAI SSE 流式读取；长输出不再依赖单个 30 秒空闲连接。
 
     部分兼容网关会忽略 stream 仍返回普通 JSON，这里按 Content-Type 兼容两种情况。
@@ -1009,15 +1051,18 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
     for key, value in headers.items():
         req.add_header(key, value)
     raw = b""
+    policy = OutboundPolicy(allow_private=allow_private,
+                            max_bytes=max_bytes or 1024 * 1024)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_url(req, timeout=timeout, policy=policy) as resp:
             ctype = str(resp.headers.get("Content-Type") or "").lower()
             if "text/event-stream" not in ctype:
-                raw = resp.read()
+                require_json_content_type(resp)
+                raw = read_limited(resp, policy.max_bytes)
                 return _parse_openai_payload(json.loads(raw.decode("utf-8", "replace")))
             parts: list[str] = []
             usage_raw: dict[str, Any] = {}
-            for raw in resp:
+            for raw in iter_limited(resp, policy.max_bytes):
                 line = raw.decode("utf-8", "replace").strip()
                 if not line or not line.startswith("data:"):
                     continue
@@ -1049,9 +1094,17 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
                 raise AIError("流式响应无文本")
             return text, _usage_from_openai(usage_raw)
     except urllib.error.HTTPError as exc:
-        raw_text = exc.read().decode("utf-8", errors="replace")
+        raw_text = error_body(exc, min(policy.max_bytes, 4096))
         raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
                       response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
+    except OutboundPolicyError as exc:
+        raise AIError(str(exc), http_status=403, retryable=False) from exc
+    except OutboundResponseTooLarge as exc:
+        raise AIError(str(exc), http_status=413, retryable=False) from exc
+    except OutboundContentTypeError as exc:
+        raise AIError(str(exc), retryable=False) from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise AIError("模型流式响应超时", retryable=True) from exc
     except urllib.error.URLError as exc:
         raise AIError(f"网络错误: {exc.reason}", retryable=True) from exc
     except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError) as exc:
@@ -1088,7 +1141,8 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
 
     if stream:
         try:
-            text, usage = _post_openai_stream(url, payload, headers, model["timeout_sec"])
+            text, usage = _post_openai_stream(url, payload, headers, model["timeout_sec"],
+                                              allow_private=bool(model.get("allow_private", False)))
             if usage.total_tokens == 0:
                 # 部分网关不返回 usage；给预算一个保守估算，避免完全不计成本。
                 usage = Usage(
@@ -1112,18 +1166,21 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
             payload["stream"] = False
 
     try:
-        data, _ = _post_json(url, payload, headers, model["timeout_sec"])
+        data, _ = _post_json(url, payload, headers, model["timeout_sec"],
+                              allow_private=bool(model.get("allow_private", False)))
     except AIError as exc:
         # 部分兼容网关不支持原生 json_schema，降级为 json_object 后重试一次。
         if json_schema and "response_format" in str(exc).lower():
             payload["response_format"] = {"type": "json_object"}
             try:
-                data, _ = _post_json(url, payload, headers, model["timeout_sec"])
+                data, _ = _post_json(url, payload, headers, model["timeout_sec"],
+                              allow_private=bool(model.get("allow_private", False)))
             except AIError as exc2:
                 if "response_format" not in str(exc2).lower():
                     raise
                 payload.pop("response_format", None)
-                data, _ = _post_json(url, payload, headers, model["timeout_sec"])
+                data, _ = _post_json(url, payload, headers, model["timeout_sec"],
+                              allow_private=bool(model.get("allow_private", False)))
         else:
             raise
     text, usage = _parse_openai_payload(data)
@@ -1158,7 +1215,8 @@ def _call_anthropic(model: dict[str, Any], system: str, user: str,
     }
     headers.update(_headers_extra(model))
     data, _ = _post_json(_anthropic_url(model["base_url"]), payload, headers,
-                         model["timeout_sec"])
+                         model["timeout_sec"],
+                         allow_private=bool(model.get("allow_private", False)))
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
     if not text:

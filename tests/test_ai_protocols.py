@@ -132,7 +132,7 @@ class AIProtocolTests(unittest.TestCase):
 
     def test_list_openai_models(self):
         model = {"provider": "openai", "base_url": f"http://127.0.0.1:{self.port}/v1",
-                 "api_key": "test-key", "extra": {}}
+                 "api_key": "test-key", "extra": {}, "allow_private": True}
         self.assertEqual(list_models(model), ["test-model", "test-model-2"])
         call = _Handler.seen_get[-1]
         self.assertEqual(call["path"], "/v1/models")
@@ -140,7 +140,7 @@ class AIProtocolTests(unittest.TestCase):
 
     def test_list_anthropic_models(self):
         model = {"provider": "anthropic", "base_url": f"http://127.0.0.1:{self.port}",
-                 "api_key": "test-key", "extra": {}}
+                 "api_key": "test-key", "extra": {}, "allow_private": True}
         self.assertEqual(list_models(model), ["test-model", "test-model-2"])
         call = _Handler.seen_get[-1]
         self.assertEqual(call["path"], "/v1/models")

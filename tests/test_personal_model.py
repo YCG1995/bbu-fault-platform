@@ -50,6 +50,7 @@ class _Config:
             "personal_model_default": "deepseek-v4-flash",
             "personal_model_models": ["deepseek-v4-flash", "nebulacoder-lite-v7.0"],
             "personal_api_key_url": "https://maas.zte.com.cn/zte-paas-zcloud-maasui/personal-api-key",
+            "model_discovery_allow_private": True,
         }
 
     def get(self, key: str, default=None):
