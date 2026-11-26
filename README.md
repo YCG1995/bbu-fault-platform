@@ -21,6 +21,17 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.24.3 任务空间布局优化
+
+本版本优化“系统信息 → 任务空间”页面的信息层级与操作区；数据库 schema 保持 21。
+
+- **右侧工具栏**：释放模式、批量释放与重新统计统一靠右，标题说明居左。
+- **技能诊断单行**：技能下拉固定宽度，与「按技能诊断」按钮同高同一行，不再换行。
+- **平铺概览**：四个空间数字改为平铺统计卡，释放规则收敛为一条提示，并单独展示磁盘剩余。
+- **空态与清单**：无任务时不再渲染表头和空行，改为空态卡；有任务时先展示任务清单标题，再显示表格。
+- **移动端**：≤720px 表格转卡片，任务状态、空间明细与操作纵向排列，390px 无横向滚动。
+- 验证：UI 冒烟通过；单元/集成 **222 passed**、REST 冒烟 **152/152**。详见 `docs/版本说明-1.24.3.md`。
+
 ## 1.24.2 技能工坊空态布局
 
 本版本优化技能工坊无草稿时的首屏：去掉“左侧空草稿列表 + 右侧空详情”的重复空态，改为全宽起始卡；数据库 schema 保持 21。
@@ -277,13 +288,13 @@ API Key 使用 `data/master.key` 派生密钥加密后存 SQLite，只在服务�
 
 ```bash
 bash deploy/make_release.sh
-# 产物：dist/bbu-fault-platform-1.24.2-offline.tar.gz
+# 产物：dist/bbu-fault-platform-1.24.3-offline.tar.gz
 ```
 
 拷贝到内网服务器后：
 
 ```bash
-tar -xzf bbu-fault-platform-1.24.2-offline.tar.gz
+tar -xzf bbu-fault-platform-1.24.3-offline.tar.gz
 sudo bash bbu-fault-platform/deploy/install_offline.sh --port 8080
 ```
 

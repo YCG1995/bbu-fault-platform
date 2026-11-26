@@ -1321,28 +1321,38 @@ async function renderStoragePanel(panel) {
   const items = data.items || [];
   const disk = summary.disk || {};
   const rows = items.map((item) => `<tr>
-    <td><input type="checkbox" class="storage-check" data-task="${esc(item.id)}"
+    <td class="storage-check-cell"><input type="checkbox" class="storage-check" data-task="${esc(item.id)}"
       ${(item.can_release || item.can_release_extracted) ? '' : 'disabled'}></td>
-    <td><div style="font-weight:600">${esc(item.title || item.id)}</div>
+    <td data-label="任务"><div style="font-weight:600">${esc(item.title || item.id)}</div>
       <div class="mono tiny muted">${esc(item.id)} · ${fmtDate(item.created_at)}</div></td>
-    <td>${statusBadge(item.status)}<div class="tiny muted">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
-    <td class="mono">${fmtSize(item.raw_input_bytes)}
+    <td data-label="状态 / 输入">${statusBadge(item.status)}<div class="tiny muted">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
+    <td data-label="原始输入" class="mono">${fmtSize(item.raw_input_bytes)}
       ${item.shared_input_paths ? `<div class="tiny"><span class="badge warn">${item.shared_input_paths} 个共享</span></div>` : ''}</td>
-    <td class="mono ${item.extracted_bytes ? '' : 'muted'}">${fmtSize(item.extracted_bytes)}
+    <td data-label="解压文件" class="mono ${item.extracted_bytes ? '' : 'muted'}">${fmtSize(item.extracted_bytes)}
       ${item.extracted_dirs ? `<div class="tiny muted">${item.extracted_dirs} 个目录</div>` : ''}</td>
-    <td class="mono muted">${fmtSize(item.retained_bytes)}</td>
-    <td class="mono">${fmtSize(item.total_bytes)}</td>
-    <td><div class="inline" style="gap:4px;flex-wrap:wrap">
+    <td data-label="其它产物" class="mono muted">${fmtSize(item.retained_bytes)}</td>
+    <td data-label="合计" class="mono">${fmtSize(item.total_bytes)}</td>
+    <td data-label="操作" class="${(!item.can_release && !item.can_release_extracted) ? 'storage-no-action' : ''}"><div class="inline" style="gap:4px;flex-wrap:wrap">
       ${item.can_release_extracted ? `<button class="btn btn-sm" data-release="${esc(item.id)}" data-release-mode="extracted">${icon('trash')}释放解压</button>` : ''}
       ${item.can_release ? `<button class="btn btn-sm btn-danger" data-release="${esc(item.id)}" data-release-mode="raw_inputs">${icon('trash')}释放原始</button>` : ''}
       ${(!item.can_release && !item.can_release_extracted) ? '<span class="muted">—</span>' : ''}
     </div></td>
   </tr>`).join('');
+  const storageList = items.length ? `
+      <div class="storage-list-head"><div><h3>任务清单</h3><span class="sub">共 ${items.length} 个任务，按创建时间倒序</span></div></div>
+      <div class="table-wrap"><table class="data storage-table"><thead><tr>
+        <th><input type="checkbox" id="storage-check-all" aria-label="全选可释放任务"></th>
+        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>解压文件</th><th>其它产物</th><th>合计</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>` : `
+      <div class="storage-empty">${icon('layers')}<h3>暂无任务空间记录</h3>
+        <p>新建诊断或技能工坊任务后，这里会显示原始输入、解压文件和可释放空间。</p>
+        <button class="btn" data-storage-refresh>${icon('refresh')}重新统计</button></div>`;
   panel.innerHTML = `<div class="card">
-    <div class="card-head"><div><h2>任务空间统计与释放</h2>
-      <span class="sub">可单独释放解压文件；报告、证据、案例和数据库记录始终保留</span></div>
-      <div class="inline" style="flex-wrap:wrap">
-        <select class="select" id="storage-release-mode" style="max-width:180px" title="批量释放内容">
+    <div class="card-head storage-head">
+      <div class="storage-head-copy"><h2>任务空间统计与释放</h2>
+        <span class="sub">可单独释放解压文件；报告、证据、案例和数据库记录始终保留</span></div>
+      <div class="storage-toolbar">
+        <select class="select storage-mode-select" id="storage-release-mode" title="批量释放内容">
           <option value="extracted" selected>解压文件（推荐）</option>
           <option value="raw_inputs">原始输入</option>
           <option value="both">原始输入 + 解压文件</option>
@@ -1351,39 +1361,42 @@ async function renderStoragePanel(panel) {
         <button class="btn" id="storage-refresh">${icon('refresh')}重新统计</button>
       </div></div>
     <div class="card-body">
-      <div class="between" style="gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;background:#f8fafc;border:1px solid #e8edf4;border-radius:8px">
-        <div><strong>按技能诊断</strong><div class="tiny muted">选择可用技能后，直接进入只执行该技能的诊断任务</div></div>
-        <div class="inline" style="gap:8px;flex-wrap:wrap">
-          <select class="select" id="storage-skill" style="min-width:220px" ${skills.length ? '' : 'disabled'}>
+      <div class="storage-skill-bar">
+        <div class="storage-skill-copy">
+          <div class="storage-skill-icon">${icon('play')}</div>
+          <div><strong>按技能诊断</strong><p>选择可用技能后，直接进入只执行该技能的诊断任务</p></div>
+        </div>
+        <div class="storage-skill-actions">
+          <select class="select" id="storage-skill" ${skills.length ? '' : 'disabled'}>
             <option value="">${skills.length ? '选择技能' : '暂无可用技能'}</option>
             ${skills.map((s) => `<option value="${esc(s.name)}">${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
           </select>
           <button class="btn btn-primary" id="storage-skill-diagnose" ${skills.length ? '' : 'disabled'}>${icon('play')}按技能诊断</button>
         </div>
       </div>
-      <div class="grid grid-4" style="margin-bottom:14px">
-        <div class="card stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
-        <div class="card stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
-        <div class="card stat"><div class="stat-icon ok">${icon('shield')}</div><div><div class="stat-val">${fmtSize(summary.retained_bytes)}</div><div class="stat-label">报告/证据等保留</div></div></div>
-        <div class="card stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">当前可释放</div></div></div>
+      <div class="storage-stats">
+        <div class="storage-stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
+        <div class="storage-stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
+        <div class="storage-stat"><div class="stat-icon ok">${icon('shield')}</div><div><div class="stat-val">${fmtSize(summary.retained_bytes)}</div><div class="stat-label">报告/证据等保留</div></div></div>
+        <div class="storage-stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">当前可释放</div></div></div>
       </div>
-      <div class="alert info">${icon('shield')}<div>
-        <strong>解压文件</strong>只删除任务目录中的 <span class="mono">skills/*/unpacked</span>，报告、证据和案例不受影响；重跑会从原始日志重新解压。
-        <br><strong>原始输入</strong>会删除上传日志；共享文件只有最后一个引用任务释放时才删除。释放原始输入后该任务不能再重跑。
-        <br><span class="tiny muted">磁盘剩余：${fmtSize(disk.free_bytes)}</span>
-      </div></div>
+      <div class="storage-notice">
+        <div class="storage-notice-icon">${icon('shield')}</div>
+        <div class="storage-notice-text"><strong>释放规则</strong>
+          <p><b>解压文件</b>只删除任务目录中的 <span class="mono">skills/*/unpacked</span>，报告、证据和案例不受影响；重跑会从原始日志重新解压。</p>
+          <p><b>原始输入</b>会删除上传日志；共享文件只有最后一个引用任务释放时才删除。释放原始输入后该任务不能再重跑。</p>
+        </div>
+        <span class="storage-disk">磁盘剩余 ${fmtSize(disk.free_bytes)}</span>
+      </div>
       <div id="storage-status" class="small muted" style="margin:8px 0"></div>
-      <div class="table-wrap"><table class="data"><thead><tr>
-        <th><input type="checkbox" id="storage-check-all" aria-label="全选可释放任务"></th>
-        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>解压文件</th><th>其它产物</th><th>合计</th><th>操作</th>
-      </tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty">暂无任务</div></td></tr>'}</tbody></table></div>
+      ${storageList}
     </div></div>`;
 
   const checkAll = panel.querySelector('#storage-check-all');
   checkAll?.addEventListener('change', () => {
     panel.querySelectorAll('.storage-check:not(:disabled)').forEach((c) => { c.checked = checkAll.checked; });
   });
-  panel.querySelector('#storage-refresh').addEventListener('click', () => renderStoragePanel(panel));
+  panel.querySelectorAll('#storage-refresh, [data-storage-refresh]').forEach((btn) => btn.addEventListener('click', () => renderStoragePanel(panel)));
   panel.querySelector('#storage-skill-diagnose')?.addEventListener('click', () => {
     const name = panel.querySelector('#storage-skill')?.value || '';
     if (!name) { toast('请先选择一个可用技能', 'warn'); return; }
