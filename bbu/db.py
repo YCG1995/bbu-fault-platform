@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -652,6 +652,19 @@ CREATE TABLE IF NOT EXISTS model_capabilities (
   expires_at TEXT NOT NULL,
   source TEXT NOT NULL DEFAULT 'probe'
 );
+CREATE TABLE IF NOT EXISTS skill_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  skill TEXT NOT NULL,
+  version TEXT NOT NULL,
+  approver_id INTEGER NOT NULL,
+  approver_name TEXT NOT NULL DEFAULT '',
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(skill, version, approver_id)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_approvals ON skill_approvals(skill, version, decision);
+
 """
 
 
@@ -756,6 +769,15 @@ class Database:
                 conn.execute("ALTER TABLE tasks ADD COLUMN continuation_count INTEGER NOT NULL DEFAULT 0")
             if "session_budget_json" not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN session_budget_json TEXT NOT NULL DEFAULT '{}'")
+            for name, ddl in (
+                ("archive_path", "ALTER TABLE tasks ADD COLUMN archive_path TEXT NOT NULL DEFAULT ''"),
+                ("archive_sha256", "ALTER TABLE tasks ADD COLUMN archive_sha256 TEXT NOT NULL DEFAULT ''"),
+                ("archived_at", "ALTER TABLE tasks ADD COLUMN archived_at TEXT"),
+                ("retention_state", "ALTER TABLE tasks ADD COLUMN retention_state TEXT NOT NULL DEFAULT 'available'"),
+                ("retained_reason", "ALTER TABLE tasks ADD COLUMN retained_reason TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in task_cols:
+                    conn.execute(ddl)
             task_skill_cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_skills)")}
             if "invalidated" not in task_skill_cols:
                 conn.execute("ALTER TABLE task_skills ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0")

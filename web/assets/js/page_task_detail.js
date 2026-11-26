@@ -224,6 +224,20 @@ function verdictPanel(task) {
         <div class="k">参与技能</div><div class="v">${(task.skills || []).length} 个</div>
       </div>
       ${missing.length ? `<div class="alert warn" style="margin-top:14px">${icon('alert')}<div><strong>建议补充：</strong><ul>${missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div></div>` : ''}
+      ${(() => {
+        const sources = quality.source_coverage || [];
+        if (!sources.length) return '';
+        const bad = sources.filter((x) => x.missing);
+        return `<div class="alert ${bad.length ? 'warn' : 'ok'}" style="margin-top:14px">${icon(bad.length ? 'alert' : 'check')}<div style="flex:1">
+          <strong>来源覆盖 ${sources.length - bad.length}/${sources.length}</strong>
+          ${bad.length ? ` · 缺失：${bad.map((x) => esc(x.title || x.id)).join('、')}` : ' · 所有必需来源已覆盖'}
+          <div class="table-wrap" style="margin-top:8px"><table class="data"><thead><tr><th>来源</th><th>已扫描</th><th>命中文件</th><th>状态</th></tr></thead><tbody>
+            ${sources.map((x) => `<tr><td>${esc(x.title || x.id)}</td><td>${Number(x.scanned || 0)}</td>
+              <td class="small">${(x.matched_files || []).slice(0, 3).map(esc).join('<br>') || '—'}</td>
+              <td>${x.missing ? '<span class="badge warn">缺失</span>' : '<span class="badge ok">已覆盖</span>'}</td></tr>`).join('')}
+          </tbody></table></div>
+        </div></div>`;
+      })()}
       <details class="why-box">
         <summary>为什么得出这个结论？</summary>
         <div class="small" style="margin-top:8px">
@@ -595,6 +609,12 @@ function decisionCardsPanel(task) {
             <div style="margin-bottom:4px"><strong>必要证据：</strong>${necessary || '<span class="muted">未定义</span>'}</div>
             <div style="margin-bottom:4px"><strong>反证：</strong>${counters || '<span class="muted">未定义</span>'}</div>
             ${(c.near_miss || []).length ? `<div style="margin-bottom:4px"><strong>近邻鉴别：</strong>${c.near_miss.map((x) => `<span class="chip">${esc(x.fault || '')}${x.differentiator ? `：${esc(x.differentiator)}` : ''}</span>`).join(' ')}</div>` : ''}
+            ${(c.site_evidence || []).length ? `<div style="margin-bottom:4px"><strong>站点证据矩阵：</strong>
+              <div class="table-wrap" style="margin-top:4px"><table class="data"><thead><tr><th>站点</th><th>状态</th><th>命中</th><th>缺失</th></tr></thead><tbody>
+                ${(c.site_evidence || []).map((x) => `<tr><td>${esc(x.site)}</td><td>${esc(x.state)}</td>
+                  <td class="mono tiny">${(x.hit_rules || []).map(esc).join('、') || '—'}</td>
+                  <td class="mono tiny">${(x.missing_rules || []).map(esc).join('、') || '—'}</td></tr>`).join('')}
+              </tbody></table></div></div>` : ''}
             ${(c.missing_evidence || []).length ? `<div class="tiny muted">缺失规则：${esc((c.missing_evidence || []).join('、'))}</div>` : ''}
             ${(c.limitations || []).length ? `<div class="tiny muted">${esc((c.limitations || []).join('；'))}</div>` : ''}
           </div>

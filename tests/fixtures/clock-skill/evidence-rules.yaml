@@ -1,0 +1,145 @@
+rules:
+- id: E1
+  step: S1
+  description: 日志出现时钟失锁告警或 PLL unlock（排除正常态 OK/已锁定）
+  type: text
+  globs:
+  - '**/*.log'
+  - '**/*clock*.txt'
+  - '**/*.txt'
+  any_of:
+  - (?:CLK|Clk)\[?032
+  - 时钟失锁
+  - PLL unlock(?![eE])
+  - PLL失锁
+  none_of:
+  - '鉴相时钟失锁: OK'
+  - '时钟失锁: OK'
+  - PLL locked
+  - 'LockSatFail: OK'
+  - LockSatFail.*OK
+  - CLK032.*OK
+  - Clk\[032\].*OK
+  - 同步正常
+  min_matches: 1
+  context_lines: 2
+  time_extract:
+    pattern: (\d{4}-\d{2}-\d{2}[ ,]\d{2}:\d{2}:\d{2})
+    group: 1
+    formats:
+    - '%Y-%m-%d %H:%M:%S'
+    - '%Y-%m-%d,%H:%M:%S'
+  verified: true
+- id: E2
+  step: S1
+  description: 锁星失败、卫星接收链路异常或接收机反复复位
+  type: text
+  globs:
+  - '**/clockstatuslog*'
+  - '**/gnsssvinfo*'
+  - '**/NtfDiag.log'
+  - '**/*.log'
+  any_of:
+  - LockSatFail
+  - 锁星失败
+  - 卫星接收.*失锁
+  - GNSS.*(?:失锁|异常)
+  - 接收机复位
+  none_of:
+  - LockSatFail.*OK
+  - 锁星失败.*正常
+  min_matches: 1
+  context_lines: 1
+  time_extract:
+    pattern: (\d{4}-\d{2}-\d{2}[ ,]\d{2}:\d{2}:\d{2})
+    group: 1
+    formats:
+    - '%Y-%m-%d %H:%M:%S'
+    - '%Y-%m-%d,%H:%M:%S'
+  verified: true
+- id: E3
+  step: S1
+  description: OCXO 锁定态频偏持续超 ±50Hz
+  type: numeric_trend
+  globs:
+  - '**/clockocxolog*'
+  trend: sustained_above
+  abs_threshold: 50
+  sustained_count: 20
+  value_pattern: (?:\d{2}:\d{2}:\d{2})\s+(?!-?9999\.99)(-?\d+\.\d+)
+  time_extract:
+    pattern: Clk\[100\](\d{4}-\d{2}-\d{2},\d{2}:\d{2}:\d{2})
+    group: 1
+    formats:
+    - '%Y-%m-%d,%H:%M:%S'
+  verified: true
+temporal: []
+root_causes:
+- id: R2
+  name: GNSS 卫星接收链路故障
+  condition: E2
+  mechanism: GNSS 天馈/接收机链路异常导致锁星失败，时钟源不可用或反复切换。
+  confidence: high
+  actions:
+  - 检查 GNSS 天线、馈线、防雷器和接头，确认无进水/断裂/松动
+  - 检查天线视野与卫星可见性，记录锁星数、C/N0 和定位类型
+  - 检查接收机复位计数与供电，必要时更换天馈/接收机
+  - 恢复后观察 LockSatFail 告警和参考源切换是否消失
+  prerequisites:
+  - 已获取故障时段 clockstatuslog 与 gnsssvinfo
+  risks: 现场操作前确认业务影响与变更窗口
+  rollback: 恢复原天馈/配置并保留日志
+  verify:
+  - globs:
+    - '**/clockstatuslog*'
+    patterns:
+    - LockSatFail
+    expect: absent
+    hold_time: 恢复后观察 2h 无 LockSatFail
+  escalation: 天馈正常但仍反复锁星失败时升级接收机硬件分析
+- id: R3
+  name: OCXO 恒温晶振老化
+  condition: E3
+  mechanism: OCXO 锁定态频偏长期单向偏大，说明晶振老化或温控劣化，需更换硬件。
+  confidence: high
+  actions:
+  - 核对 clockocxolog 中 cur_fcv 的持续趋势与温度曲线
+  - 排除参考源切换/失锁导致的暂态频偏
+  - 在维护窗口更换 OCXO 并复测锁定频偏
+  - 恢复后观察 24h 频偏在门限内
+  prerequisites:
+  - clockocxolog 覆盖至少 24h 且包含锁定态样本
+  risks: 更换晶振需断电并防静电
+  rollback: 恢复原晶振/单板并保留日志
+  verify:
+  - globs:
+    - '**/clockocxolog*'
+    patterns:
+    - cur_fcv
+    expect: present
+    hold_time: 恢复后观察 24h 频偏在 ±50Hz 内
+  escalation: 更换后仍频偏超限时升级单板时钟硬件分析
+- id: R1
+  name: 参考时钟源失锁
+  condition: E1 and not (E2 or E3)
+  mechanism: 参考时钟源（GNSS/上级时钟）失锁后，本地 PLL 无法维持锁定，产生 CLK032 告警与时间不同步。
+  confidence: medium
+  actions:
+  - 检查 GNSS 天线、馈线与卫星可见性，确认锁星数量与 C/N0
+  - 检查上级 SyncE/1588 时钟源与传输链路告警
+  - 查看 clockstatuslog 中的参考源切换与 PLL 状态，定位失锁起点
+  - 恢复参考源后观察 CLK032 是否清除，并复核时间同步偏差
+  prerequisites:
+  - 已获取故障时段完整 clockstatuslog 与网管告警
+  risks: 现场操作前需确认业务影响与变更窗口
+  rollback: 恢复原配置并保留日志，升级时钟专项分析
+  verify:
+  - globs:
+    - '**/*clock*.txt'
+    - '**/*.log'
+    patterns:
+    - CLK032
+    - PLL lock
+    expect: absent
+    hold_time: 恢复后观察 2h 无 CLK032
+  escalation: 参考源正常但仍反复失锁时，升级单板时钟硬件分析

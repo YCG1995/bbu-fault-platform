@@ -291,8 +291,12 @@ def extract_inputs(inputs: list[Path], dest: Path, limits: dict[str, int]) -> di
 
 
 def sample_text_files(root: Path, max_files: int = 6, max_lines: int = 40,
-                      max_chars: int = 6000) -> list[dict[str, Any]]:
-    """给工坊 AI 的样例行：挑小文本文件，截断，避免把几十 MB 日志塞进 prompt。"""
+                      max_chars: int = 6000,
+                      digest: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """给工坊 AI 的样例行：有 digest 时按异常分数采样，否则保留旧的小文件优先行为。"""
+    if digest and digest.get("samples"):
+        return [{"file": s.get("file", ""), "size": 0, "lines": s.get("lines", ""),
+                 "reason": s.get("reason", "")} for s in digest["samples"][:max_files]]
     samples: list[dict[str, Any]] = []
     budget = max_chars
     candidates = []

@@ -5,6 +5,7 @@ high/medium/low 三档；真实校准必须由 evaluation.py 在带标签案例�
 """
 from __future__ import annotations
 
+import fnmatch
 import math
 import re
 from typing import Any
@@ -28,6 +29,44 @@ def _signature(text: str) -> str:
 
 def _roots_for_rule(meta: dict[str, Any]) -> list[str]:
     return [str(x) for x in meta.get("roots") or []]
+
+
+def _match_glob(path: str, pattern: str) -> bool:
+    path = str(path or "").replace("\\", "/")
+    pattern = str(pattern or "").replace("\\", "/")
+    if fnmatch.fnmatch(path, pattern):
+        return True
+    if pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]):
+        return True
+    if "/" not in pattern and fnmatch.fnmatch(path.rsplit("/", 1)[-1], pattern):
+        return True
+    return False
+
+
+def source_coverage(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """O7：required_sources 逐类覆盖；只认明确 glob 命中的证据文件。"""
+    sources = result.get("required_sources") or []
+    evidence_files = [str(e.get("file") or "") for e in (result.get("evidence") or [])
+                      if isinstance(e, dict)]
+    fallback = set(str(x) for x in (result.get("glob_fallback") or []))
+    rows = []
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        sid = str(src.get("id") or "")
+        title = str(src.get("title") or sid)
+        globs = [str(g) for g in (src.get("globs") or [])]
+        matched = sorted({f for f in evidence_files
+                          if f and f not in fallback
+                          and any(_match_glob(f, g) for g in globs)})
+        scanned = len(evidence_files)
+        rows.append({
+            "id": sid, "title": title, "globs": globs,
+            "required": bool(src.get("required", True)),
+            "scanned": scanned, "eligible": len(matched), "matched_files": matched[:10],
+            "missing": not matched, "coverage": round(len(matched) / scanned, 3) if scanned else 0.0,
+        })
+    return rows
 
 
 def assess_evidence(result: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +118,11 @@ def assess_evidence(result: dict[str, Any]) -> dict[str, Any]:
     strength += min(12.0, 3.0 * max(0, len(independent_files) - 1))
     strength += min(8.0, 2.0 * max(0, len(distinct_rules) - 1))
     penalties: list[str] = []
+    sources = source_coverage(result)
+    missing_required = [s for s in sources if s["required"] and s["missing"]]
+    if missing_required:
+        penalties.append("关键来源缺失：" + "、".join(str(s["title"] or s["id"])
+                                                      for s in missing_required))
     if result.get("glob_fallback"):
         strength -= min(15.0, 5.0 * len(result.get("glob_fallback") or []))
         penalties.append("存在 glob 兜底证据，文件名可能不属于目标网元")
@@ -115,7 +159,15 @@ def assess_evidence(result: dict[str, Any]) -> dict[str, Any]:
     if static_conf == "medium" and confidence == "high" and len(distinct_rules) < 2:
         confidence = "medium"
 
+    if missing_required:
+        if len(missing_required) >= 2:
+            confidence = "low"
+        elif confidence == "high":
+            confidence = "medium"
     reasons: list[str] = []
+    if missing_required:
+        reasons.append("关键来源缺失：" + "、".join(str(s["title"] or s["id"])
+                                                    for s in missing_required))
     if not evidence:
         reasons.append("没有任何可定位证据")
     if duplicate_occurrences:
@@ -146,6 +198,8 @@ def assess_evidence(result: dict[str, Any]) -> dict[str, Any]:
         "duplicate_occurrences": duplicate_occurrences,
         "direct_rules": distinct_rules,
         "independent_files": independent_files,
+        "source_coverage": sources,
+        "missing_required_sources": [s["id"] for s in missing_required],
         "reasons": reasons,
         "clusters": summary_clusters,
     }

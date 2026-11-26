@@ -75,6 +75,11 @@ def compose_markdown(task: dict[str, Any], results: list[dict[str, Any]],
                 for item in (card.get("necessary_evidence") or [])[:4]:
                     lines.append(f"  - {item.get('rule')}：{'已命中' if item.get('present') else '未命中'} "
                                  f"{item.get('description') or ''}")
+                for row in card.get("site_evidence") or []:
+                    lines.append(f"  - 站点 {row.get('site')}：{row.get('state')}，"
+                                 f"命中 {len(row.get('hit_rules') or [])} 条"
+                                 + (f"，缺 {len(row.get('missing_rules') or [])} 条"
+                                    if row.get("missing_rules") else ""))
                 for item in card.get("near_miss") or []:
                     lines.append(f"  - 近邻：{item.get('fault')} — {item.get('differentiator')}")
                 if card.get("missing_evidence"):

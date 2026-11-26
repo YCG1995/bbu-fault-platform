@@ -1,0 +1,545 @@
+{
+  "schema": 1,
+  "generated_by": "tools/gen_manifests.py",
+  "assistant_tools": [
+    {
+      "name": "search_docs",
+      "title": "检索平台文档",
+      "description": "检索使用手册、部署、升级、架构等平台文档，回答平台怎么用。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "search_messages",
+      "title": "检索平台消息",
+      "description": "检索站内通知、任务事件、审计记录和外部 IM 消息；按角色限制范围。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "enum": [
+                "notifications",
+                "task_events",
+                "audit",
+                "external"
+              ]
+            }
+          },
+          "days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          },
+          "include_all_users": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_task",
+      "title": "查看任务",
+      "description": "按任务 ID 查看状态、结论摘要和最近事件。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      }
+    },
+    {
+      "name": "list_tasks",
+      "title": "列出任务",
+      "description": "列出当前账号可见的最近诊断任务，可按状态筛选。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "failed",
+              "needs_data",
+              "cancelled"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "create_skill_diagnosis",
+      "title": "创建指定技能诊断",
+      "description": "复用某个已有任务的日志与描述，创建一个只执行指定技能的新诊断任务；不复制日志内容给模型，技能仍按沙箱规则运行。",
+      "scope": "user",
+      "risk": "medium",
+      "mcp": "write",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source_task_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "skill": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 20000
+          }
+        },
+        "required": [
+          "source_task_id",
+          "skill"
+        ]
+      }
+    },
+    {
+      "name": "search_skills",
+      "title": "检索技能",
+      "description": "检索已安装技能的名称、版本、状态和适用场景。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_system_status",
+      "title": "查看系统状态",
+      "description": "查看平台版本、运行时间、磁盘、并发、模型、备份和升级状态。",
+      "scope": "admin",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "list_backups",
+      "title": "列出备份",
+      "description": "列出升级/导入备份及占用空间，标记正在使用和可删除项。",
+      "scope": "admin",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "delete_backup",
+      "title": "删除备份",
+      "description": "删除不再被升级任务使用的备份目录；执行前需要二次确认。",
+      "scope": "admin",
+      "risk": "medium",
+      "mcp": "write",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "storage_overview",
+      "title": "查看任务空间",
+      "description": "查看任务原始输入、产物、可释放空间和磁盘余量。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "release_task_storage",
+      "title": "释放任务空间",
+      "description": "后台释放某任务的原始输入或解压文件；任务运行中不能释放。",
+      "scope": "user",
+      "risk": "medium",
+      "mcp": "write",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "raw_inputs",
+              "extracted",
+              "both"
+            ]
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      }
+    },
+    {
+      "name": "get_update_status",
+      "title": "查看升级状态",
+      "description": "查看当前版本、最近升级任务、执行阶段、备份和磁盘余量。",
+      "scope": "admin",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "apply_update",
+      "title": "应用升级包",
+      "description": "应用已上传并校验通过的离线升级包；需要管理员密码和二次确认。",
+      "scope": "admin",
+      "risk": "high",
+      "mcp": "never",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "update_id": {
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "update_id"
+        ]
+      }
+    },
+    {
+      "name": "rollback_update",
+      "title": "回滚升级",
+      "description": "回滚到指定升级任务的备份；需要管理员密码和二次确认。",
+      "scope": "admin",
+      "risk": "high",
+      "mcp": "never",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "backup_dir": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "list_users",
+      "title": "检索用户",
+      "description": "按用户名/显示名检索账号、角色、状态和最近登录时间。",
+      "scope": "admin",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "update_user",
+      "title": "修改用户",
+      "description": "启用/停用账号或调整角色；不能停用自己或删除最后一个管理员。",
+      "scope": "admin",
+      "risk": "high",
+      "mcp": "never",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "reviewer",
+              "engineer"
+            ]
+          }
+        },
+        "required": [
+          "username"
+        ]
+      }
+    },
+    {
+      "name": "list_models",
+      "title": "列出模型配置",
+      "description": "列出模型配置、角色、优先级和启用状态；不返回 Key 明文。",
+      "scope": "admin",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "update_model",
+      "title": "修改模型配置",
+      "description": "启用/停用模型、调整角色或优先级；不改 API Key。",
+      "scope": "admin",
+      "risk": "medium",
+      "mcp": "never",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "roles": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "enum": [
+                "default",
+                "planner",
+                "router",
+                "arbiter",
+                "writer",
+                "workshop",
+                "assistant"
+              ]
+            }
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_notification_prefs",
+      "title": "查看通知偏好",
+      "description": "查看当前账号的站内通知开关。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "update_notification_prefs",
+      "title": "修改通知偏好",
+      "description": "按通知类型开关站内通知，例如 review_assigned/account_status。",
+      "scope": "user",
+      "risk": "medium",
+      "mcp": "write",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prefs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          }
+        },
+        "required": [
+          "prefs"
+        ]
+      }
+    },
+    {
+      "name": "mark_notifications_read",
+      "title": "标记通知已读",
+      "description": "把当前账号的指定通知或全部未读通知标记为已读。",
+      "scope": "user",
+      "risk": "medium",
+      "mcp": "write",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ids": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            }
+          }
+        },
+        "required": []
+      }
+    }
+  ],
+  "mcp_methods": [
+    "initialize",
+    "ping",
+    "logging/setLevel",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "roots/list",
+    "sampling/createMessage",
+    "completion/complete",
+    "notifications/initialized",
+    "notifications/cancelled"
+  ],
+  "counts": {
+    "assistant_tools": 21,
+    "mcp_methods": 14
+  }
+}

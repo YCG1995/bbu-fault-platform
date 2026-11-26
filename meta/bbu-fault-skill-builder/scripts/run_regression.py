@@ -241,6 +241,17 @@ def assert_evidence(case_exp, ev, checks):
         rule = by_rule.get(rid, {})
         actual = rule.get("match_count", 0) if rule else 0
         checks.append(check(eval_count(spec, actual), f"match_count:{rid}", spec, actual))
+    # O1：逐文件断言（file_counts 支持 >=/==/<= 或精确整数；files_hit 断言命中文件数）
+    for rid, spec in (case_exp.get("file_counts") or {}).items():
+        rule = by_rule.get(rid, {})
+        actual_map = rule.get("hits_by_file") or {}
+        for rel, exp in (spec or {}).items():
+            actual = actual_map.get(rel, 0)
+            checks.append(check(eval_count(exp, actual), f"file_count:{rid}:{rel}", exp, actual))
+    for rid, spec in (case_exp.get("files_hit") or {}).items():
+        rule = by_rule.get(rid, {})
+        actual = len(rule.get("files_hit") or [])
+        checks.append(check(eval_count(spec, actual), f"files_hit:{rid}", spec, actual))
     for i, ec in enumerate(case_exp.get("evidence_contains") or []):
         rid = ec.get("rule")
         rule = by_rule.get(rid, {})

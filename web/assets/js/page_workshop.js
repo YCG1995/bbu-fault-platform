@@ -304,14 +304,23 @@ export async function renderWorkshop() {
           title: '规则试跑结果',
           wide: true,
           body: res.ok === false ? `<div class="alert danger">${icon('alert')}<div>${esc(res.error || '试跑失败')}</div></div>`
-            : `<div class="alert ${hits.length ? 'ok' : 'warn'}">${icon(hits.length ? 'check' : 'alert')}<div>
+            : (() => {
+                const details = res.rule_details || [];
+                const pct = (v) => `${Math.round(Number(v || 0) * 100)}%`;
+                return `<div class="alert ${hits.length ? 'ok' : 'warn'}">${icon(hits.length ? 'check' : 'alert')}<div>
                 <strong>${res.rules || 0} 条规则，命中 ${hits.length} 条</strong>
-                ${res.missed?.length ? ` · 未命中：${esc(res.missed.join('、'))}` : ' · 全部命中'}</div></div>
-              <div class="table-wrap"><table class="data"><thead><tr><th>规则</th><th>命中数</th><th>文件</th><th>片段</th></tr></thead><tbody>
-                ${hits.slice(0, 30).map((hit) => `<tr><td class="mono">${esc(hit.id)}</td><td>${Number(hit.match_count || hit.matches?.length || 0)}</td>
-                  <td class="mono tiny">${esc((hit.files || [])[0] || '—')}</td>
-                  <td class="small">${esc(((hit.excerpts || [])[0] || '').slice(0, 160))}</td></tr>`).join('')}
-              </tbody></table></div>`,
+                ${res.missed?.length ? ` · 未命中：${esc(res.missed.join('、'))}` : ' · 全部命中'}
+                ${res.missed_files?.length ? ` · 未命中文件 ${res.missed_files.length} 个` : ''}</div></div>
+              <div class="table-wrap"><table class="data"><thead><tr><th>规则</th><th>判定</th><th>文件命中/可用</th><th>覆盖率</th><th>未命中文件</th><th>近似行</th></tr></thead><tbody>
+                ${details.slice(0, 40).map((d) => `<tr><td class="mono">${esc(d.id)}</td>
+                  <td>${d.hit ? '<span class="badge ok">命中</span>' : '<span class="badge muted">未命中</span>'}</td>
+                  <td>${(d.files_hit || []).length}/${Number(d.files_eligible || 0)}${d.file_scope && d.file_scope !== 'any' ? ` · ${esc(d.file_scope)}${d.min_files ? ` ${d.min_files}` : ''}` : ''}</td>
+                  <td>${pct(d.file_coverage)}</td>
+                  <td class="tiny">${esc((d.files_missed || []).slice(0, 6).join('、') || '—')}${(d.files_missed || []).length > 6 ? '…' : ''}</td>
+                  <td class="small">${esc(((d.near_misses || [])[0] || '').slice(0, 120) || '—')}${(d.near_misses || []).length > 1 ? ` +${d.near_misses.length - 1}` : ''}</td></tr>`).join('')}
+              </tbody></table></div>
+              <div class="tiny muted" style="margin-top:6px">覆盖率 = 达到 min_matches 的文件 / 可用文本文件；binary/ciphered/空文件不计入分母。</div>`;
+              })(),
         });
       } catch (err) { toast(err.message, 'error'); }
       setBusy(btn, false);
@@ -373,7 +382,31 @@ export async function renderWorkshop() {
       try {
         const res = await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/publish`, { method: 'POST' });
         toast(`已发布 ${res.skill} v${res.version}`, 'ok'); refresh();
-      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      } catch (err) {
+        setBusy(btn, false);
+        if (!String(err.message || '').includes('发布覆盖不足')) { toast(err.message, 'error'); return; }
+        const m = modal({
+          title: '发布覆盖不足',
+          body: `<div class="alert warn">${icon('alert')}<div>${esc(err.message)}</div></div>
+            <label class="label" style="margin-top:12px">带警告发布理由（不少于 10 字，将写入审计）</label>
+            <textarea class="textarea" id="publish-override" rows="4" placeholder="例如：现场只有单站点日志，已由专家人工核对根因与反例"></textarea>`,
+          footer: `<button class="btn" data-act="cancel">返回修复</button>
+            <button class="btn btn-primary" data-act="override" disabled>带警告发布</button>`,
+        });
+        const ta = m.body.querySelector('#publish-override');
+        const go = m.foot.querySelector('[data-act="override"]');
+        ta.addEventListener('input', () => { go.disabled = ta.value.trim().length < 10; });
+        m.mask.addEventListener('click', async (e) => {
+          if (e.target.closest('[data-act="cancel"]')) m.close();
+          if (!e.target.closest('[data-act="override"]') || go.disabled) return;
+          setBusy(go, true, '发布中…');
+          try {
+            const res = await api(`/api/workshop/drafts/${encodeURIComponent(draftId)}/publish`,
+              { method: 'POST', body: { override_reason: ta.value.trim() } });
+            m.close(); toast(`已带警告发布 ${res.skill} v${res.version}`, 'warn'); refresh();
+          } catch (err2) { toast(err2.message, 'error'); setBusy(go, false); }
+        });
+      }
     },
     'model-key': () => openPersonalModelModal(() => refresh()),
     'retry-job': (btn) => {
@@ -591,6 +624,18 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
         <div class="mini-stat"><div class="v">${cases.length}</div><div class="k">已写入案例</div></div>
       </div>
       ${qualityAlert}
+      ${(() => {
+        const dg = analysis.digest || {};
+        if (!dg.inventory) return '';
+        const inv = dg.inventory || {};
+        const cls = Object.entries(inv.classes || {}).map(([k, v]) => `${k} ${v}`).join('、') || '—';
+        return `<div class="alert info" style="margin-top:10px">${icon('search')}<div style="flex:1">
+          <strong>资料盘点 ${inv.files || 0} 个文件</strong> · ${Number(inv.bytes || 0).toLocaleString()} 字节 · ${esc(cls)}
+          · 异常行 ${dg.anomaly_count || 0}
+          <div class="tiny muted">${(dg.coverage_notes || []).map(esc).join('；') || '摘要未截断'}</div>
+          ${(dg.candidates || []).length ? `<div class="tiny" style="margin-top:4px">候选规则：${dg.candidates.slice(0, 4).map((c) => `${esc(c.rule_id)}（${c.files} 文件/${c.hits} 次）`).join('、')}</div>` : ''}
+        </div></div>`;
+      })()}
       ${(() => {
         const prov = intake.provenance || {};
         const hard = (intake.hard_fields || []).map((k) => prov[k]).filter(Boolean);

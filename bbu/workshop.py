@@ -14,8 +14,10 @@ from typing import Any
 import yaml
 
 from .ai import AIGateway, AIError, Budget, NoModelError
+from .approvals import publish_gate
 from .data_egress import DataEgressPolicy
 from .db import Database
+from .evidence_digest import build_digest
 from .prompts import (WORKSHOP_EXTRACT_SYSTEM, WORKSHOP_REVIEW_SCHEMA,
                       WORKSHOP_REVIEW_SYSTEM, WORKSHOP_SPEC_SCHEMA,
                       workshop_extract_user, workshop_repair_user,
@@ -472,8 +474,17 @@ class WorkshopService:
                 self.db.execute("UPDATE workshop_drafts SET status='needs_confirmation', last_error=? WHERE id=?",
                                 (f"日志解压失败: {exc}", draft_id))
                 raise ValueError(f"日志解压失败: {exc}") from exc
-            extras = {"extract": extract_stats, "rule_candidates": self._scan_rules(extracted),
-                      "samples": sample_text_files(extracted, max_files=6, max_lines=30, max_chars=5000)}
+            rule_candidates = self._scan_rules(extracted)
+            digest = build_digest(
+                extracted,
+                max_chars=int(self.config.get("workshop_digest_max_chars",
+                                              self.config.get("workshop_egress_max_chars", 12000))),
+                max_lines=int(self.config.get("workshop_digest_max_lines", 4000)),
+                candidates=rule_candidates)
+            extras = {"extract": extract_stats, "rule_candidates": rule_candidates,
+                      "digest": digest,
+                      "samples": sample_text_files(
+                          extracted, max_files=6, max_lines=30, max_chars=5000, digest=digest)}
         elif not row.get("source_text"):
             raise ValueError("请先粘贴故障资料或上传日志/案例包")
         self._progress(progress, "extract", 22, "日志盘点完成，开始语义提取")
@@ -493,6 +504,11 @@ class WorkshopService:
         analysis.update({"model": "", "source": "deterministic", "notes": [], "attempts": [],
                          "extract_status": "not_run", "review_status": "not_run",
                          "repair_status": "not_run"})
+        digest = analysis.get("digest") or {}
+        if not source_text and digest.get("summary_text"):
+            source_text = str(digest["summary_text"])
+            analysis["upload_only"] = True
+            analysis["notes"].append("未粘贴需求文本，使用日志证据摘要作为确定性来源；请人工确认技能语义。")
         if not source_text:
             # 兼容自学习和手工旧草稿：没有原始需求文本时保留人工 profile，不用空骨架覆盖。
             analysis["ai_status"] = "not_applicable"
@@ -508,6 +524,42 @@ class WorkshopService:
             return self.get(draft_id)
 
         spec = parse_source(source_text, recipe_id=str(row.get("recipe_id") or ""))
+        if analysis.get("upload_only"):
+            # 纯日志草稿没有需求文本，必须从确定性摘要生成可执行规则，避免空 profile。
+            candidates = analysis.get("rule_candidates") or {}
+            suggestions = (candidates.get("rule_suggestions")
+                           if isinstance(candidates, dict) else []) or []
+            rules = []
+            for idx, item in enumerate(suggestions[:8], 1):
+                if not isinstance(item, dict):
+                    continue
+                any_of = [str(x) for x in item.get("any_of") or [] if str(x).strip()]
+                if not any_of:
+                    continue
+                rules.append({
+                    "id": f"E{idx}", "description": str(item.get("description") or "")[:120],
+                    "globs": [str(x) for x in item.get("globs") or []][:4] or ["**/*.log*"],
+                    "all_of": [], "any_of": any_of[:6], "none_of": [],
+                    "min_matches": 1, "verified": False, "critical": False,
+                })
+            if rules and not spec.get("evidence_rules"):
+                spec["evidence_rules"] = rules
+                spec["compiler"] = "log-digest"
+                spec["summary"] = spec.get("summary") or "根据上传日志的确定性摘要生成候选证据规则"
+            sources = []
+            seen = set()
+            for sample in digest.get("samples") or []:
+                file = str(sample.get("file") or "").replace("\\", "/")
+                base = file.rsplit("/", 1)[-1]
+                key = sample.get("class") or base
+                if not base or key in seen:
+                    continue
+                seen.add(key)
+                sources.append({"name": str(sample.get("class") or "日志"),
+                                "globs": [f"**/{base}", f"**/*{Path(base).suffix}"],
+                                "paths": [file], "notes": "来自日志摘要的代表样本"})
+            if sources and not spec.get("log_sources"):
+                spec["log_sources"] = sources
         ai_status = "not_configured"
         budget = Budget(4, int(self.config.get("max_total_tokens", 200000)))
         egress = DataEgressPolicy.for_workshop(self.config)
@@ -536,7 +588,8 @@ class WorkshopService:
                 self._progress(progress, "extract", 30, "AI 正在提取故障语义与证据规则")
                 result = self.gateway.complete(
                     "workshop", WORKSHOP_EXTRACT_SYSTEM,
-                    workshop_extract_user(source_context, safe_spec(spec)),
+                    workshop_extract_user(source_context, safe_spec(spec),
+                                          digest if digest else None),
                     json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:extract", budget=budget,
                     max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
                     model_override=model_override, stage="extract", stream=True,
@@ -618,6 +671,15 @@ class WorkshopService:
             analysis["review_status"] = "skipped"
             analysis["repair_status"] = "skipped"
 
+        if digest:
+            analysis["digest"] = {
+                "inventory": digest.get("inventory") or {},
+                "timeline": digest.get("timeline") or [],
+                "candidates": digest.get("candidates") or [],
+                "samples": digest.get("samples") or [],
+                "coverage_notes": digest.get("coverage_notes") or [],
+                "anomaly_count": len(digest.get("anomaly_lines") or []),
+            }
         analysis["intake"] = public_spec(spec)
         analysis["quality"] = quality
         analysis["review"] = review
@@ -654,7 +716,9 @@ class WorkshopService:
         self.db.execute(
             "UPDATE workshop_drafts SET name=?, title=?, fault_name=?, category=?, description=?, profile_yaml=?, "
             "analysis_json=?, check_json=?, status=?, last_error=?, updated_at=? WHERE id=?",
-            (final_name, spec["title"], spec["fault_name"], spec.get("category") or "硬件故障",
+            (final_name, spec["title"], spec["fault_name"],
+             "自学习" if str(row.get("category") or "") == "自学习"
+             else (spec.get("category") or "硬件故障"),
              spec.get("summary") or row["description"], profile_yaml,
              json.dumps(analysis, ensure_ascii=False, default=str),
              json.dumps(check, ensure_ascii=False, default=str), status, last_error, iso_now(), draft_id))
@@ -729,7 +793,8 @@ class WorkshopService:
             for rule in (step or {}).get("rules") or []:
                 item = {k: rule.get(k) for k in (
                     "id", "description", "type", "globs", "all_of", "any_of", "none_of",
-                    "min_matches", "context_lines", "case_sensitive", "value_pattern",
+                    "min_matches", "min_files", "file_scope", "critical",
+                    "context_lines", "case_sensitive", "value_pattern",
                     "threshold", "abs_threshold", "sustained_count", "window_minutes",
                     "trend", "associate_by") if rule.get(k) not in (None, "", [])}
                 item.setdefault("type", "text")
@@ -761,18 +826,38 @@ class WorkshopService:
             return {"ok": False, "error": f"试跑结果无法解析: {exc}"}
         raw_results = data.get("results") or []
         hits = []
+        details = []
         for r in raw_results:
+            rid = r.get("rule_id") or r.get("id")
+            evidence = r.get("evidence") or []
+            detail = {
+                "id": rid, "hit": bool(r.get("hit")),
+                "match_count": r.get("match_count") or 0,
+                "files_eligible": r.get("files_eligible", r.get("files_scanned", 0)),
+                "files_hit": r.get("files_hit") or [],
+                "files_missed": r.get("files_missed") or [],
+                "hits_by_file": r.get("hits_by_file") or {},
+                "file_coverage": r.get("file_coverage", 0),
+                "file_scope": r.get("file_scope", "any"),
+                "min_files": r.get("min_files", 0),
+                "skipped_count": r.get("skipped_count", 0),
+                "near_misses": r.get("near_misses") or [],
+            }
+            details.append(detail)
             if not r.get("hit"):
                 continue
-            evidence = r.get("evidence") or []
             hits.append({
-                "id": r.get("rule_id") or r.get("id"),
-                "match_count": r.get("match_count") or 0,
-                "files": [e.get("file") for e in evidence if e.get("file")][:5],
+                "id": rid, "match_count": r.get("match_count") or 0,
+                "files": (r.get("files_hit") or [e.get("file") for e in evidence
+                                                  if e.get("file")])[:5],
                 "excerpts": [(e.get("text") or e.get("line") or "") for e in evidence][:5],
             })
         missed = [r.get("rule_id") or r.get("id") for r in raw_results if not r.get("hit")]
+        missed_files = sorted({f for d in details for f in d["files_missed"]})
         return {"ok": True, "rules": len(rules), "hits": hits, "missed": missed,
+                "rule_details": details, "missed_files": missed_files,
+                "near_misses": [{"rule_id": d["id"], "lines": d["near_misses"]}
+                                for d in details if d["near_misses"]],
                 "root_causes": data.get("root_causes") or [],
                 "excerpt": (proc.stdout or "")[:5000]}
 
@@ -927,7 +1012,10 @@ class WorkshopService:
                     "error": "领域配方已变更，当前 profile 仍是旧配方生成的规则；请先重新分析后再构建"}
         draft_dir = self.config.data_dir / "workshop" / draft_id
         profile_path = draft_dir / "profile.yaml"
-        write_text(profile_path, row["profile_yaml"])
+        parsed_profile.setdefault("rule_scope_v2",
+                                  str(self.config.get("rule_scope_v2", "shadow")))
+        write_text(profile_path, yaml.safe_dump(parsed_profile, allow_unicode=True,
+                                                sort_keys=False))
         check = self.check(row["profile_yaml"])
         self.db.execute("UPDATE workshop_drafts SET check_json=?, updated_at=? WHERE id=?",
                         (json.dumps(check, ensure_ascii=False), iso_now(), draft_id))
@@ -1019,7 +1107,83 @@ class WorkshopService:
              iso_now(), draft_id))
         return payload
 
-    def publish(self, draft_id: str, username: str) -> dict[str, Any]:
+    def _publish_coverage(self, row: dict[str, Any]) -> dict[str, Any]:
+        """O4：发布前重新计算案例覆盖，不信任 build.verified。"""
+        name = row["name"]
+        profile = yaml.safe_load(row.get("profile_yaml") or "") or {}
+        rules = {}
+        for step in (profile.get("analysis") or {}).get("steps") or []:
+            for rule in step.get("rules") or []:
+                if rule.get("id"):
+                    rules[str(rule["id"])] = rule
+        cases = []
+        case_root = self.config.cases_dir / name
+        if case_root.exists():
+            for p in sorted(case_root.glob("*/case.yaml")):
+                try:
+                    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                except (OSError, yaml.YAMLError):
+                    continue
+                cases.append(data)
+        roots = profile.get("root_causes") or []
+        positive_by_root = {str(rc.get("id")): [] for rc in roots}
+        covered_by_root = {str(rc.get("id")): set() for rc in roots}
+        for case in cases:
+            expected = case.get("expected") or {}
+            rid = str(expected.get("root_cause") or "")
+            kind = str(case.get("kind") or "positive")
+            if rid in positive_by_root and kind != "negative":
+                positive_by_root[rid].append(str(case.get("id") or ""))
+                covered_by_root[rid].update(str(x) for x in expected.get("hit_rules") or [])
+                covered_by_root[rid].update(str(x) for x in expected.get("not_hit_rules") or [])
+        blocking, warnings, rows = [], [], {}
+        for rc in roots:
+            rid = str(rc.get("id"))
+            required = set(re.findall(r"\b[A-Z]\d+\b", rc.get("condition", "") or ""))
+            missing = sorted(required - covered_by_root.get(rid, set()))
+            if not positive_by_root.get(rid):
+                blocking.append(f"根因 {rid} 没有非负例案例")
+            if missing:
+                blocking.append(f"根因 {rid} 的 condition 规则未被其案例验证: {missing}")
+            rows[rid] = {"cases": positive_by_root.get(rid, []),
+                         "required_rules": sorted(required), "missing_rules": missing}
+        critical = {rid for rid, r in rules.items() if r.get("critical") is True}
+        for rid in sorted(critical):
+            pos_hit = [c.get("id") for c in cases
+                       if str((c.get("expected") or {}).get("root_cause") or "") != "NONE"
+                       and rid in {str(x) for x in (c.get("expected") or {}).get("hit_rules") or []}]
+            neg = [c.get("id") for c in cases
+                   if str((c.get("expected") or {}).get("root_cause") or "NONE") == "NONE"
+                   or str(c.get("kind") or "") == "negative"]
+            if not pos_hit or not neg:
+                blocking.append(f"关键规则 {rid} 需要至少 1 个正例和 1 个反例")
+        if not [c for c in cases
+                if str((c.get("expected") or {}).get("root_cause") or "NONE") == "NONE"]:
+            blocking.append("发布前至少需要 1 个故障正例和 1 个正常/反例，并全部通过回归；"
+                            "根因缺少 negative 反证案例")
+        required_sources = (profile.get("evidence") or {}).get("required_sources") or []
+        source_rows = []
+        for src in required_sources:
+            if not isinstance(src, dict):
+                continue
+            sid = str(src.get("id") or "")
+            title = str(src.get("title") or sid)
+            source_rows.append({"id": sid, "title": title, "cases": len(cases),
+                                "required": bool(src.get("required", True))})
+            if not cases:
+                warnings.append(f"required source {sid or title} 无任何案例输入，无法验证覆盖")
+        for rid, rule in sorted(rules.items()):
+            if cases and rule.get("globs"):
+                continue
+            if rule.get("globs"):
+                warnings.append(f"规则 {rid} glob 无案例输入，无法验证覆盖")
+        return {"ok": not blocking, "blocking": blocking, "warnings": warnings,
+                "root_causes": rows, "critical_rules": sorted(critical),
+                "required_sources": source_rows, "cases": len(cases)}
+
+    def publish(self, draft_id: str, username: str, override_reason: str = "",
+                approvals: list[dict[str, Any]] | None = None,
+                channel: str = "stable", emergency_reason: str = "") -> dict[str, Any]:
         row = self.get(draft_id)
         build = row.get("build") or {}
         if not build.get("ok"):
@@ -1030,16 +1194,23 @@ class WorkshopService:
         if quality and not quality.get("ok", True):
             raise ValueError("技能质量审查未通过，请先处理错误或补充确认")
         name = row["name"]
-        kinds = set()
-        case_root = self.config.cases_dir / name
-        if case_root.exists():
-            for path in case_root.glob("*/case.yaml"):
-                try:
-                    kinds.add(str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("kind") or ""))
-                except (OSError, yaml.YAMLError):
-                    continue
-        if "positive" not in kinds or "negative" not in kinds:
-            raise ValueError("发布前至少需要 1 个故障正例和 1 个正常/反例，并全部通过回归")
+        if approvals or emergency_reason:
+            gate = publish_gate(channel=channel, approvals=approvals,
+                                emergency_reason=emergency_reason, actor=username)
+            if not gate.get("ok"):
+                raise ValueError(str(gate.get("message") or "发布审批未通过"))
+            if gate.get("emergency"):
+                self.db.audit(None, username, "skill.publish.emergency", draft_id,
+                              {"reason": emergency_reason, "channel": channel,
+                               "follow_up_within_hours": 24})
+        coverage = self._publish_coverage(row)
+        override = ""
+        if not coverage["ok"]:
+            reason = str(override_reason or "").strip()
+            if len(reason) < 10:
+                raise ValueError("发布覆盖不足：" + "；".join(coverage["blocking"])
+                                 + "。如确需发布，请填写不少于 10 字的理由")
+            override = reason
         version = build.get("version") or "0.1.0"
         src = self.config.data_dir / "skill_versions" / name / version
         if not src.exists():
@@ -1081,10 +1252,12 @@ class WorkshopService:
         self.db.execute("UPDATE workshop_drafts SET status='published', last_error='', updated_at=? WHERE id=?",
                         (iso_now(), draft_id))
         self.registry.scan()
-        self.db.audit(None, username, "skill.publish", name,
-                      {"version": version, "verified": bool(build.get("verified"))})
+        self.db.audit(None, username, "skill.publish.override" if override else "skill.publish",
+                      name, {"version": version, "verified": bool(build.get("verified")),
+                             "coverage": coverage, "override_reason": override})
         return {"ok": True, "skill": name, "version": version,
-                "verified": bool(build.get("verified"))}
+                "verified": bool(build.get("verified")),
+                "coverage": coverage, "override": bool(override)}
 
     def rollback(self, skill_name: str, version: str, username: str) -> dict[str, Any]:
         src = self.config.data_dir / "skill_versions" / skill_name / version

@@ -76,6 +76,47 @@ def _cosine(left: dict[int, float], right: dict[int, float]) -> float:
     return dot / norm if norm else 0.0
 
 
+_ALIAS_GROUPS = [
+    {"失锁", "unlocked", "unlock", "pll", "clock"},
+    {"光模块", "光功率", "optical", "rx", "receive"},
+    {"驻波", "vswr", "swr", "天馈"},
+    {"复位", "reboot", "reset", "restart", "watchdog"},
+    {"电源", "power", "voltage", "电压"},
+    {"ssd", "硬盘", "disk", "smart", "寿命"},
+    {"小区", "cell", "扇区", "sector"},
+    {"单板", "board", "slot", "槽位"},
+    {"告警", "alarm", "alert", "fm"},
+]
+
+
+def _alias_score(query: str, doc: str) -> float:
+    q = (query or "").lower()
+    d = (doc or "").lower()
+    hits = 0
+    for group in _ALIAS_GROUPS:
+        q_hit = [x for x in group if x in q]
+        d_hit = [x for x in group if x in d]
+        if q_hit and d_hit and set(q_hit) != set(d_hit):
+            hits += 1
+    return min(1.0, hits / max(1, len(_ALIAS_GROUPS)) * 2.0)
+
+
+def _bm25(query_tokens: set[str], doc_tf: dict[str, float], doc_len: float,
+          df: dict[str, int], n_docs: int, avgdl: float) -> float:
+    k1, b = 1.2, 0.75
+    if not query_tokens or not doc_tf:
+        return 0.0
+    total = 0.0
+    for token in query_tokens:
+        tf = doc_tf.get(token, 0.0)
+        if not tf:
+            continue
+        idf = __import__("math").log((n_docs - df.get(token, 0) + 0.5) /
+                                     (df.get(token, 0) + 0.5) + 1.0)
+        total += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / max(1.0, avgdl)))
+    return total
+
+
 def _loads(value: Any, default: Any) -> Any:
     try:
         return json.loads(value) if isinstance(value, str) else (value if value is not None else default)
@@ -177,32 +218,55 @@ class ExperienceStore:
             "('done','needs_data','matched','unmatched','temporal_conflict','insufficient') "
             "AND invalidated=0 " + trust_sql +
             "ORDER BY id DESC LIMIT 300")
-        ranked: list[tuple[float, dict[str, Any]]] = []
-        all_docs: list[tuple[float, dict[str, Any]]] = []
+        docs: list[dict[str, Any]] = []
         for row in rows:
             if exclude_task and row.get("task_id") == exclude_task:
                 continue
             outcome = _loads(row.get("outcome_json"), {})
-            if device_type and str(outcome.get("device_type") or "") \
-                    and str(outcome.get("device_type")) != device_type:
+            row_device = str(outcome.get("device_type") or row.get("device_type") or "")
+            row_version = str(outcome.get("software_version") or row.get("software_version") or "")
+            if device_type and row_device and row_device != device_type:
                 continue
-            if software_version and str(outcome.get("software_version") or "") \
-                    and str(outcome.get("software_version")) != software_version:
+            if software_version and row_version and row_version != software_version:
                 continue
             if fault_domain and fault_domain not in str(row.get("root_cause_name") or ""):
                 continue
-            doc_text = " ".join([
-                row.get("description") or "", row.get("root_cause_name") or "",
-                row.get("skill_name") or "", " ".join(_loads(row.get("hints_json"), []))])
-            doc_tokens = _tokens(doc_text)
-            lexical = len(query_tokens & doc_tokens) / max(1, len(query_tokens)) \
-                if query_tokens else 0.0
-            vector = _cosine(query_vec, _vector(doc_text))
-            score = 0.55 * lexical + 0.35 * vector
+            fields = {
+                "title": str(row.get("root_cause_name") or ""),
+                "fault": str(row.get("description") or ""),
+                "skill": str(row.get("skill_name") or ""),
+                "body": " ".join(_loads(row.get("hints_json"), [])),
+            }
+            doc_text = " ".join(fields.values())
+            doc_tf: dict[str, float] = {}
+            for field, weight in (("title", 2.0), ("fault", 1.5), ("skill", 1.2), ("body", 1.0)):
+                for token in _tokens(fields[field]):
+                    doc_tf[token] = doc_tf.get(token, 0.0) + weight
+            docs.append({"row": row, "outcome": outcome, "text": doc_text,
+                         "tf": doc_tf, "len": sum(doc_tf.values()),
+                         "doc_tokens": set(doc_tf)})
+        n_docs = len(docs)
+        avgdl = (sum(d["len"] for d in docs) / n_docs) if n_docs else 1.0
+        df: dict[str, int] = {}
+        for d in docs:
+            for token in d["doc_tokens"]:
+                df[token] = df.get(token, 0) + 1
+        query_tokens = _tokens(query_text)
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        all_docs: list[tuple[float, dict[str, Any]]] = []
+        for d in docs:
+            row, outcome = d["row"], d["outcome"]
+            bm25 = _bm25(query_tokens, d["tf"], d["len"], df, n_docs, avgdl)
+            bm25_norm = bm25 / (bm25 + 1.0) if bm25 else 0.0
+            alias = _alias_score(query_text, d["text"])
+            vector = _cosine(query_vec, _vector(d["text"]))
+            score = 0.65 * bm25_norm + 0.2 * alias + 0.15 * vector
             if row.get("skill_name") and row["skill_name"] == skill_name:
                 score += 0.08
             if row.get("root_cause_name") and row["root_cause_name"] in (description or ""):
                 score += 0.04
+            if device_type and row_device == device_type:
+                score += 0.05
             if score < 0.06:
                 continue
             item = {
@@ -213,12 +277,13 @@ class ExperienceStore:
                 "status": row.get("status") or "",
                 "confidence": row.get("confidence") or "",
                 "trust_level": row.get("trust_level") or "unreviewed",
-                "device_type": outcome.get("device_type") or "",
-                "software_version": outcome.get("software_version") or "",
+                "device_type": row_device,
+                "software_version": row_version,
                 "plan": _loads(row.get("plan_json"), {}),
                 "outcome": outcome,
                 "match_score": round(score, 3),
-                "match": {"lexical": round(lexical, 3), "vector": round(vector, 3),
+                "match": {"bm25": round(bm25_norm, 3), "alias": round(alias, 3),
+                          "vector": round(vector, 3),
                           "structured": bool(device_type or software_version)},
             }
             ranked.append((score, item))

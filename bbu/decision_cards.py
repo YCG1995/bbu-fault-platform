@@ -21,6 +21,16 @@ def build_decision_cards(skill: Any, result: dict[str, Any] | None) -> list[dict
     evidence = result.get("evidence") or []
     present = {str(x.get("rule_id") or "") for x in evidence if x.get("rule_id")}
     rules = {str(r.get("id") or ""): r for r in profile.get("evidence_rules") or []}
+
+    def site_of(ev: dict[str, Any]) -> str:
+        path = str((ev.get("source") or {}).get("path") or ev.get("file") or "").replace("\\", "/")
+        return path.split("/", 1)[0] if "/" in path else "default"
+
+    by_rule_site: dict[str, set[str]] = {}
+    for ev in evidence:
+        rid = str(ev.get("rule_id") or "")
+        if rid:
+            by_rule_site.setdefault(rid, set()).add(site_of(ev))
     cards: list[dict[str, Any]] = []
     for root in profile.get("root_causes") or []:
         condition = str(root.get("condition") or "")
@@ -30,8 +40,20 @@ def build_decision_cards(skill: Any, result: dict[str, Any] | None) -> list[dict
         state = "supported" if positive and not missing and not contradicted \
             else ("contradicted" if contradicted else
                   ("missing_data" if missing else "unknown"))
+        site_matrix = []
+        sites = sorted({site for rule_sites in by_rule_site.values() for site in rule_sites})
+        for site in sites:
+            hits = [rid for rid in positive if site in by_rule_site.get(rid, set())]
+            missing_site = [rid for rid in positive if rid not in hits]
+            site_matrix.append({"site": site, "hit_rules": hits,
+                                "missing_rules": missing_site,
+                                "state": "supported" if hits and not missing_site
+                                else ("partial" if hits else "missing_data")})
         cards.append({
             "root_id": root.get("id"), "root_cause": root.get("name"),
+            "scope": root.get("scope") or "all",
+            "associate_by": root.get("associate_by") or [],
+            "site_evidence": site_matrix,
             "condition": condition,
             "necessary_evidence": [{"rule": rid, "present": rid in present,
                                     "description": (rules.get(rid) or {}).get("description", "")}

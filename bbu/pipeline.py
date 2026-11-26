@@ -328,10 +328,14 @@ class TaskPipeline:
                                    or bool(json.loads(task.get("options_json") or "{}").get("include_canary")))]
                 all_skills.sort(key=lambda s: scores.get(s.name, 0), reverse=True)
                 catalog = []
-                for s in all_skills[:24]:
-                    entry = s.catalog_entry()
+                for s in all_skills[:8]:
+                    entry = s.index_card()
                     entry["rule_score"] = round(scores.get(s.name, 0), 1)
                     catalog.append(entry)
+                index_chars = len(json.dumps(catalog, ensure_ascii=False))
+                if trace:
+                    trace.append("stage", phase="planning", status="running",
+                                 message=f"技能索引卡 {len(catalog)} 张，{index_chars} 字符；按需加载完整 profile")
                 options = _json_load(task.get("options_json"), {})
                 selected = [str(x) for x in (options.get("skill_names") or [])]
                 experiences = self.experiences.search(
@@ -925,6 +929,9 @@ class TaskPipeline:
                 raise
             res["skill_name"] = skill.name
             res["skill_title"] = skill.title
+            res["required_sources"] = list(
+                ((getattr(skill, "profile", {}) or {}).get("evidence") or {}
+                 ).get("required_sources") or [])
             res["score"] = cand["score"]
             res["match_reason"] = cand.get("reason", "")
             res["plan_step"] = step_id
@@ -1010,7 +1017,8 @@ class TaskPipeline:
              json.dumps(res.get("summary") or {}, ensure_ascii=False, default=str),
              json.dumps({k: res.get(k) for k in (
                  "ok", "status", "primary", "root_cause", "evidence", "match_counts",
-                 "glob_fallback", "sites", "limitations", "verdict", "rule_meta", "evidence_ids")},
+                 "glob_fallback", "sites", "limitations", "verdict", "rule_meta", "evidence_ids",
+                 "required_sources", "evidence_quality")},
                  ensure_ascii=False, default=str),
              (res.get("reports") or {}).get("md") or None,
              (res.get("reports") or {}).get("html") or None,

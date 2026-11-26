@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "generated_by": "tools/gen_manifests.py",
+  "count": 45,
+  "scripts": [
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/build_child_skill.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/check_env.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/describe.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/domain_pack.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/fm_alarm_align.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/gen_specialized.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/import_rule_library.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/init_case.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/log_format.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/package_skill.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/parse_clock.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/parse_cloudmat.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/publish.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/render_report.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/rule_library_diff.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/rule_lint.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/run_analysis.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/run_regression.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/scaffold_child_skill.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/scan_rule_candidates.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/search_evidence.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/selfcheck.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/skill_sync.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/unpack_logs.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "meta/bbu-fault-skill-builder/scripts/validate_skill_md.py",
+      "kind": "meta-script"
+    },
+    {
+      "path": "tools/backup_ops.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/bbu_ops.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/eval_gate.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/eval_kb_retrieval.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/generate_diagnostic_dataset.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/real_cases.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/reproduce_task.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/seed_reasoning_experiences.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/support_bundle.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "deploy/backup.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/bbu-upgrade-helper.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/ci.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/fix_upgrade_helper.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/install_offline.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/install_upgrade_helper.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/make_oneclick.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/make_release.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/make_windows_zip.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/rollback_offline.sh",
+      "kind": "deploy-shell"
+    },
+    {
+      "path": "deploy/upgrade_offline.sh",
+      "kind": "deploy-shell"
+    }
+  ]
+}

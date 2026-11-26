@@ -148,6 +148,60 @@ export function providerName(p) {
   return { openai: 'OpenAI 兼容', anthropic: 'Anthropic', mock: 'Mock 演示' }[p] || p;
 }
 
+const requestGates = new Map();
+const inflight = new Set();
+
+export function withBusy(button, fn, { timeoutMs = 30000, minMs = 0 } = {}) {
+  if (!button || button.tagName !== 'BUTTON') return Promise.resolve().then(fn);
+  const started = Date.now();
+  setBusy(button, true);
+  let timer = null;
+  let timedOut = false;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      const err = new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）`);
+      err.name = 'AbortError';
+      reject(err);
+    }, timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(fn), timeout])
+    .finally(async () => {
+      clearTimeout(timer);
+      const elapsed = Date.now() - started;
+      if (minMs && elapsed < minMs && !timedOut) {
+        await new Promise((resolve) => setTimeout(resolve, minMs - elapsed));
+      }
+      setBusy(button, false);
+    });
+}
+
+export function requestGate(key, fn, windowMs = 300) {
+  const now = Date.now();
+  const gate = requestGates.get(key);
+  if (gate) {
+    if (gate.inFlight) return gate.inFlight;
+    if (now - gate.last < windowMs) return Promise.resolve(null);
+  }
+  const promise = Promise.resolve().then(fn);
+  requestGates.set(key, { last: now, inFlight: promise });
+  promise.finally(() => {
+    const current = requestGates.get(key);
+    if (current && current.inFlight === promise) {
+      current.inFlight = null;
+      current.last = Date.now();
+    }
+  }).catch(() => {});
+  return promise;
+}
+
+export function abortInflight(reason = '请求已取消') {
+  for (const item of inflight) {
+    try { item.controller.abort(reason); } catch { /* ignore */ }
+  }
+  inflight.clear();
+}
+
 export async function api(path, options = {}) {
   const opts = { credentials: 'same-origin', ...options };
   const headers = new Headers(opts.headers || {});
@@ -159,9 +213,39 @@ export async function api(path, options = {}) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes((opts.method || 'GET').toUpperCase()) && state.csrf) {
     headers.set('X-CSRF', state.csrf);
   }
+  const method = (opts.method || 'GET').toUpperCase();
+  const timeoutMs = Number(opts.timeoutMs || (body instanceof FormData ? 600000 : 30000));
+  const actionButton = opts.button || state.activeButton || null;
+  const actionKey = opts.gateKey || `${method} ${path} ${state.activeAction || ''}`;
+  const controller = new AbortController();
   opts.headers = headers;
   opts.body = body;
-  const res = await fetch(path, opts);
+  const exec = async () => {
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const marker = { controller, path };
+    inflight.add(marker);
+    try {
+      const res = await fetch(path, {...opts, signal: controller.signal});
+      return await handleResponse(res, path, opts.raw);
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        const error = new Error(`请求超时（${Math.round(timeoutMs / 1000)}s），请重试`);
+        error.name = 'AbortError';
+        throw error;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      inflight.delete(marker);
+    }
+  };
+  if (actionButton) {
+    return requestGate(actionKey, () => withBusy(actionButton, exec, { timeoutMs }), 300);
+  }
+  return exec();
+}
+
+async function handleResponse(res, path, raw = false) {
   if (res.status === 401 && !path.includes('/api/auth/login')) {
     state.user = null;
     if (state.onUnauthorized) state.onUnauthorized();
@@ -186,7 +270,7 @@ export async function api(path, options = {}) {
     }
     throw err;
   }
-  if (opts.raw) return res;
+  if (raw) return res;
   if (ctype.includes('application/json')) return res.json();
   if (ctype.includes('text/')) return res.text();
   return res.blob();
@@ -239,7 +323,23 @@ export function bindActions(root, handlers) {
     const action = el.dataset.act;
     if (handlers[action]) {
       event.preventDefault();
-      handlers[action](el, event);
+      state.activeButton = el;
+      state.activeAction = action;
+      let result;
+      try {
+        result = handlers[action](el, event);
+      } finally {
+        if (!result || typeof result.then !== 'function') {
+          state.activeButton = null;
+          state.activeAction = null;
+        }
+      }
+      if (result && typeof result.then === 'function') {
+        Promise.resolve(result).finally(() => {
+          state.activeButton = null;
+          state.activeAction = null;
+        }).catch(() => {});
+      }
     }
   };
   const change = (event) => {
@@ -353,13 +453,27 @@ export function loadingState(text = '加载中…') {
 
 export function setBusy(button, busy, busyText) {
   if (!button) return;
+  button._busyDepth = Number(button._busyDepth || 0);
   if (busy) {
-    button.dataset.original = button.innerHTML;
-    button.disabled = true;
-    button.innerHTML = `<span class="spin"></span>${esc(busyText || button.textContent)}`;
+    button._busyDepth += 1;
+    if (button._busyDepth === 1) {
+      button.dataset.original = button.innerHTML;
+      button.dataset.busyText = busyText || button.textContent || '处理中…';
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.classList.add('is-busy');
+      button.innerHTML = `<span class="spin"></span>${esc(button.dataset.busyText)}`;
+    }
   } else {
-    button.disabled = false;
-    if (button.dataset.original) button.innerHTML = button.dataset.original;
+    button._busyDepth = Math.max(0, button._busyDepth - 1);
+    if (button._busyDepth === 0) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.classList.remove('is-busy');
+      if (button.dataset.original) button.innerHTML = button.dataset.original;
+      delete button.dataset.original;
+      delete button.dataset.busyText;
+    }
   }
 }
 

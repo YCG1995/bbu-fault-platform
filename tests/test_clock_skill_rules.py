@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SEARCH = ROOT / "skills/demo-bbu-clock-loss/scripts/search_evidence.py"
-RULES = ROOT / "skills/demo-bbu-clock-loss/assets/evidence-rules.yaml"
+SEARCH = ROOT / "meta/bbu-fault-skill-builder/scripts/search_evidence.py"
+RULES = ROOT / "tests/fixtures/clock-skill/evidence-rules.yaml"
 
 
 class ClockSkillRuleTests(unittest.TestCase):

@@ -120,6 +120,7 @@ EXPECTED_ROUTES = {
     "POST /api/workshop/drafts/{id}/refine",
     "POST /api/workshop/drafts/{id}/check",
     "POST /api/workshop/drafts/{id}/verify-rules",
+    "POST /api/workshop/drafts/{id}/rules/try",
     "POST /api/workshop/drafts/{id}/build",
     "POST /api/workshop/drafts/{id}/publish",
     "POST /api/workshop/drafts/{id}/case",
@@ -176,6 +177,14 @@ EXPECTED_ROUTES = {
     "POST /api/system/updates/{id}/verify",
     "POST /api/system/updates/{id}/apply",
     "POST /api/system/updates/rollback",
+    "GET /api/system/migrations",
+    "POST /api/system/migrations/workspace/preflight",
+    "POST /api/system/migrations/workspace",
+    "POST /api/system/migrations/export",
+    "POST /api/system/migrations/import",
+    "GET /api/system/migrations/{migration_id}",
+    "GET /api/system/migrations/{migration_id}/download",
+    "DELETE /api/system/migrations/{migration_id}",
     "GET /mcp",
     "POST /mcp",
     "GET /api/assistant/status",
@@ -436,6 +445,7 @@ def main() -> int:
                 "BBU_MAX_WORKERS": "1", "PYTHONUNBUFFERED": "1",
                 "BBU_CONFIG_FILE": str(work / "config.json"),
                 "BBU_PERSONAL_MODEL_BASE_URL": "http://127.0.0.1:1/v1",
+                "BBU_MODEL_DISCOVERY_ALLOW_PRIVATE": "1",
                 "BBU_UPGRADE_HELPER_CMD": f"{sys.executable} {fake_helper}"})
     log_file = open(work / "server.log", "w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, "run.py", "--host", host, "--port", str(port)],
@@ -823,6 +833,9 @@ def main() -> int:
         hit("POST /api/workshop/drafts/{id}/logs")
         admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/analyze")
         hit("POST /api/workshop/drafts/{id}/analyze")
+        _, tried_auto = admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/rules/try")
+        assert tried_auto["ok"], tried_auto
+        hit("POST /api/workshop/drafts/{id}/rules/try")
         admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/check", {})
         hit("POST /api/workshop/drafts/{id}/check")
         _, verified = admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/verify-rules",
@@ -1454,6 +1467,44 @@ def main() -> int:
         _, revoked = admin_client.json("DELETE", "/api/mcp/token")
         assert revoked["mcp"]["configured"] is False
         hit("DELETE /api/mcp/token")
+
+        # 迁移：列表、预检、导出/详情/下载/删除，导入错误路径
+        _, migrations = admin_client.json("GET", "/api/system/migrations")
+        assert "items" in migrations and "allowed_roots" in migrations
+        hit("GET /api/system/migrations")
+        target_root = f"/var/lib/bbu-smoke-{port}-target"
+        _, preflight = admin_client.json("POST", "/api/system/migrations/workspace/preflight",
+                                         {"target_root": target_root})
+        assert preflight["ok"] is True
+        hit("POST /api/system/migrations/workspace/preflight")
+        admin_client.json("POST", "/api/system/migrations/workspace",
+                          {"target_root": "", "password": "Platform!2026x"}, expected=400)
+        hit("POST /api/system/migrations/workspace")
+        _, exported = admin_client.json("POST", "/api/system/migrations/export",
+                                        {"password": "Platform!2026x",
+                                         "passphrase": "Migration!2026x"}, expected=202)
+        migration_id = exported["migration"]["id"]
+        hit("POST /api/system/migrations/export")
+        detail = {}
+        for _ in range(30):
+            _, detail = admin_client.json("GET", f"/api/system/migrations/{migration_id}")
+            if detail["migration"].get("phase") in ("ready", "failed"):
+                break
+            time.sleep(0.2)
+        assert detail["migration"]["phase"] == "ready", detail
+        hit("GET /api/system/migrations/{migration_id}")
+        status, raw, _ = admin_client.request("GET",
+            f"/api/system/migrations/{migration_id}/download")
+        assert status == 200 and raw, raw[:200]
+        hit("GET /api/system/migrations/{migration_id}/download")
+        _, deleted_migration = admin_client.json(
+            "DELETE", f"/api/system/migrations/{migration_id}",
+            {"password": "Platform!2026x"})
+        assert deleted_migration["ok"]
+        hit("DELETE /api/system/migrations/{migration_id}")
+        admin_client.json("POST", "/api/system/migrations/import", {},
+                          expected=400)
+        hit("POST /api/system/migrations/import")
 
         missing = EXPECTED_ROUTES - hits
         assert not missing, f"未覆盖路由: {sorted(missing)}"

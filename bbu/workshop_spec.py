@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from .provenance import (attach_provenance, audit_provenance, locked_values,
@@ -769,6 +770,34 @@ def compile_profile(spec: dict[str, Any], skill_name: str) -> dict[str, Any]:
     return profile
 
 
+_RULE_LINT = None
+
+
+def _semantic_lint(spec: dict[str, Any]) -> dict[str, Any]:
+    """把工坊规格映射成 fault-profile 后执行 R2 的 10 类语义 lint。"""
+    global _RULE_LINT
+    if _RULE_LINT is None:
+        import importlib.util
+        path = (Path(__file__).resolve().parent.parent /
+                "meta/bbu-fault-skill-builder/scripts/rule_lint.py")
+        mod_spec = importlib.util.spec_from_file_location("bbu_rule_lint", path)
+        if mod_spec is None or mod_spec.loader is None:
+            return {"ok": True, "issues": [], "counts": {}}
+        module = importlib.util.module_from_spec(mod_spec)
+        mod_spec.loader.exec_module(module)
+        _RULE_LINT = module
+    profile = {
+        "analysis": {"steps": [{"rules": spec.get("evidence_rules") or []}]},
+        "root_causes": spec.get("root_causes") or [],
+        "temporal": spec.get("temporal") or [],
+    }
+    try:
+        return _RULE_LINT.lint_profile(profile)
+    except Exception as exc:  # noqa: BLE001 - lint 自身错误不能阻断工坊保存
+        return {"ok": True, "issues": [], "error": f"{type(exc).__name__}: {exc}",
+                "counts": {}}
+
+
 def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
     _normalize_spec(spec)
     errors: list[dict[str, str]] = []
@@ -832,6 +861,12 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             issue(warnings, "recipe", "配方未登记正例样本，不能据此声称已验证")
         if recipe.get("trigger_matched") is False:
             issue(warnings, "recipe", "所选配方的触发词未在资料中出现；请确认设备/单板/版本范围，避免套用不适用规则")
+    lint = _semantic_lint(spec)
+    for item in lint.get("issues") or []:
+        if item.get("severity") == "error":
+            issue(errors, item.get("field_path") or "rule", str(item.get("message") or "规则语义错误"))
+        else:
+            issue(warnings, item.get("field_path") or "rule", str(item.get("message") or "规则语义警告"))
     # 去重，限制一次最多四个问题。
     prov = audit_provenance(spec)
     for path in prov.get("missing") or []:
@@ -850,7 +885,9 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
                        "cases": len(spec.get("cases") or []), "log_sources": len(spec["log_sources"]),
                        "provenance_coverage": prov.get("coverage"),
                        "provenance_missing": len(prov.get("missing") or [])},
-            "provenance": prov}
+            "provenance": prov,
+            "semantic_lint": {"ok": lint.get("ok"), "counts": lint.get("counts") or {},
+                              "issues": lint.get("issues") or []}}
 
 
 def public_spec(spec: dict[str, Any]) -> dict[str, Any]:

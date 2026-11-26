@@ -176,6 +176,24 @@ class Skill:
             "health_json": json.dumps(self.health, ensure_ascii=False),
         }
 
+    def index_card(self) -> dict[str, Any]:
+        """P1-3 渐进披露：只给规划器够用的索引卡，不发送完整 profile。"""
+        fault = self.profile.get("fault") or {}
+        triggers = [str(x)[:24] for x in (self.keywords or [])[:4]]
+        one_line = str(self.profile.get("symptoms", {}).get("impact")
+                       or fault.get("name") or self.title or "")[:60]
+        return {
+            "skill": self.name,
+            "title": self.title[:40],
+            "fault": str(fault.get("name") or "")[:40],
+            "category": self.category,
+            "device_types": [str(x)[:20] for x in self.device_types[:3]],
+            "triggers": triggers,
+            "aliases": [str(x)[:16] for x in self.aliases[:4]],
+            "risk": "verified" if self.verified else "unverified",
+            "one_line": one_line,
+        }
+
     def catalog_entry(self) -> dict[str, Any]:
         reasoning = self.profile.get("diagnostic_reasoning") or {}
         return {
@@ -903,6 +921,15 @@ class SkillRunner:
             "verdict": {
                 "status": status,
                 "primary": primary,
+                "primary_site": verdict.get("primary_site"),
+                "primary_key": verdict.get("primary_key"),
+                "established_sites": verdict.get("established_sites") or [],
+                "keys_evaluated": verdict.get("keys_evaluated") or [],
+                "keys_established": verdict.get("keys_established") or [],
+                "keys_missing": verdict.get("keys_missing") or [],
+                "multi_site_conflict": bool(verdict.get("multi_site_conflict")),
+                "scope": verdict.get("scope"),
+                "rule_scope_v2": verdict.get("rule_scope_v2"),
                 "groups": _compact_groups(groups),
                 "truncated": verdict.get("truncated"),
             },

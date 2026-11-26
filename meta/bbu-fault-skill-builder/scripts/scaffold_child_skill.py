@@ -357,7 +357,8 @@ def _rules_yaml_bytes(obj) -> bytes:
 def _rules_doc(profile: dict) -> dict:
     doc = {"rules": export_rules(profile),
            "temporal": export_temporal(profile),
-           "root_causes": export_root_causes(profile)}
+           "root_causes": export_root_causes(profile),
+           "rule_scope_v2": profile.get("rule_scope_v2", "shadow")}
     if profile.get("mode") == "triage":
         doc["mode"] = "triage"
     return doc
@@ -938,7 +939,7 @@ def export_rules(profile: dict):
                       "record", "entity"):
                 if r.get(k) is not None:
                     rule[k] = r[k]
-            for k in ("min_matches", "context_lines", "case_sensitive"):
+            for k in ("min_matches", "min_files", "file_scope", "context_lines", "case_sensitive"):
                 if k in r:
                     rule[k] = r[k]
             if r.get("verified") is False:
@@ -957,7 +958,8 @@ def export_root_causes(profile: dict):
     for rc in profile.get("root_causes", []) or []:
         item = {"id": rc.get("id"), "name": rc.get("name", ""),
                 "condition": rc.get("condition", ""),
-                "confidence": rc.get("confidence", "medium")}
+                "confidence": rc.get("confidence", "medium"),
+                "scope": rc.get("scope", "site")}
         if rc.get("temporal"):
             item["temporal"] = list(rc["temporal"])
         out.append(item)
@@ -976,6 +978,11 @@ def export_quick_signatures(profile: dict):
 
 
 _COND_TOKEN_RE = re.compile(r"\b[A-Z]\d+\b|\b(?:and|or|not)\b|[()]|\s+")
+def positive_refs(cond):
+    """condition 中以肯定形式引用的规则 ID（排除 not 否定）。"""
+    return set(re.findall(r"\b[A-Z]\d+\b", re.sub(r"\bnot\s+[A-Z]\d+\b", " ", cond or "")))
+
+
 
 
 def _check_regex(errors, where, pattern):
@@ -988,6 +995,7 @@ def _check_regex(errors, where, pattern):
 def validate(profile: dict):
     errors, warnings = [], []
     rule_ids, step_ids, unverified = set(), set(), set()
+    rules_by_id = {}
     # 分诊型子 skill（profile.mode: "triage"）不要求 analysis.steps / root_causes
     # —— 它们是分诊入口，不是单故障根因判定；有 steps/root_causes 仍按常规校验。
     is_triage = profile.get("mode") == "triage"
@@ -1010,6 +1018,7 @@ def validate(profile: dict):
             if rid in rule_ids:
                 errors.append(f"规则 ID 重复: {rid}")
             rule_ids.add(rid)
+            rules_by_id[rid] = r
             if r.get("verified") is False:
                 unverified.add(rid)
             rtype = r.get("type", "text")
@@ -1052,6 +1061,21 @@ def validate(profile: dict):
                 errors.append(f"规则 {rid} associate_by 需给 pattern 或 site: true")
             if ab.get("pattern"):
                 _check_regex(errors, f"规则 {rid} associate_by", ab["pattern"])
+            # O1 逐文件量词：file_scope 缺省 any 保持旧行为
+            scope = str(r.get("file_scope") or "any").lower()
+            if scope not in ("any", "at_least", "each"):
+                errors.append(f"规则 {rid} file_scope 非法: {scope}（应为 any/at_least/each）")
+            try:
+                min_files = int(r.get("min_files") or 0)
+            except (TypeError, ValueError):
+                errors.append(f"规则 {rid} min_files 必须是非负整数")
+                min_files = 0
+            if min_files < 0:
+                errors.append(f"规则 {rid} min_files 不能为负数")
+            if scope == "any" and min_files:
+                warnings.append(f"规则 {rid} file_scope=any 时 min_files 被忽略")
+            if scope == "at_least" and min_files < 1:
+                errors.append(f"规则 {rid} file_scope=at_least 时 min_files 必须 ≥1")
 
     root_causes = profile.get("root_causes", []) or []
     rc_ids = set()
@@ -1075,6 +1099,24 @@ def validate(profile: dict):
         bad = refs & unverified
         if bad:
             errors.append(f"根因 {rid} 引用了 verified: false 的规则: {sorted(bad)}")
+        # O2/O3 作用域校验
+        rc_scope = str(rc.get("scope") or "site").lower()
+        if rc_scope not in ("all", "site", "associate"):
+            errors.append(f"根因 {rid} scope 非法: {rc_scope}（应为 all/site/associate）")
+        if rc_scope == "associate":
+            pos = positive_refs(cond)
+            ab_keys = {}
+            for r in rules_by_id.values():
+                if r.get("id") not in pos:
+                    continue
+                ab = r.get("associate_by") or {}
+                if not ab.get("site") and not ab.get("pattern"):
+                    errors.append(f"根因 {rid} scope=associate，规则 {r.get('id')} 缺少 associate_by")
+                else:
+                    ab_keys[r.get("id")] = "site" if ab.get("site") else str(ab.get("pattern"))
+            distinct = set(ab_keys.values())
+            if len(distinct) > 1:
+                errors.append(f"根因 {rid} 内规则混用了不同 associate_by: {sorted(distinct)}")
         if rc.get("confidence", "medium") not in CONFIDENCE_ENUM:
             errors.append(f"根因 {rid} confidence 非法: {rc.get('confidence')}")
         if not rc.get("actions"):

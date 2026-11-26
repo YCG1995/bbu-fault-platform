@@ -546,7 +546,9 @@ def _prep_rule(rule):
     """编译规则运行态（pattern/te/ab 预编译一次；非法正则落地为 error 态）。"""
     st = {"rule": rule, "matches": [], "matches_by_site": {}, "values": [],
           "files_scanned": 0, "encodings": set(), "glob_fallback": set(),
-          "skipped_files": [], "hits_total": 0, "hits_by_site": {}, "done": False}
+          "skipped_files": [], "hits_total": 0, "hits_by_site": {}, "done": False,
+          "hits_by_file": {}, "eligible_files": set(), "hits_by_associate": {},
+          "near_misses": []}
     try:
         rtype = rule.get("type", "text")
         te = rule.get("time_extract")
@@ -582,6 +584,30 @@ def _prep_rule(rule):
     return st
 
 
+def _add_near_miss(st, line):
+    """O6：总体未命中但 any_of 已部分出现的行，最多保留 3 条。"""
+    if len(st.get("near_misses") or []) >= 3:
+        return
+    low = None
+    for entry in st.get("any_of") or []:
+        tag, v = entry
+        if tag == "re":
+            if v.search(line):
+                st["near_misses"].append(str(line).strip()[:300])
+                return
+        else:
+            lit, ci = v
+            if ci:
+                if low is None:
+                    low = line.lower()
+                if lit in low:
+                    st["near_misses"].append(str(line).strip()[:300])
+                    return
+            elif lit in line:
+                st["near_misses"].append(str(line).strip()[:300])
+                return
+
+
 def _rule_header_idx(st, row, is_xlsx):
     """从表头行算 columns 命中列索引（xlsx 表头措辞不符时全列兜底）。"""
     hc = [str(h).strip().lstrip("\ufeff") for h in row] if row else []
@@ -610,6 +636,7 @@ def _row_match(st, row, rel, site, offset, limit, fmt_state):
         return
     if line_ok(joined, st["all_of"], st["any_of"], st["none_of"]):
         st["hits_total"] += 1
+        st["hits_by_file"][rel] = st["hits_by_file"].get(rel, 0) + 1
         sk = site or "ALL"
         st["hits_by_site"][sk] = st["hits_by_site"].get(sk, 0) + 1
         # 证据收集上限按站点独立配额（B2）：每个网元至少保留 limit 条代表证据，
@@ -618,11 +645,15 @@ def _row_match(st, row, rel, site, offset, limit, fmt_state):
             return  # 超出该站点证据上限仍继续计数，但不再取上下文
         ts, _ = extract_time(raw, st["te"], offset, st["te_re"], fmt_state)
         assoc = extract_assoc(raw, st["ab"], rel, st["ab_re"])
+        if assoc is not None:
+            st["hits_by_associate"][str(assoc)] = st["hits_by_associate"].get(str(assoc), 0) + 1
         st["matches"].append({"file": rel, "line_no": st["_lineno"],
                               "line": joined[:2000],
                               "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else None,
                               "site": site, "associate": assoc, "context": []})
         st["matches_by_site"][sk] = st["matches_by_site"].get(sk, 0) + 1
+    else:
+        _add_near_miss(st, raw)
 
 
 def search_all(root, rules, limit, offset, progress, index=None):
@@ -679,6 +710,7 @@ def search_all(root, rules, limit, offset, progress, index=None):
             for i in active:
                 states[i]["files_scanned"] += 1
                 states[i]["encodings"].add("xlsx")
+                states[i]["eligible_files"].add(rel)
                 states[i]["_idx"] = None
             try:
                 for _sheet, lineno, row in iter_xlsx_rows(f):
@@ -724,6 +756,8 @@ def search_all(root, rules, limit, offset, progress, index=None):
                             {"file": rel, "kind": cls.get("kind"),
                              "subtype": cls.get("subtype"), "note": cls.get("note")})
                     continue
+                for i in ids:
+                    states[i]["eligible_files"].add(rel)
                 max_ctx = max(states[i]["ctx"] for i in ids)
                 lineno = 0
                 win = LineWin(stream, max_ctx)
@@ -747,9 +781,14 @@ def search_all(root, rules, limit, offset, progress, index=None):
                                     except (ValueError, IndexError):
                                         pass
                                 continue
+                            if not line_ok(raw_line, st["all_of"], st["any_of"],
+                                           st["none_of"]):
+                                _add_near_miss(st, raw_line)
+                                continue
                             if line_ok(raw_line, st["all_of"], st["any_of"],
                                        st["none_of"]):
                                 st["hits_total"] += 1
+                                st["hits_by_file"][rel] = st["hits_by_file"].get(rel, 0) + 1
                                 sk = site or "ALL"
                                 st["hits_by_site"][sk] = st["hits_by_site"].get(sk, 0) + 1
                                 # 按站点独立配额收集证据（B2），保证每个网元都有代表证据
@@ -759,6 +798,8 @@ def search_all(root, rules, limit, offset, progress, index=None):
                                                      st["te_re"], fmt_state)
                                 assoc = extract_assoc(raw_line, st["ab"], rel,
                                                       st["ab_re"])
+                                if assoc is not None:
+                                    st["hits_by_associate"][str(assoc)] =                                         st["hits_by_associate"].get(str(assoc), 0) + 1
                                 c = st["ctx"]
                                 context = (
                                     [l.strip()[:2000] for l in list(win.prev)[-c:]]
@@ -793,6 +834,7 @@ def search_all(root, rules, limit, offset, progress, index=None):
                         {"file": rel, "kind": cls.get("kind"),
                          "subtype": cls.get("subtype"), "note": cls.get("note")})
                     continue
+                st["eligible_files"].add(rel)
                 st["files_scanned"] += 1
                 if real_enc:
                     st["encodings"].add(real_enc)
@@ -822,7 +864,9 @@ def search_all(root, rules, limit, offset, progress, index=None):
         out.append(_final(st["rule"], st["matches"], st["values"],
                           st["files_scanned"], st["encodings"], st["ab"],
                           st["min_m"], st["glob_fallback"], st["skipped_files"],
-                          st["hits_total"], st["hits_by_site"]))
+                          st["hits_total"], st["hits_by_site"],
+                          st["hits_by_file"], st["eligible_files"],
+                          st["hits_by_associate"], st["near_misses"]))
     return out
 
 
@@ -978,30 +1022,60 @@ def _scan_record_file(path, rel, site, st, limit):
             "timestamp": None, "site": site, "associate": key[-1] if len(key) > 1 else None,
             "context": [], "entity": list(key),
         })
+    st["files_scanned"] += 1
+    st["eligible_files"].add(rel)
     if hits:
-        st["files_scanned"] += 1
         st["hits_total"] += len(hits)
+        st["hits_by_file"][rel] = st["hits_by_file"].get(rel, 0) + len(hits)
         for item in hits[:limit]:
             st["matches"].append(item)
             sk = site or "ALL"
             st["hits_by_site"][sk] = st["hits_by_site"].get(sk, 0) + 1
-    elif records:
-        st["files_scanned"] += 1
+        for item in hits:
+            assoc = item.get("associate")
+            if assoc is not None:
+                st["hits_by_associate"][str(assoc)] =                     st["hits_by_associate"].get(str(assoc), 0) + 1
 
 
 def _final(rule, matches, values, files_scanned, encodings, ab, min_m,
-             glob_fallback, skipped_files=None, hits_total=None, hits_by_site=None):
+             glob_fallback, skipped_files=None, hits_total=None, hits_by_site=None,
+             hits_by_file=None, eligible_files=None, hits_by_associate=None,
+             near_misses=None):
     total = hits_total if hits_total is not None else len(matches)
+    hits_by_file = dict(hits_by_file or {})
+    hits_by_associate = dict(hits_by_associate or {})
+    if rule.get("type") == "numeric_trend" and values:
+        for _ts, _val, key in values:
+            if key is not None:
+                hits_by_associate[str(key)] = hits_by_associate.get(str(key), 0) + 1
+    eligible = set(eligible_files or ())
+    for rel in eligible:
+        hits_by_file.setdefault(rel, 0)
+    qualifying = sorted(rel for rel in eligible if hits_by_file.get(rel, 0) >= min_m)
+    missed = sorted(rel for rel in eligible if rel not in set(qualifying))
+    scope = str(rule.get("file_scope") or "any").strip().lower()
+    if scope not in ("any", "at_least", "each"):
+        scope = "any"
+    min_files = int(rule.get("min_files") or 0)
     result = {"rule_id": rule.get("id", "?"), "step": rule.get("step", ""),
               "description": rule.get("description", ""), "type": rule.get("type", "text"),
               "match_count": total, "evidence_count": len(matches),
               "evidence_truncated": total > len(matches),
               "hits_by_site": hits_by_site or {},
+              "hits_by_associate": dict(sorted(hits_by_associate.items())),
               "files_scanned": files_scanned,
+              "files_eligible": len(eligible),
+              "files_hit": qualifying,
+              "files_missed": missed,
+              "hits_by_file": dict(sorted(hits_by_file.items())),
+              "file_coverage": round(len(qualifying) / len(eligible), 3) if eligible else 0.0,
+              "file_scope": scope, "min_files": min_files,
               "min_matches": min_m, "encodings": sorted(encodings),
               "glob_fallback_files": sorted(glob_fallback) if glob_fallback else [],
               "skipped_files": (skipped_files or [])[:20],
               "skipped_count": len(skipped_files or []),
+              "files_skipped": len(skipped_files or []),
+              "near_misses": list(near_misses or []),
               "evidence": matches}
     if rule.get("verified") is False:
         result["verified"] = False
@@ -1028,7 +1102,16 @@ def _final(rule, matches, values, files_scanned, encodings, ab, min_m,
                 "context": [],
             })
     else:
-        result["hit"] = total >= min_m
+        if scope == "any":
+            result["hit"] = total >= min_m
+        elif scope == "at_least":
+            result["hit"] = len(qualifying) >= max(1, min_files)
+        else:  # each
+            result["hit"] = bool(eligible) and not missed and min_files <= len(eligible)
+        result["file_scope_detail"] = (
+            f"{len(qualifying)}/{len(eligible)} 个文件达到 ≥{min_m} 次"
+            + (f"；要求 {min_files} 个文件" if scope == "at_least" else "")
+            if eligible else "无可用文本文件（跳过 binary/ciphered/空文件）")
     return result
 
 
@@ -1121,76 +1204,227 @@ def related_temporal(rc, temporal_defs):
             if t.get("first") in refs and t.get("second") in refs]
 
 
-def _group_hit(result, key):
+def _group_hit(result, key, include_all=True):
     if key is None:
         return bool(result.get("hit"))
     if result.get("type") == "numeric_trend":
         return bool(result.get("hit")) and any(
             (e.get("site") or key) == key for e in result.get("evidence", []))
     # 分站点命中数取 hits_by_site（证据截断时仍为真实计数；旧输出无该字段时回退证据数）。
-    # site 为空（"ALL"桶）的命中保持旧语义：计入每个站点分组。
+    # O2：site 作用域下 include_all=False，ALL 桶（无站点归属）不再计入任何站点，
+    # 避免“站点 A 的 E1 + 无站点的 E2”被拼成同一站点结论。
     hbs = result.get("hits_by_site")
     if hbs:
-        n = hbs.get(key, 0) + (hbs.get("ALL", 0) if key != "ALL" else 0)
+        n = hbs.get(key, 0)
+        if include_all and key != "ALL":
+            n += hbs.get("ALL", 0)
     else:
-        n = sum(1 for e in result.get("evidence", []) if (e.get("site") or key) == key)
+        n = sum(1 for e in result.get("evidence", [])
+                if (e.get("site") or key) == key or (include_all and not e.get("site")))
     return n >= int(result.get("min_matches", 1))
 
 
-def _group_temporal_ok(entry, key):
+def _group_hit_associate(result, key):
+    """O3：只在单个关联键（SN/单板/小区）的证据上求值，缺键不借 ALL。"""
+    if key is None:
+        return bool(result.get("hit"))
+    if result.get("type") == "numeric_trend":
+        return bool(result.get("hit")) and any(
+            str(e.get("associate") or e.get("site") or "") == str(key)
+            for e in result.get("evidence", []))
+    hba = result.get("hits_by_associate")
+    if hba:
+        return hba.get(str(key), 0) >= int(result.get("min_matches", 1))
+    return any(str(e.get("associate") or e.get("site") or "") == str(key)
+               for e in result.get("evidence", []))
+
+
+def _group_temporal_ok(entry, key, associate=False):
     if key is None:
         return bool(entry.get("satisfied"))
-    return any((p["first"].get("site") or key) == key and (p["second"].get("site") or key) == key
+    field = "associate" if associate else "site"
+    return any((p["first"].get(field) or key) == key
+               and (p["second"].get(field) or key) == key
                for p in entry.get("pairs", []))
 
 
-def eval_verdict(root_causes, results, teval, temporal_defs, sites, truncated):
-    """按组（≥2 站点时每站点一组 + ALL 汇总；否则只有 ALL）计算各根因。"""
-    if not root_causes:
-        return None
+def _legacy_eval_verdict(root_causes, results, teval, temporal_defs, sites, truncated):
+    """1.25 及以前的站点求值：ALL 桶计入每个站点，primary 永远取 groups["ALL"]。"""
     by_t = {t["id"]: t for t in teval}
     keys = [None] + (list(sites) if len(sites) >= 2 else [])
     groups = {}
     for key in keys:
-        hits = {r["rule_id"] for r in results if _group_hit(r, key)}
-        rcs, established = [], []
-        for rc in root_causes:
-            value, sub, err = eval_condition(rc.get("condition", ""), hits)
-            req = related_temporal(rc, temporal_defs)
-            t_ok = {tid: _group_temporal_ok(by_t.get(tid, {}), key) for tid in req}
-            ok = bool(value) and all(t_ok.values())
-            item = {"id": rc.get("id"), "name": rc.get("name", ""),
-                    "condition": rc.get("condition", ""), "substituted": sub,
-                    "value": value, "confidence": rc.get("confidence", "medium"),
-                    "temporal_required": req, "temporal_ok": t_ok, "established": ok}
-            if err:
-                item["error"] = err
-            if value and not ok:
-                item["note"] = "布尔条件成立但关联时序约束未全部满足，不得直接判定"
-            rcs.append(item)
-            if ok:
-                established.append(rc.get("id"))
-        conflict = [r["id"] for r in rcs if r["value"] and not r["established"]]
-        status = "matched" if established else ("temporal_conflict" if conflict else "unmatched")
-        groups["ALL" if key is None else key] = {
-            "hit_rules": sorted(hits), "root_causes": rcs,
-            "primary": established[0] if established else "NONE",
-            "others": established[1:], "temporal_conflict": conflict, "status": status}
+        groups["ALL" if key is None else key] = _eval_group(
+            root_causes, results, by_t, temporal_defs, key, True)
     return {"primary": groups["ALL"]["primary"], "status": groups["ALL"]["status"],
             "grouped_by_site": len(keys) > 1, "truncated": truncated, "groups": groups}
 
 
-def load_mode(path):
-    """rules 文档顶层 mode（如 triage）；读取失败返回 None。"""
+def _eval_group(root_causes, results, by_t, temporal_defs, key, include_all,
+                hit_fn=None, temporal_associate=False):
+    """在单个分组（ALL 或某站点/关联键）内求值全部根因。"""
+    hit_fn = hit_fn or _group_hit
+    hits = {r["rule_id"] for r in results if hit_fn(r, key, include_all=include_all)}
+    rcs, established = [], []
+    for rc in root_causes:
+        value, sub, err = eval_condition(rc.get("condition", ""), hits)
+        req = related_temporal(rc, temporal_defs)
+        t_ok = {tid: _group_temporal_ok(by_t.get(tid, {}), key,
+                                        associate=temporal_associate) for tid in req}
+        ok = bool(value) and all(t_ok.values())
+        item = {"id": rc.get("id"), "name": rc.get("name", ""),
+                "condition": rc.get("condition", ""), "substituted": sub,
+                "value": value, "confidence": rc.get("confidence", "medium"),
+                "temporal_required": req, "temporal_ok": t_ok, "established": ok}
+        if err:
+            item["error"] = err
+        if value and not ok:
+            item["note"] = "布尔条件成立但关联时序约束未全部满足，不得直接判定"
+        rcs.append(item)
+        if ok:
+            established.append(rc.get("id"))
+    conflict = [r["id"] for r in rcs if r["value"] and not r["established"]]
+    status = "matched" if established else ("temporal_conflict" if conflict else "unmatched")
+    return {"hit_rules": sorted(hits), "root_causes": rcs,
+            "primary": established[0] if established else "NONE",
+            "others": established[1:], "temporal_conflict": conflict, "status": status}
+
+
+def _eval_verdict_v2(root_causes, results, teval, temporal_defs, sites, truncated,
+                     rule_scope_v2="on"):
+    """按根因 scope 求值：all 全局；site 逐站点且 ALL 不计入站点；associate 逐关联键。
+
+    单站点/无站点包自动退化为 all，保持旧 profile 语义不变。
+    """
+    if not root_causes:
+        return None
+    by_t = {t["id"]: t for t in teval}
+    multi = len(sites) >= 2
+    site_ids = sorted(sites) if multi else []
+    scopes = {rc.get("id"): str(rc.get("scope") or "site").lower() for rc in root_causes}
+    assoc_roots = [rc for rc in root_causes if scopes.get(rc.get("id")) == "associate"]
+    site_roots = [rc for rc in root_causes if scopes.get(rc.get("id")) not in ("all", "associate")]
+    all_roots = [rc for rc in root_causes if scopes.get(rc.get("id")) == "all"]
+
+    # ALL 始终计算：all 作用域结论 + site 冲突诊断（包含 site 根因，便于发现跨站拼证）
+    groups = {"ALL": _eval_group(root_causes, results, by_t, temporal_defs, None, True)}
+    for site in site_ids:
+        groups[site] = _eval_group(site_roots, results, by_t, temporal_defs, site, False)
+
+    all_primary = groups["ALL"]["primary"]
+    established_sites = [s for s in site_ids if groups[s]["primary"] != "NONE"]
+    all_established = [rc["id"] for rc in groups["ALL"]["root_causes"]
+                       if rc.get("established") and rc.get("id") in {r.get("id") for r in all_roots}]
+
+    # O3：关联键世界，缺失键不得借 ALL/别的键
+    assoc_keys = sorted({str(k) for r in results
+                         for k in (r.get("hits_by_associate") or {})
+                         if str(k) not in ("ALL", "None", "")})
+    associate_groups = {}
+    keys_established, keys_missing = [], []
+    assoc_hit_fn = lambda r, k, include_all=True: _group_hit_associate(r, k)
+    for key in assoc_keys:
+        g = _eval_group(assoc_roots or root_causes, results, by_t, temporal_defs,
+                        key, False, hit_fn=assoc_hit_fn, temporal_associate=True)
+        associate_groups[key] = g
+        if g["primary"] != "NONE":
+            keys_established.append(key)
+        missing = sorted({rid for rc in (assoc_roots or root_causes)
+                          for rid in positive_refs(rc.get("condition", ""))}
+                         - set(g["hit_rules"]))
+        if missing:
+            keys_missing.append({"key": key, "rules": missing})
+    if not assoc_keys and assoc_roots:
+        keys_missing = [{"key": None, "rules": sorted({rid for rc in assoc_roots
+                            for rid in positive_refs(rc.get("condition", ""))})}]
+
+    primary = None
+    primary_site = None
+    primary_key = None
+    if keys_established and assoc_roots:
+        primary_key = keys_established[0]
+        primary = associate_groups[primary_key]["primary"]
+    elif established_sites:
+        primary_site = established_sites[0]
+        primary = groups[primary_site]["primary"]
+    elif all_established:
+        primary = all_established[0]
+    elif all_primary != "NONE" and not multi and not assoc_roots:
+        primary = all_primary
+    elif all_primary != "NONE" and multi and not site_roots and not assoc_roots:
+        primary = all_primary
+
+    multi_site_conflict = bool(multi and not established_sites and not keys_established
+                               and groups["ALL"]["primary"] != "NONE")
+    status = "matched" if primary is not None else "unmatched"
+    if multi_site_conflict:
+        status = "unmatched"
+    if assoc_roots and not keys_established:
+        status = "unmatched"
+    scope_name = "associate" if (assoc_roots and not site_roots) else ("site" if multi else "all")
+    return {"primary": primary or "NONE", "status": status,
+            "primary_site": primary_site, "primary_key": primary_key,
+            "established_sites": established_sites,
+            "keys_evaluated": assoc_keys,
+            "keys_established": keys_established,
+            "keys_missing": keys_missing,
+            "associate_groups": associate_groups,
+            "multi_site_conflict": multi_site_conflict,
+            "scope": scope_name,
+            "rule_scope_v2": rule_scope_v2,
+            "grouped_by_site": multi, "truncated": truncated, "groups": groups}
+
+
+def eval_verdict(root_causes, results, teval, temporal_defs, sites, truncated,
+                 rule_scope_v2="shadow"):
+    """规则作用域总入口：off=旧逻辑；shadow=旧结论 + v2 对比；on=新结论。"""
+    if not root_causes:
+        return None
+    mode = str(rule_scope_v2 or "shadow").lower()
+    if mode not in ("off", "shadow", "on"):
+        mode = "shadow"
+    legacy = _legacy_eval_verdict(root_causes, results, teval, temporal_defs, sites, truncated)
+    if mode == "off":
+        legacy["rule_scope_v2"] = "off"
+        return legacy
+    v2 = _eval_verdict_v2(root_causes, results, teval, temporal_defs, sites, truncated,
+                          rule_scope_v2=mode)
+    if mode == "on":
+        return v2
+    changed = (legacy.get("primary") != v2.get("primary")
+               or legacy.get("status") != v2.get("status"))
+    v2["shadow"] = {
+        "legacy_primary": legacy.get("primary"),
+        "legacy_status": legacy.get("status"),
+        "changed": changed,
+        "legacy_groups": {k: {"primary": g.get("primary"), "status": g.get("status")}
+                          for k, g in (legacy.get("groups") or {}).items()},
+    }
+    v2["mode"] = "shadow"
+    return v2
+
+
+def _load_doc(path):
     try:
         path = Path(path)
         text = path.read_text(encoding="utf-8")
         if path.suffix.lower() not in (".yaml", ".yml"):
             sys.exit(f"{path} 仅支持 .yaml 规则/配置")
         data = yaml.safe_load(text) if _HAS_YAML else None
-        return data.get("mode") if isinstance(data, dict) else None
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return None
+        return {}
+
+
+def load_mode(path):
+    """rules 文档顶层 mode（如 triage）；读取失败返回 None。"""
+    return _load_doc(path).get("mode")
+
+
+def load_scope(path):
+    """rules 文档顶层 rule_scope_v2（off/shadow/on）；缺省 shadow。"""
+    value = _load_doc(path).get("rule_scope_v2")
+    return str(value).lower() if value in ("off", "shadow", "on") else "shadow"
 
 
 def load_rules(path):
@@ -1308,6 +1542,7 @@ def main():
     args = ap.parse_args()
     _utf8_stdio()
 
+    scope_mode = "shadow"
     root = Path(args.root)
     if not root.is_dir():
         sys.exit(f"目录不存在: {root}")
@@ -1321,9 +1556,11 @@ def main():
         prof = yaml.safe_load(text)
         rules, temporal, root_causes = rules_from_profile(prof)
         mode = prof.get("mode")
+        scope_mode = str(prof.get("rule_scope_v2") or "shadow").lower()
     elif args.rules:
         rules, temporal, root_causes = load_rules(args.rules)
         mode = load_mode(args.rules)
+        scope_mode = load_scope(args.rules)
     else:
         sys.exit("必须提供 --rules 或 --profile")
 
@@ -1352,7 +1589,8 @@ def main():
         "file_hashes": _file_hashes(root, results),
     }
     truncated = [r["rule_id"] for r in results if r.get("evidence_truncated")]
-    verdict = eval_verdict(root_causes, results, teval, temporal, all_sites, truncated)
+    verdict = eval_verdict(root_causes, results, teval, temporal, all_sites, truncated,
+                           rule_scope_v2=scope_mode)
     if mode == "triage":
         summary["mode"] = "triage"
     unv = [r["rule_id"] for r in results if r.get("hit") and r.get("verified") is False]

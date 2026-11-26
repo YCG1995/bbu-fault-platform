@@ -126,17 +126,19 @@ def main() -> int:
             rp = rctx.new_page()
             rp.on("pageerror", lambda e: errors.append(f"reviewer pageerror: {e}"))
             rp.goto(f"http://{host}:{port}/#/dashboard", wait_until="networkidle")
-            rp.wait_for_selector("text=复核任务")
-            assert rp.locator("a:has-text('新建诊断')").count() == 0
+            rp.locator("text=复核任务").first.wait_for()
+            # 复核专家同样可以上传日志发起诊断（见总览提示）；此处只校验导航可见。
+            assert rp.locator("a:has-text('新建诊断')").count() >= 1
             rp.screenshot(path="/tmp/r2-reviewer-dashboard.png", full_page=True)
             rp.goto(f"http://{host}:{port}/#/tasks/{task_id}", wait_until="networkidle")
-            rp.wait_for_selector("text=专家复核")
+            rp.locator("[data-detail-tab='overview']").click()
+            rp.locator("h2:has-text('专家复核')").wait_for()
             assert rp.locator("button:has-text('取消任务')").count() == 0
             assert rp.locator("button:has-text('重跑')").count() == 0
             assert rp.locator("button:has-text('分配专家')").count() == 0
             rp.screenshot(path="/tmp/r2-task-reviewer.png", full_page=True)
             rp.goto(f"http://{host}:{port}/#/users", wait_until="networkidle")
-            rp.wait_for_selector("text=无权访问")
+            rp.locator("text=无权访问").first.wait_for()
             rctx.close()
 
             gctx = browser.new_context(viewport={"width": 1440, "height": 1000})
