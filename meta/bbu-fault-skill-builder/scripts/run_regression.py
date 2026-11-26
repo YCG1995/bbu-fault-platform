@@ -515,6 +515,81 @@ def coverage_report(profile, case_pairs):
             "root_causes": rows, "negative_cases": negative_cases}
 
 
+def discrimination_report(profile, case_pairs, results):
+    """判别力门禁：单规则根因必须在正例命中、反例零命中，反例不得被错误归因。
+
+    覆盖率口径引用 condition 的全部规则；只有 condition 仅一个规则、该规则单独
+    足以定罪时才做反例零命中阻断。多规则条件由“反例根因误归因”兜底，单规则
+    反例命中只记告警。反例包括 kind != positive 的全部案例。
+    """
+    rules = {}
+    for step in (profile.get("analysis") or {}).get("steps") or []:
+        for rule in step.get("rules") or []:
+            if rule.get("id"):
+                rules[rule["id"]] = rule
+    required = set()          # 根因 condition 引用的全部规则（覆盖率口径）
+    strict_rules = set()      # condition 仅一个规则时，该规则单独足以定罪 → 反例必须零命中
+    for rc in profile.get("root_causes") or []:
+        cond = (rc.get("condition", "") or "").strip()
+        ids = re.findall(r"\b[A-Z]\d+\b", cond)
+        required.update(ids)
+        if len(ids) == 1 and re.fullmatch(r"[A-Z]\d+", cond):
+            strict_rules.update(ids)
+
+    data_by_id = {str(d.get("id") or cd.name): d for cd, d in case_pairs}
+    positive = [r for r in results if data_by_id.get(str(r.get("id")), {}).get("kind", "positive") == "positive"]
+    negative = [r for r in results
+                if data_by_id.get(str(r.get("id")), {}).get("kind", "positive") != "positive"]
+
+    rows, blocking, warnings = {}, [], []
+    for rid in sorted(rules):
+        pos_hits = [r["id"] for r in positive if rid in (r.get("hit_rules") or [])]
+        neg_hits = [r["id"] for r in negative if rid in (r.get("hit_rules") or [])]
+        pos_rate = round(len(pos_hits) / len(positive), 4) if positive else None
+        neg_rate = round(len(neg_hits) / len(negative), 4) if negative else None
+        row = {"rule_id": rid, "required": rid in required,
+               "discrimination_required": rid in strict_rules,
+               "positive_cases": len(positive), "positive_hits": pos_hits,
+               "negative_cases": len(negative), "negative_hits": neg_hits,
+               "positive_hit_rate": pos_rate, "negative_hit_rate": neg_rate}
+        if rid in strict_rules and positive and not pos_hits:
+            blocking.append(f"单规则根因 {rid} 在 {len(positive)} 个正例中 0 命中（死规则/不可达）")
+        if rid in strict_rules and neg_hits:
+            blocking.append(f"单规则根因 {rid} 在反例误命中: {neg_hits}")
+        if rid not in required and positive and not pos_hits:
+            warnings.append(f"规则 {rid} 未在任何正例命中（非根因必需规则，仅告警）")
+        if rid in required and rid not in strict_rules and neg_hits:
+            warnings.append(f"规则 {rid} 在反例命中但非单规则根因（由根因误归因门禁兜底）: {neg_hits}")
+        rows[rid] = row
+
+    # 重复信号：命中向量完全相同的规则（仅告警，语义可能仍不同）
+    vecs = {}
+    for rid, row in rows.items():
+        if not row["positive_hits"] and not row["negative_hits"]:
+            continue
+        key = (tuple(sorted(row["positive_hits"])), tuple(sorted(row["negative_hits"])))
+        vecs.setdefault(key, []).append(rid)
+    for key, ids in vecs.items():
+        if len(ids) > 1:
+            warnings.append(f"规则 {ids} 命中向量完全相同，疑似重复信号")
+
+    # 反例根因误归因：expected.root_cause=NONE 的案例实际给出了根因
+    false_roots = []
+    for r in negative:
+        exp = (data_by_id.get(str(r.get("id")), {}).get("expected") or {}).get("root_cause")
+        if exp == "NONE" and r.get("actual_root_cause") not in (None, "NONE"):
+            false_roots.append({"case": r["id"], "actual": r.get("actual_root_cause")})
+    if false_roots:
+        blocking.append(f"反例被错误归因: {false_roots}")
+    if not negative:
+        warnings.append("缺少反例/边界案例，判别力未验证（建议补充 expected.root_cause=NONE 的案例）")
+    if not positive:
+        blocking.append("缺少正例案例，无法验证规则可达性")
+
+    return {"ok": not blocking, "blocking": blocking, "warnings": warnings,
+            "positive_cases": len(positive), "negative_cases": len(negative),
+            "false_root_causes": false_roots, "rules": rows}
+
 def select_e2e(case_pairs, results, mode):
     if mode == "all":
         return list(zip(case_pairs, results))
@@ -648,14 +723,21 @@ def main():
         ap.error("需提供 --cases-dir / --case 或（兼容）--cases")
 
     coverage = None
+    discrimination = None
     if full_library and a.skill:
         sd = locate_skill(a.skill_dir, a.skills_dir, a.skill)
         if sd:
-            coverage = coverage_report(load_profile(sd), case_pairs)
+            profile = load_profile(sd)
+            coverage = coverage_report(profile, case_pairs)
+            discrimination = discrimination_report(profile, case_pairs, results)
             for error in coverage["errors"]:
                 print(f"[COVERAGE] {error}")
             for warning in coverage["warnings"]:
                 print(f"[COVERAGE-WARN] {warning}")
+            for error in discrimination["blocking"]:
+                print(f"[DISCRIMINATION] {error}")
+            for warning in discrimination["warnings"]:
+                print(f"[DISCRIMINATION-WARN] {warning}")
 
     e2e = {"mode": a.e2e, "selected": 0, "passed": 0, "failed": 0, "skipped": len(results)}
     if a.e2e != "none" and case_pairs:
@@ -680,12 +762,17 @@ def main():
               f"{e2e['skipped']} 个快速案例无需端到端")
     if coverage:
         print(f"覆盖率门禁: {'PASS' if coverage['ok'] else 'FAIL'}")
+    if discrimination:
+        print(f"判别力门禁: {'PASS' if discrimination['ok'] else 'FAIL'} "
+              f"(正例 {discrimination['positive_cases']} / 反例 {discrimination['negative_cases']})")
     if a.out:
         Path(a.out).write_text(json.dumps(
             {"total": len(results), "passed": p, "failed": f, "errors": e,
-             "coverage": coverage, "e2e": e2e, "results": results},
+             "coverage": coverage, "discrimination": discrimination,
+             "e2e": e2e, "results": results},
             ensure_ascii=False, indent=2), encoding="utf-8")
-    if f or e or (coverage and not coverage["ok"]) or e2e["failed"]:
+    if (f or e or (coverage and not coverage["ok"])
+            or (discrimination and not discrimination["ok"]) or e2e["failed"]):
         sys.exit(1)
 
 

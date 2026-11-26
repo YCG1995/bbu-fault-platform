@@ -31,6 +31,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from domain_pack import (DEFAULT_ID, DomainPackError, check_compatible,
+                         load_domain_pack)
+
 try:
     import yaml
     _HAS_YAML = True
@@ -42,7 +46,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent  # builder scripts/：脚本唯一
 SHARED_DIR = TEMPLATE_DIR.parent.parent / "shared"
 
 # 工具箱版本：模板/脚本/资产有对外行为变化时递增；digest 为内容哈希（自动生成）
-TOOLKIT_VERSION = "2.12.1"
+TOOLKIT_VERSION = "2.14.0"
+CONTRACT_VERSION = "2"
+MANIFEST_YAML = "assets/skill-manifest.yaml"
+MANIFEST_JSON = "assets/skill-manifest.json"
 STAMP_NAME = "toolkit-version.json"
 MIN_PYTHON = (3, 11)
 # Agent Skills 规范（agentskills.io）：name ≤64 且 hyphen-case 无首尾/连续连字符；description ≤1024；compatibility ≤500
@@ -61,6 +68,7 @@ DERIVED_RELS = {
     "assets/fault-profile.yaml",
     "references/fault-profile.md", "assets/common-rules.yaml",
     "assets/quick-signatures.yaml",
+    "assets/skill-manifest.yaml", "assets/skill-manifest.json",
 }
 
 # 组件 → 子 skill 内文件（按需复制，不需要的不进子 skill）
@@ -71,6 +79,7 @@ SCRIPT_FOR_COMP = {
     "parse_clock": "scripts/parse_clock.py",
     "parse_cloudmat": "scripts/parse_cloudmat.py",
 }
+BASE_SCRIPT_RELS = ("scripts/describe.py", "scripts/selfcheck.py", "scripts/domain_pack.py")
 ASSET_FOR_COMP = {
     "alarm_dict": "assets/alarm-code-dictionary.yaml",
     "common_rules": "assets/common-rules.yaml",
@@ -85,7 +94,7 @@ FLAG_FOR_COMP = {
 CONFIDENCE_ENUM = {"high", "medium", "low"}
 EXECUTION_MODE_ENUM = {"script", "agent"}
 TREND_ENUM = {"exceed_threshold", "sustained_above", "monotonic_increase", "monotonic_decrease"}
-RULE_TYPE_ENUM = {"text", "numeric_trend"}
+RULE_TYPE_ENUM = {"text", "numeric_trend", "record_delta"}
 CASE_TYPE_ENUM = {"positive", "negative", "boundary", "corruption", "multisite"}
 
 
@@ -180,6 +189,14 @@ def apply_components(dest: Path, comps: dict, update: bool, extra_scripts=()):
     scripts/ocxo_aging_analyzer.py），纳入受管清单供 --update 同步、--inspect 体检；
     若 builder 模板无同名源，则不覆盖/不删除，仅登记跟踪（需子 Skill 自带）。"""
     copied, skipped = [], []
+    # 基础运行入口：describe/selfcheck/domain_pack 始终随技能分发，供任意宿主预检。
+    for rel in BASE_SCRIPT_RELS:
+        target = dest / rel
+        src = SCRIPTS_DIR / Path(rel).name
+        if src.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            copied.append(rel)
     for comp, rel in SCRIPT_FOR_COMP.items():
         target = dest / rel
         src = SCRIPTS_DIR / Path(rel).name
@@ -277,7 +294,10 @@ def _managed_rel_names(comps: dict, extra_scripts=(), has_quick=False):
     """
     rels = ["assets/evidence-rules.yaml",
             "assets/fault-profile.yaml",
+            "assets/format-policy.json",
+            MANIFEST_YAML, MANIFEST_JSON,
             "references/fault-profile.md"]
+    rels += list(BASE_SCRIPT_RELS)
     if has_quick:
         rels.append("assets/quick-signatures.yaml")
     rels += [rel for comp, rel in SCRIPT_FOR_COMP.items() if comps.get(comp)]
@@ -344,7 +364,7 @@ def _rules_doc(profile: dict) -> dict:
 
 
 def planned_file_hashes(dest: Path, profile: dict, comps: dict, extra,
-                        profile_path: Path) -> dict:
+                        profile_path: Path, name: str = "", domain_pack=None) -> dict:
     """本次生成/更新后，受管文件**应当**落盘的 {rel: sha256}。
 
     用于 `--update` 幂等预判：复制件取 builder 源字节；派生件在内存中按同一序列化
@@ -352,6 +372,10 @@ def planned_file_hashes(dest: Path, profile: dict, comps: dict, extra,
     在 --update 时保留磁盘版，故取当前磁盘字节。
     """
     h = {}
+    for rel in BASE_SCRIPT_RELS:
+        src = SCRIPTS_DIR / Path(rel).name
+        if src.exists():
+            h[rel] = _sha256(src)
     for comp, rel in SCRIPT_FOR_COMP.items():
         if comps.get(comp):
             src = SCRIPTS_DIR / Path(rel).name
@@ -392,6 +416,17 @@ def planned_file_hashes(dest: Path, profile: dict, comps: dict, extra,
             h["assets/common-rules.yaml"] = _sha256(cr_pre)
     h["references/fault-profile.md"] = hashlib.sha256(
         render_fault_profile_md(profile).encode("utf-8")).hexdigest()
+    if domain_pack:
+        h["assets/format-policy.json"] = hashlib.sha256(
+            json.dumps(format_policy_doc(domain_pack), ensure_ascii=False,
+                       indent=2, sort_keys=False).encode("utf-8")).hexdigest()
+    if name and domain_pack:
+        manifest = build_manifest(profile, name, domain_pack, dest)
+        h[MANIFEST_YAML] = hashlib.sha256(
+            yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False,
+                           width=200).encode("utf-8")).hexdigest()
+        h[MANIFEST_JSON] = hashlib.sha256(
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")).hexdigest()
     # 更新时保留用户定制的报告模板 → 取磁盘字节
     for rel in USER_CUSTOMIZABLE:
         if (dest / rel).exists():
@@ -437,13 +472,160 @@ def read_stamp(dest: Path):
     return None
 
 
+def _engine_files() -> list[Path]:
+    rels = set(SCRIPT_FOR_COMP.values()) | set(BASE_SCRIPT_RELS) | {
+        "scripts/log_format.py", "scripts/run_analysis.py",
+        "scripts/fm_alarm_align.py", "scripts/gen_specialized.py",
+        "scripts/unpack_logs.py", "scripts/search_evidence.py",
+        "scripts/render_report.py",
+    }
+    return [SCRIPTS_DIR / Path(rel).name for rel in sorted(rels)
+            if (SCRIPTS_DIR / Path(rel).name).exists()]
+
+
+def engine_digest() -> str:
+    """引擎源码摘要：与产物/清单无关，避免 manifest 自指。"""
+    h = hashlib.sha256()
+    for path in _engine_files():
+        h.update(path.name.encode("utf-8") + b"\0")
+        h.update(path.read_bytes())
+    return "eng-" + h.hexdigest()[:12]
+
+
+def format_policy_doc(domain_pack: dict) -> dict:
+    """域包格式策略的技能内快照；运行期只读它，不回头找域包目录。"""
+    pack = domain_pack or {}
+    return {
+        "schema": "skill-format-policy/1",
+        "domain": {"pack": str(pack.get("id") or DEFAULT_ID),
+                   "version": str(pack.get("version") or "")},
+        "format_policy": dict(pack.get("format_policy") or {}),
+    }
+
+
+def write_format_policy(dest: Path, domain_pack: dict) -> dict:
+    doc = format_policy_doc(domain_pack)
+    (dest / "assets").mkdir(parents=True, exist_ok=True)
+    (dest / "assets" / "format-policy.json").write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return doc
+
+
+def _major(version: str) -> int:
+    try:
+        return int(str(version).split(".")[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _major_minor(version: str) -> str:
+    parts = str(version or "0").split(".")
+    return ".".join(parts[:2]) if len(parts) > 1 else (parts[0] or "0")
+
+
+def build_manifest(profile: dict, name: str, domain_pack: dict, dest: Path) -> dict:
+    skill = profile.get("skill") or {}
+    fault = profile.get("fault") or {}
+    symptoms = profile.get("symptoms") or {}
+    pack = domain_pack or {}
+    quick = [str(q.get("id")) for q in profile.get("quick_signatures") or []
+             if isinstance(q, dict) and q.get("id")]
+    alarm_codes = []
+    for item in fault.get("alarm_codes") or []:
+        if isinstance(item, dict) and item.get("code"):
+            alarm_codes.append(str(item["code"]))
+        elif isinstance(item, str):
+            alarm_codes.append(item)
+    entrypoints: dict[str, dict] = {}
+    run_py = dest / "scripts" / "run_analysis.py"
+    if run_py.exists():
+        entrypoints["run"] = {
+            "argv": ["{python}", "scripts/run_analysis.py", "{inputs}",
+                     "--description", "{description}", "--out", "{out}",
+                     "--result-json", "{out}/run-result.json"],
+            "timeout_sec": 900,
+        }
+    describe_py = dest / "scripts" / "describe.py"
+    if describe_py.exists():
+        entrypoints["describe"] = {"argv": ["{python}", "scripts/describe.py", "--json"]}
+    selfcheck_py = dest / "scripts" / "selfcheck.py"
+    if selfcheck_py.exists():
+        entrypoints["selfcheck"] = {"argv": ["{python}", "scripts/selfcheck.py", "--json"]}
+
+    manifest = {
+        "schema": "skill-manifest/2",
+        "name": name,
+        "version": str(skill.get("version") or "1.0.0"),
+        "title": str(skill.get("title") or name),
+        "description": build_description(profile, domain_pack),
+        "domain": {"pack": str(pack.get("id") or DEFAULT_ID),
+                   "version": str(pack.get("version") or "")},
+        "contract": {"profile": 2, "rules": 2, "result": 1, "case": 1},
+        "engine": {"name": "diagnostic-engine", "version": TOOLKIT_VERSION,
+                   "digest": engine_digest()},
+        "entrypoints": entrypoints,
+        "routing": {
+            "category": str(profile.get("category") or ""),
+            "aliases": [str(x) for x in ([fault.get("name")] + list(fault.get("aliases") or [])) if x],
+            "keywords": [str(x) for x in symptoms.get("description_keywords") or []],
+            "alarm_codes": alarm_codes,
+            "device_types": [str(x) for x in (fault.get("domain") or {}).get("device_types") or []],
+            "exclusions": [str(x) for x in fault.get("exclusions") or []],
+            "quick_signatures": quick,
+        },
+        "components": {str(k): bool(v) for k, v in infer_components(profile)[0].items()},
+        "format_policy": dict(pack.get("format_policy") or {}),
+        "capabilities": {
+            "domains": [str(pack.get("id") or DEFAULT_ID)],
+            "archives": ["zip", "tar", "gzip", "bzip2", "xz"],
+            "formats": ["text", "csv", "xlsx"],
+            "analysis": ["text_rules", "entity_rules", "temporal", "multi_site", "verdict"],
+            "reports": ["md", "html"],
+        },
+        "requires": {
+            "python": f">={MIN_PYTHON[0]}.{MIN_PYTHON[1]}",
+            "engine": f">={_major_minor(TOOLKIT_VERSION)},<{_major(TOOLKIT_VERSION) + 1}",
+            "contract": CONTRACT_VERSION,
+            "contract_max": str(int(CONTRACT_VERSION) + 1),
+            "domain_pack": f">={_major_minor(str(pack.get('version') or '0'))},"
+                           f"<{_major(str(pack.get('version') or '0')) + 1}",
+            "third_party": [],
+            "external": ["7z/unar（可选，缺失时登记 unsupported）"],
+        },
+        "permissions": {
+            "risk": "low", "approval": "none", "network": "none",
+            "data_policy": "local_only",
+            "filesystem": {"read": ["task_inputs", "skill_dir"],
+                           "write": ["task_output"]},
+            "process": {"allow_subprocess": True, "executables": []},
+        },
+        "limits": {"max_inputs": 64, "timeout_sec": 900},
+        "profile_sha256": _sha256(dest / "assets" / "fault-profile.yaml")
+        if (dest / "assets" / "fault-profile.yaml").exists() else "",
+        "rules_sha256": _sha256(dest / "assets" / "evidence-rules.yaml")
+        if (dest / "assets" / "evidence-rules.yaml").exists() else "",
+    }
+    return manifest
+
+
+def write_manifest(dest: Path, profile: dict, name: str, domain_pack: dict) -> dict:
+    manifest = build_manifest(profile, name, domain_pack, dest)
+    (dest / "assets").mkdir(parents=True, exist_ok=True)
+    (dest / MANIFEST_YAML).write_text(
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False, width=200),
+        encoding="utf-8")
+    (dest / MANIFEST_JSON).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
 def write_stamp(dest: Path, rels, prev=None):
     """写版本戳：受管文件 sha256 + digest + 生成代数。返回 stamp dict。"""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     files = {rel: _sha256(dest / rel) for rel in rels}
     digest_src = "\n".join(f"{k}:{v}" for k, v in sorted(files.items()))
     stamp = {
-        "builder": "bbu-fault-skill-builder",
+        "builder": "diagnostic-skill-builder",
         "version": TOOLKIT_VERSION,
         "digest": "tk-" + hashlib.sha256(digest_src.encode()).hexdigest()[:12],
         "generated_at": (prev or {}).get("generated_at", now),
@@ -683,10 +865,23 @@ def valid_skill_name(name) -> bool:
     return bool(SKILL_NAME_RE.fullmatch(str(name))) and len(str(name)) <= MAX_SKILL_NAME
 
 
-def build_description(profile: dict) -> str:
+def _domain_title(domain_pack: dict | None) -> str:
+    return str((domain_pack or {}).get("title") or "通用故障")
+
+
+def _domain_devices(profile: dict, domain_pack: dict | None) -> str:
+    fault = profile.get("fault") or {}
+    devices = [str(d) for d in (fault.get("domain") or {}).get("device_types", [])]
+    if not devices:
+        devices = [str(d) for d in ((domain_pack or {}).get("applies_to") or {}).get("device_types", [])]
+    return "、".join(devices) or "目标设备"
+
+
+def build_description(profile: dict, domain_pack: dict | None = None) -> str:
     fault = profile["fault"]
     symptoms = profile.get("symptoms", {})
-    devices = "、".join(str(d) for d in fault.get("domain", {}).get("device_types", [])) or "BBU"
+    domain_title = _domain_title(domain_pack)
+    devices = _domain_devices(profile, domain_pack)
     names = [str(fault.get("name", ""))] + [str(a) for a in fault.get("aliases", [])]
     kw = [str(k) for k in symptoms.get("description_keywords", [])]
     codes = [str(a.get("code", "")).strip() for a in fault.get("alarm_codes", []) or []
@@ -694,28 +889,32 @@ def build_description(profile: dict) -> str:
     triggers = "、".join(dict.fromkeys(n for n in names + kw if n))[:160]
     code_txt = f"告警码 {'/'.join(codes[:8])}；" if codes else ""
     desc = (
-        f"BBU 故障分析技能：{fault.get('name', '')}（适用：{devices}）。"
-        f"当用户提供 BBU/ITBBU/SDR 日志压缩包或 CloudMAT 工装日志，"
+        f"{domain_title}故障分析技能：{fault.get('name', '')}（适用：{devices}）。"
+        f"当用户提供 {devices} 日志压缩包或采集日志，"
         f"并描述以下故障时使用：{code_txt}{triggers}。"
         f"功能：递归解压、证据检索（时序/关联键/数值趋势/多站点）、根因判定、MD+HTML 报告。"
         + ("本技能为分诊候选集（规则未验证，仅提供检索线索，不作根因判定）。"
            if profile.get("mode") == "triage" else "仅覆盖本技能 profile 中已验证的根因分支。")
-        + f"Use for BBU/ITBBU/SDR base-station fault analysis: log archive evidence search, "
+        + f"Use for {domain_title} fault analysis: log archive evidence search, "
         f"root-cause verdict and MD/HTML report for '{fault.get('name', '')}'."
     )
     return desc if len(desc) <= MAX_DESCRIPTION else desc[:MAX_DESCRIPTION - 1] + "…"
 
 
-def render_frontmatter(name: str, profile: dict) -> str:
-    """子 Skill frontmatter 只保留 Agent Skills 必需字段 name/description。
-
-    compatibility 与 metadata（builder/toolkit_version/profile_version/fault_name）已收敛：
-    版本信息统一以 assets/toolkit-version.json 为准，故障名以 fault-profile 为准。
-    """
+def render_frontmatter(name: str, profile: dict, domain_pack: dict | None = None) -> str:
+    """子 Skill frontmatter：name/description 必需，compatibility/metadata 供宿主预检。"""
+    pack = domain_pack or {}
+    pack_id = str(pack.get("id") or DEFAULT_ID)
+    pack_ver = str(pack.get("version") or "")
     return "\n".join([
         "---",
         f"name: {name}",
-        f"description: {yaml_scalar(build_description(profile))}",
+        f"description: {yaml_scalar(build_description(profile, domain_pack))}",
+        f"compatibility: {yaml_scalar(COMPATIBILITY)}",
+        "metadata:",
+        "  builder: diagnostic-skill-builder",
+        f"  toolkit_version: {TOOLKIT_VERSION}",
+        f"  domain_pack: {pack_id}@{pack_ver}",
         "---",
     ])
 
@@ -735,7 +934,8 @@ def export_rules(profile: dict):
             }
             for k in ("columns", "all_of", "any_of", "none_of", "time_extract",
                       "associate_by", "value_pattern", "trend", "threshold",
-                      "abs_threshold", "sustained_count", "window_minutes"):
+                      "abs_threshold", "sustained_count", "window_minutes",
+                      "record", "entity"):
                 if r.get(k) is not None:
                     rule[k] = r[k]
             for k in ("min_matches", "context_lines", "case_sensitive"):
@@ -824,6 +1024,22 @@ def validate(profile: dict):
                     _check_regex(errors, f"规则 {rid} value_pattern", r["value_pattern"])
                 if r.get("trend", "exceed_threshold") not in TREND_ENUM:
                     errors.append(f"规则 {rid} trend 非法: {r.get('trend')}")
+            elif rtype == "record_delta":
+                rec = r.get("record") or {}
+                if not isinstance(rec, dict) or not rec.get("start"):
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.start")
+                else:
+                    _check_regex(errors, f"规则 {rid} record.start", rec["start"])
+                fields = (rec or {}).get("fields") or {}
+                if not isinstance(fields, dict) or not fields:
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.fields")
+                else:
+                    for fname, fpat in fields.items():
+                        _check_regex(errors, f"规则 {rid} record.fields.{fname}", fpat)
+                if not (rec or {}).get("entity"):
+                    errors.append(f"record_delta 规则 {rid} 缺少 record.entity")
+                if not ((rec or {}).get("require") or (rec or {}).get("any")):
+                    errors.append(f"record_delta 规则 {rid} 缺少 require/any 比较")
             elif not (r.get("all_of") or r.get("any_of")):
                 errors.append(f"规则 {rid} all_of/any_of 均为空，永远不会命中")
             for key in ("all_of", "any_of", "none_of"):
@@ -1042,6 +1258,11 @@ def render_fault_profile_md(profile: dict) -> str:
             lines.append(f"  - 路径：`{', '.join(r.get('globs', []))}`")
             if rtype == "numeric_trend":
                 lines.append(f"  - 数值模式：{r.get('value_pattern')}；趋势：{r.get('trend')}；阈值：{r.get('threshold')}")
+            elif rtype == "record_delta":
+                rec = r.get("record") or {}
+                lines.append(f"  - 记录起始：`{rec.get('start', '')}`；实体：{rec.get('entity')}")
+                lines.append(f"  - 字段：{sorted((rec.get('fields') or {}).keys())}；"
+                             f"必须满足：{rec.get('require') or {}}；任一满足：{rec.get('any') or {}}")
             for key in ("all_of", "any_of", "none_of"):
                 if r.get(key):
                     lines.append(f"  - {key}: {r[key]}")
@@ -1084,7 +1305,7 @@ def render_fault_profile_md(profile: dict) -> str:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="生成 BBU 故障分析子 Skill")
+    ap = argparse.ArgumentParser(description="生成诊断子 Skill（域包可替换）")
     ap.add_argument("skill_name", nargs="?")
     ap.add_argument("--profile", help="fault-profile.yaml；--update 时可省略（复用子 skill 内已有的 profile）")
     ap.add_argument("--path", help="输出目录（--check 时可省略）")
@@ -1097,6 +1318,10 @@ def main():
                     help="配合 --inspect：显示指定报告模板（report_template.md/html）的本地 vs builder 差异")
     ap.add_argument("--adopt-extra-scripts", action="store_true",
                     help="配合 --inspect：把检测到的非受管脚本自动写入 components.extra_scripts")
+    ap.add_argument("--domain-pack",
+                    help="域包 id 或 domain-pack.yaml/json 路径；默认 bbu（domains/bbu）")
+    ap.add_argument("--json", action="store_true",
+                    help="--check 时输出机器可读 JSON（成功/失败均输出）")
     args = ap.parse_args()
     _utf8_stdio()
 
@@ -1123,8 +1348,28 @@ def main():
 
     profile = load_profile(profile_path)
     explicit_profile = bool(args.profile)
+    try:
+        if args.domain_pack and ("/" in args.domain_pack or args.domain_pack.endswith((".yaml", ".yml", ".json"))):
+            domain_pack = load_domain_pack(pack_path=args.domain_pack)
+        else:
+            domain_pack = load_domain_pack(args.domain_pack or DEFAULT_ID)
+    except DomainPackError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "errors": [str(exc)],
+                              "warnings": [], "domain_pack": None}, ensure_ascii=False))
+            return 2
+        print(f"[x] 域包加载失败: {exc}", file=sys.stderr)
+        return 2
+    compat_errors = check_compatible(domain_pack, CONTRACT_VERSION, TOOLKIT_VERSION)
     errors, warnings = validate(profile)
+    errors.extend(compat_errors)
     if errors:
+        if args.json:
+            print(json.dumps({"ok": False, "errors": errors, "warnings": warnings,
+                              "domain_pack": {"id": domain_pack.get("id"),
+                                              "version": domain_pack.get("version")}},
+                             ensure_ascii=False))
+            return 1
         print(f"[x] profile 校验失败（{len(errors)} 项）：", file=sys.stderr)
         for e in errors:
             print(" -", e, file=sys.stderr)
@@ -1135,12 +1380,31 @@ def main():
     extra = _extra_scripts(profile)
     if args.check:
         rules = collect_rules(profile)
-        print(f"[OK] profile 校验通过: {profile_path}")
-        print(f"   toolkit v{TOOLKIT_VERSION}")
-        print(f"   规则 {len(rules)}；时序 {len(profile.get('temporal') or [])}；"
-              f"根因 {len(profile.get('root_causes') or [])}；案例 {len(profile.get('cases') or [])}")
-        print("   组件推断：" + ", ".join(f"{k}={'Y' if v else 'N'}" for k, v in comps.items()))
-        return
+        summary = {
+            "ok": True,
+            "profile": str(profile_path),
+            "toolkit_version": TOOLKIT_VERSION,
+            "contract_version": CONTRACT_VERSION,
+            "domain_pack": {"id": domain_pack.get("id"),
+                            "version": domain_pack.get("version"),
+                            "source": domain_pack.get("_source")},
+            "rules": len(rules),
+            "temporal": len(profile.get("temporal") or []),
+            "root_causes": len(profile.get("root_causes") or []),
+            "cases": len(profile.get("cases") or []),
+            "components": comps,
+            "errors": [],
+            "warnings": warnings,
+        }
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False))
+        else:
+            print(f"[OK] profile 校验通过: {profile_path}")
+            print(f"   toolkit v{TOOLKIT_VERSION}；域包 {domain_pack.get('id')}@{domain_pack.get('version')}")
+            print(f"   规则 {len(rules)}；时序 {len(profile.get('temporal') or [])}；"
+                  f"根因 {len(profile.get('root_causes') or [])}；案例 {len(profile.get('cases') or [])}")
+            print("   组件推断：" + ", ".join(f"{k}={'Y' if v else 'N'}" for k, v in comps.items()))
+        return 0
     if not args.path:
         ap.error("--path 必填（除非 --check）")
 
@@ -1166,7 +1430,8 @@ def main():
                 except OSError:
                     pass
         # 幂等短路：本次将写入内容与版本戳完全一致（且 builder 版本未变）→ 不写盘、不递增 generation
-        future = planned_file_hashes(dest, profile, comps, extra, profile_path)
+        future = planned_file_hashes(dest, profile, comps, extra, profile_path,
+                                     name=name, domain_pack=domain_pack)
         if is_noop_update(prev_stamp, future, dest):
             print(f"[=] 受管内容无变化，已是最新（toolkit v{TOOLKIT_VERSION} "
                   f"第 {prev_stamp.get('generation')} 代，generation 保持不变），跳过写入。")
@@ -1186,13 +1451,18 @@ def main():
     tmpl_src = tmpl_path if tmpl_path.exists() else TEMPLATE_DIR / "SKILL.md.tmpl"
     tmpl = tmpl_src.read_text(encoding="utf-8")
     tmpl = _FRONTMATTER_RE.sub("{{FRONTMATTER}}", tmpl, count=1)
+    tmpl = tmpl.replace("{{DOMAIN_PACK}}",
+                        f"{domain_pack.get('id')}@{domain_pack.get('version')}")
+    tmpl = tmpl.replace("{{DOMAIN_PREFIX}}",
+                        str((domain_pack.get("routing") or {}).get("name_prefix")
+                            or f"{domain_pack.get('id')}-fault"))
     flags = {FLAG_FOR_COMP[k]: bool(v) for k, v in comps.items()}
     flags["TRIAGE"] = profile.get("mode") == "triage"
     flags["NON_TRIAGE"] = not flags["TRIAGE"]
     flags["AGENT"] = (profile.get("skill") or {}).get("execution_mode", "script") == "agent"
     flags["SCRIPT_MODE"] = not flags["AGENT"]
     rendered = render_blocks(
-        tmpl.replace("{{FRONTMATTER}}", render_frontmatter(name, profile))
+        tmpl.replace("{{FRONTMATTER}}", render_frontmatter(name, profile, domain_pack))
         .replace("{{NAME}}", name)
         .replace("{{TITLE}}", profile["skill"]["title"]),
         flags)
@@ -1242,11 +1512,17 @@ def main():
     for s in (dest / "scripts").glob("*.py"):
         s.chmod(0o755)
 
+    # 格式策略快照：运行期由 log_format 读取，core 不再内置域文件名
+    write_format_policy(dest, domain_pack)
+
+    # manifest：宿主读到的第一份文件；生成后再打戳（manifest 不含 stamp digest，避免自指）
+    manifest = write_manifest(dest, profile, name, domain_pack)
+
     # 版本戳 + SKILL.md 戳注 + 升级报告
     stamp = write_stamp(dest, _managed_rels(dest, comps, extra,
                         has_quick=profile_has_quick(profile)), prev_stamp)
     with open(dest / "SKILL.md", "a", encoding="utf-8") as fh:
-        fh.write(f"\n<!-- 由 bbu-fault-skill-builder v{TOOLKIT_VERSION} "
+        fh.write(f"\n<!-- 由 diagnostic-skill-builder v{TOOLKIT_VERSION} "
                  f"生成/更新 | digest {stamp['digest']} | {stamp['updated_at']} -->\n")
 
     mode = "增量更新" if args.update else "生成"
@@ -1309,4 +1585,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

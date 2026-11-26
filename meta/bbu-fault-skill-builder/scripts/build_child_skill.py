@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and test in staging, then atomically promote a BBU child skill."""
+"""Validate and test in staging, then atomically promote a diagnostic child skill."""
 import argparse
 import json
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from scaffold_child_skill import load_profile  # noqa: E402
+from scaffold_child_skill import TOOLKIT_VERSION, load_profile  # noqa: E402
 from run_regression import discover_cases  # noqa: E402
 
 
@@ -130,8 +130,68 @@ def save_logs(logs, target):
     return str(target)
 
 
+def _sha256_bytes(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(path.read_bytes())
+
+
+def write_attestation(skill_dir: Path, skill_name: str, version: str,
+                      profile: dict, regression: dict | None, coverage: dict | None,
+                      e2e: dict | None, cases_dir: str | None,
+                      discrimination: dict | None = None) -> Path:
+    manifest_path = skill_dir / "assets" / "skill-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    case_files = []
+    if cases_dir:
+        case_files = sorted(Path(cases_dir).glob(f"{skill_name}/**/case.yaml"))
+    cases = profile.get("cases") or []
+    counts = {"positive": 0, "negative": 0, "boundary": 0, "other": 0}
+    for c in cases:
+        kind = str((c or {}).get("type") or "other")
+        counts[kind if kind in counts else "other"] += 1
+    attestation = {
+        "schema": "build-attestation/1",
+        "skill": skill_name,
+        "version": version,
+        "domain": manifest.get("domain") or {},
+        "engine": manifest.get("engine") or {"name": "diagnostic-engine",
+                                              "version": TOOLKIT_VERSION},
+        "profile_sha256": _sha256_file(skill_dir / "assets" / "fault-profile.yaml")
+        if (skill_dir / "assets" / "fault-profile.yaml").exists() else "",
+        "rules_sha256": _sha256_file(skill_dir / "assets" / "evidence-rules.yaml")
+        if (skill_dir / "assets" / "evidence-rules.yaml").exists() else "",
+        "cases": {
+            "manifest_sha256": _sha256_bytes("\n".join(
+                _sha256_file(p) for p in case_files).encode("utf-8")),
+            "files": len(case_files),
+            **counts,
+        },
+        "regression": regression,
+        "coverage": coverage,
+        "discrimination": discrimination,
+        "e2e": e2e,
+        "builder": {"name": "diagnostic-skill-builder", "version": TOOLKIT_VERSION},
+        "built_at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).isoformat(timespec="seconds"),
+        "verification": {
+            "status": "case_regression" if regression is not None else "none",
+            "ok": bool(regression is not None and regression.get("failed", 1) == 0
+                       and regression.get("errors", 1) == 0
+                       and (coverage is None or coverage.get("ok") is True)
+                       and (discrimination is None or discrimination.get("ok") is True)),
+        },
+    }
+    target = skill_dir / "assets" / "build-attestation.json"
+    target.write_text(json.dumps(attestation, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
 def main():
-    ap = argparse.ArgumentParser(description="临时构建、全量验证后原子发布 BBU 故障子 Skill")
+    ap = argparse.ArgumentParser(description="临时构建、全量验证后原子发布诊断子 Skill")
     ap.add_argument("--profile", required=True)
     ap.add_argument("--path", required=True, help="子 Skill 安装根目录")
     ap.add_argument("--cases-dir", help="案例库根目录；交付前默认必跑回归")
@@ -140,6 +200,7 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--json", help="写入构建摘要 JSON")
     ap.add_argument("--log-dir", help="保留完整阶段日志；未指定时失败也会保留到 <path>/.bbu-build-logs/<skill>")
+    ap.add_argument("--domain-pack", help="域包 id 或路径；默认 bbu")
     args = ap.parse_args()
     if not args.skip_regression and not args.cases_dir:
         ap.error("交付构建需 --cases-dir；仅生成请显式使用 --skip-regression")
@@ -154,6 +215,7 @@ def main():
     dest = path_root / name
     default_failure_logs = path_root / ".bbu-build-logs" / name
 
+    attestation_profile = profile
     with tempfile.TemporaryDirectory(prefix=f".{name}-build-", dir=path_root) as td:
         tmp = Path(td)
         logs = tmp / "logs"
@@ -173,6 +235,7 @@ def main():
             case_sync = None
             if args.cases_dir:
                 effective, case_sync = effective_profile(profile, args.cases_dir, name)
+                attestation_profile = effective
                 import yaml
                 build_profile_path = tmp / "effective-profile.yaml"
                 build_profile_path.write_text(yaml.safe_dump(
@@ -180,6 +243,8 @@ def main():
 
             cmd = [HERE / "scaffold_child_skill.py", name, "--profile", build_profile_path,
                    "--path", staging]
+            if args.domain_pack:
+                cmd += ["--domain-pack", args.domain_pack]
             if args.update:
                 cmd.append("--update")
             if args.force:
@@ -189,6 +254,7 @@ def main():
 
             regression = None
             coverage = None
+            discrimination = None
             e2e = None
             if not args.skip_regression:
                 regression_json = logs / "regression.json"
@@ -199,7 +265,19 @@ def main():
                 raw = json.loads(regression_json.read_text(encoding="utf-8"))
                 regression = {k: raw.get(k, 0) for k in ("total", "passed", "failed", "errors")}
                 coverage = raw.get("coverage")
+                discrimination = raw.get("discrimination")
                 e2e = raw.get("e2e")
+                if discrimination is not None and not discrimination.get("ok"):
+                    raise RuntimeError("判别力门禁失败: " + "；".join(
+                        discrimination.get("blocking") or ["unknown"]))
+                if coverage is not None and not coverage.get("ok"):
+                    raise RuntimeError("覆盖率门禁失败: " + "；".join(
+                        coverage.get("errors") or ["unknown"]))
+
+            version = str((profile.get("skill") or {}).get("version") or "0.1.0")
+            attestation = write_attestation(staged_dest, name, version, attestation_profile,
+                                            regression, coverage, e2e, args.cases_dir,
+                                            discrimination)
 
             # 回归会执行子技能脚本，Python 可能生成 __pycache__；交付前清理运行缓存。
             for cache in list(staged_dest.rglob("__pycache__")):
@@ -212,8 +290,13 @@ def main():
             promote(staged_dest, dest, backup)
             result.update({
                 "ok": True, "verified": not args.skip_regression,
-                "regression": regression, "coverage": coverage, "e2e": e2e,
+                "regression": regression, "coverage": coverage,
+                "discrimination": discrimination, "e2e": e2e,
                 "case_sync": case_sync,
+                "attestation": str(dest / "assets" / "build-attestation.json"),
+                "domain": (json.loads((dest / "assets" / "skill-manifest.json")
+                                      .read_text(encoding="utf-8")).get("domain")
+                           if (dest / "assets" / "skill-manifest.json").exists() else {}),
                 "note": "判定、覆盖率与关键案例端到端报告均已通过" if regression is not None
                         else "仅生成，未验证，不可作为已验证技能交付",
             })

@@ -1,0 +1,23 @@
+schema: skill-domain-pack/1
+id: demo
+version: 1.0.0
+title: 通用演示域
+description: "非 BBU 的最小域包，用于验证 core 不依赖 BBU 也能构建。"
+requires:
+  contract: ">=2,<3"
+  engine: ">=2.13,<3"
+applies_to:
+  device_types: [DEMO]
+components:
+  parsers: []
+  assets: []
+format_policy:
+  detect_by: magic
+  opaque_name_patterns: []
+  force_text: []
+  force_opaque: []
+routing:
+  name_prefix: demo-fault
+  category_enum: [硬件故障]
+report:
+  default_locale: zh-CN

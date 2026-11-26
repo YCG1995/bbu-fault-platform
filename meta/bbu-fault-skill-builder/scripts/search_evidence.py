@@ -6,9 +6,10 @@ search_evidence.py — BBU 日志证据检索（流式/时区/站点关联/数�
   - 流式逐行扫描（大文件不爆内存），自动识别 UTF-8/GB18030/Big5
   - 透明支持 .gz；伪装后缀的 gzip（.bak.N 等）按 magic bytes 识别；坏 gzip 跳过不中断
   - CSV 按列匹配；.xlsx（OOXML，如 fm-active/fm-history 导出）按"行=记录"检索，
-    表头行列名匹配（columns），密文/私有格式（BspMoni/verprotect/gnssoriginalmsg）跳过
+    表头行列名匹配（columns），域策略声明的密文/私有格式跳过
   - 时间戳统一转 UTC（naive 按 --local-tz-offset，默认 +8）
-  - 规则类型：text（关键字/正则）、numeric_trend（阈值/持续度/单调性）
+  - 规则类型：text（关键字/正则）、numeric_trend（阈值/持续度/单调性）、
+    record_delta（块记录/实体分组/多快照比较）
   - associate_by：关联键防串证（时序比较只匹配同键证据）；
     associate_by: {site: true} 自动按站点/网元根目录分组（多站点包防串证）
   - 层级容错：glob 路径不匹配时自动按 basename 递归匹配（二次打包/多站点前缀）
@@ -565,6 +566,16 @@ def _prep_rule(rule):
             "any_of": compile_pats(rule.get("any_of", []), cs),
             "none_of": compile_pats(rule.get("none_of", []), cs),
         })
+        if rtype == "record_delta":
+            rec = rule.get("record") or {}
+            fields = rec.get("fields") or {}
+            if not rec.get("start"):
+                raise re.error("record_delta 缺少 record.start")
+            if not isinstance(fields, dict) or not fields:
+                raise re.error("record_delta 缺少 record.fields")
+            st["record_start_re"] = re.compile(rec["start"])
+            st["record_field_res"] = {str(k): re.compile(str(v)) for k, v in fields.items()}
+            st["record_cfg"] = rec
     except re.error as e:
         st["error"] = str(e)
         st["done"] = True
@@ -652,6 +663,13 @@ def search_all(root, rules, limit, offset, progress, index=None):
         rel = str(f.relative_to(root))          # 证据路径保持 os.sep（与原版一致）
         site = detect_site_root(rel)            # 同文件恒定，按文件提升
         fmt_state = {}                          # 时间格式记忆（同文件共享）
+        record_ids = [i for i in active if states[i]["rtype"] == "record_delta"]
+        if record_ids:
+            for i in record_ids:
+                _scan_record_file(f, rel, site, states[i], limit)
+            active = [i for i in active if states[i]["rtype"] != "record_delta"]
+            if not active:
+                continue
         cls = classify_cached(f)
         is_xlsx = (cls.get("kind") == "container_doc"
                    and cls.get("subtype") in XLSX_SUFFIXES)
@@ -818,6 +836,157 @@ def _glob_rel_match(rel, pattern):
     if not pattern.startswith("**/"):
         pats.append("**/" + pattern.lstrip("/"))
     return any(glob_to_re(p).match(rel.replace("\\", "/")) for p in pats)
+
+
+def _record_spec_ok(values, spec):
+    """record_delta 的单字段比较；values 为该实体的字段序列。"""
+    if not values:
+        return False
+    first, last = values[0], values[-1]
+    if isinstance(spec, (int, float)):
+        try:
+            return float(last) == float(spec)
+        except (TypeError, ValueError):
+            return False
+    text = str(spec).strip()
+    low = text.lower()
+    if low in ("increasing", "increases", "not_increasing", "non_increasing",
+               "flat_or_decreasing"):
+        try:
+            nums = [float(v) for v in values]
+        except (TypeError, ValueError):
+            nums = None
+        if nums is not None:
+            if low in ("increasing", "increases"):
+                return nums[-1] > nums[0] and all(b >= a for a, b in zip(nums, nums[1:]))
+            return all(b <= a for a, b in zip(nums, nums[1:]))
+        if low in ("increasing", "increases"):
+            return str(last) > str(first)
+        return str(last) <= str(first)
+    if low in ("zero", "zero_or_not_increasing"):
+        try:
+            if low == "zero":
+                return float(last) == 0
+            return float(last) == 0 or float(last) <= float(first)
+        except (TypeError, ValueError):
+            return str(last) == "0"
+    if low in ("positive", "nonzero"):
+        try:
+            return float(last) != 0
+        except (TypeError, ValueError):
+            return bool(str(last))
+    if low in ("unchanged", "stable"):
+        return all(str(v) == str(first) for v in values)
+    if low in ("open", "closed"):
+        return str(last).strip().lower() == low
+    m = re.fullmatch(r"(last|first|max|min)_(gt|ge|lt|le|eq)\s*:\s*([0-9.]+)", text)
+    if m:
+        which, op, num = m.groups()
+        try:
+            val = (float(first) if which == "first" else
+                   float(last) if which == "last" else
+                   float(max(float(x) for x in values)) if which == "max" else
+                   float(min(float(x) for x in values)))
+        except (TypeError, ValueError):
+            return False
+        target = float(num)
+        return {">": val > target, ">=": val >= target, "lt": val < target,
+                "le": val <= target, "eq": val == target}[
+                    {"gt": ">", "ge": ">=", "lt": "lt", "le": "le", "eq": "eq"}[op]]
+    return str(last) == text
+
+
+def _record_entity(rec, start_groups, fields, site):
+    names = rec.get("entity") or ["site"]
+    vals = []
+    for name in names:
+        if name == "site":
+            vals.append(site or "ALL")
+        elif name in start_groups:
+            vals.append(start_groups.get(name))
+        elif name in fields:
+            values = fields.get(name) or []
+            vals.append(values[-1] if values else None)
+        else:
+            vals.append(None)
+    return tuple(vals)
+
+
+def _scan_record_file(path, rel, site, st, limit):
+    """扫描一个文件的块记录，返回按实体聚合后的命中证据。"""
+    rec = st.get("record_cfg") or {}
+    cls = classify_cached(path)
+    stream, enc = open_lines(path, st["encoding"], cls)
+    if stream is None:
+        st["skipped_files"].append({"file": rel, "kind": cls.get("kind"),
+                                    "subtype": cls.get("subtype"), "note": cls.get("note")})
+        return
+    records = []
+    current = None
+    lineno = 0
+    try:
+        for raw in stream:
+            lineno += 1
+            start = st["record_start_re"].search(raw)
+            if start:
+                if current:
+                    records.append(current)
+                current = {"start_groups": start.groupdict(), "start_line": lineno,
+                           "line": raw.strip()[:2000], "fields": {}}
+            if current is None:
+                continue
+            for name, rx in st["record_field_res"].items():
+                m = rx.search(raw)
+                if not m:
+                    continue
+                try:
+                    value = m.group("value")
+                except IndexError:
+                    value = m.group(1) if m.groups() else m.group(0)
+                current["fields"].setdefault(name, []).append(value)
+        if current:
+            records.append(current)
+    finally:
+        stream.close()
+
+    groups = {}
+    for idx, record in enumerate(records):
+        key = _record_entity(rec, record["start_groups"], record["fields"], site)
+        groups.setdefault(key, []).append(record)
+
+    hits = []
+    for key, rows in groups.items():
+        require = rec.get("require") or {}
+        any_spec = rec.get("any") or {}
+        def field_values(field):
+            return [r["fields"][field][-1] for r in rows if r["fields"].get(field)]
+        def ok(spec_map):
+            if not spec_map:
+                return True
+            return all(_record_spec_ok(field_values(f), spec) for f, spec in spec_map.items())
+        if require and not ok(require):
+            continue
+        if any_spec and not any(_record_spec_ok(field_values(f), spec)
+                                for f, spec in any_spec.items()):
+            continue
+        last = rows[-1]
+        detail = ", ".join(f"{k}={v[-1] if v else ''}" for k, v in last["fields"].items())
+        hits.append({
+            "file": rel, "line_no": last["start_line"],
+            # 记录起始行常用星号分隔；报告表格会把 ** 误当强调，展示行去掉星号。
+            "line": (last["line"].replace("*", "") + " | " + detail)[:2000],
+            "timestamp": None, "site": site, "associate": key[-1] if len(key) > 1 else None,
+            "context": [], "entity": list(key),
+        })
+    if hits:
+        st["files_scanned"] += 1
+        st["hits_total"] += len(hits)
+        for item in hits[:limit]:
+            st["matches"].append(item)
+            sk = site or "ALL"
+            st["hits_by_site"][sk] = st["hits_by_site"].get(sk, 0) + 1
+    elif records:
+        st["files_scanned"] += 1
 
 
 def _final(rule, matches, values, files_scanned, encodings, ab, min_m,

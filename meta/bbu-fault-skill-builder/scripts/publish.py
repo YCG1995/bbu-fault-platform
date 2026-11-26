@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""publish.py — 一键分发：临时构建(校验+生成+回归) → 验证后替换 → 打包 → 原子同步安装位
+"""publish.py — 一键分发：临时构建(校验+生成+回归) → 验证后替换 → 打包 → 原子同步安装位（域包可替换）
 
 用法：
     python3 publish.py --profile <fault-profile.yaml> --path <skills根> --cases-dir <案例库根> \
@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只打印将执行的动作，不实际执行")
     ap.add_argument("--json", help="写入发布结果 JSON")
     ap.add_argument("--log-dir", help="保留完整发布阶段日志；未指定时失败也会保留到 <path>/.bbu-publish-logs/<skill>")
+    ap.add_argument("--domain-pack", help="域包 id 或路径；默认 bbu")
     args = ap.parse_args()
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):
@@ -113,7 +114,9 @@ def main():
     if not profile_path.is_file():
         sys.exit(f"profile 不存在: {profile_path}")
     try:
-        name = load_profile(profile_path)["skill"]["name"]
+        profile = load_profile(profile_path)
+        name = profile["skill"]["name"]
+        skill_version = str(profile["skill"].get("version") or TOOLKIT_VERSION)
     except Exception as exc:
         sys.exit(f"profile 读取失败: {exc}")
 
@@ -125,14 +128,15 @@ def main():
     install_dir = Path(args.install_dir).resolve() if args.install_dir else None
     # 安装位目标目录允许尚不存在（镜像时自动创建）；输入类路径才做存在性校验
 
-    zip_name = f"{name}-v{TOOLKIT_VERSION}.zip"
+    zip_name = f"{name}-v{skill_version}.zip"
     actions = []
     actions.append(("build", [HERE / "build_child_skill.py", "--profile", str(profile_path),
                               "--path", str(Path(args.path).resolve())] +
                              (["--cases-dir", str(Path(args.cases_dir).resolve())] if args.cases_dir else []) +
                              (["--skip-regression"] if args.skip_regression else []) +
                              (["--update"] if args.update else []) +
-                             (["--force"] if args.force else [])))
+                             (["--force"] if args.force else []) +
+                             (["--domain-pack", args.domain_pack] if args.domain_pack else [])))
     pkg = [HERE / "package_skill.py", "--skill", str(dest), "--out", str(zip_out),
            "--name", zip_name]
     if changelog:

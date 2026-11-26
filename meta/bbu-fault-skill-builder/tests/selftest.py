@@ -110,8 +110,10 @@ def check(cond, msg):
     return cond
 
 
-def run(cmd, cwd=None, expect_rc=0):
+def run(cmd, cwd=None, expect_rc=0, env_extra=None):
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
     r = subprocess.run([sys.executable, *map(str, cmd)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", cwd=cwd, env=env)
     if expect_rc is not None and r.returncode != expect_rc:
@@ -454,8 +456,8 @@ def main():
         check(not list(sd.rglob("__pycache__")) and not list(sd.rglob("*.pyc")), "子 Skill 无 __pycache__/pyc")
         r = run([SCRIPTS / "validate_skill_md.py", sd])
         check(r.returncode == 0, "子 Skill frontmatter 符合 Agent Skills 规范（仅 name/description）")
-        check("compatibility:" not in skill_md and "metadata:" not in skill_md,
-              "frontmatter 仅含 name/description（compatibility/metadata 已收敛）")
+        check("compatibility:" in skill_md and "metadata:" in skill_md,
+              "frontmatter 含 compatibility/metadata（通用技能契约）")
         # 别名含 YAML 特殊字符（: # "）时 frontmatter 仍可解析
         spicy = json.loads(json.dumps(_load_profile_json()))
         spicy["skill"]["name"] = "bbu-fault-spicy"
@@ -492,7 +494,7 @@ def main():
               and stamp["files"].get("scripts/search_evidence.py"),
               "版本戳: 全新生成=第1代，幂等 update 不递增 + 受管文件哈希")
         skill_md2 = (sd / "SKILL.md").read_text(encoding="utf-8")
-        check(stamp["digest"] in skill_md2 and "bbu-fault-skill-builder v" in skill_md2,
+        check(stamp["digest"] in skill_md2 and "diagnostic-skill-builder v" in skill_md2,
               "SKILL.md 尾部含版本戳注释")
         r = run([SCRIPTS / "scaffold_child_skill.py", "--inspect", sd])
         check(r.returncode == 0 and "同步" in r.stdout, "--inspect 全新子 skill 判定同步（rc=0）")
@@ -1098,7 +1100,8 @@ def main():
 
         dcm_zip = fmt_dir / "DCM_test_6323_9999999_BspLog.zip"
         _make_dcm_zip(dcm_zip)
-        r = run([SCRIPTS / "unpack_logs.py", dcm_zip, "-o", fmt_work / "dcm"])
+        r = run([SCRIPTS / "unpack_logs.py", dcm_zip, "-o", fmt_work / "dcm"],
+                env_extra={"SKILL_FORMAT_POLICY": str(ROOT / "domains" / "bbu" / "domain-pack.yaml")})
         check(r.returncode == 0, "DCM 合成包解包")
         mani = json.loads((fmt_work / "dcm" / "manifest.json").read_text(encoding="utf-8"))
         extracted = mani["extracted_files"]
@@ -1156,16 +1159,41 @@ def main():
         check(any(o["path"].endswith("bspdata.bin") for o in mani.get("opaque_files", [])),
               "opaque_files 含 .bin 明细")
         inv_json = fmt_work / "inv.json"
-        r = run([SCRIPTS / "log_format.py", fmt_work / "dcm", "--json", inv_json, "--quiet"])
+        r = run([SCRIPTS / "log_format.py", fmt_work / "dcm", "--json", inv_json, "--quiet"],
+                env_extra={"SKILL_FORMAT_POLICY": str(ROOT / "domains" / "bbu" / "domain-pack.yaml")})
         check(r.returncode == 0, "log_format 目录盘点")
         inv = json.loads(inv_json.read_text(encoding="utf-8"))
         check(inv["by_kind"].get("compressed_text", 0) >= 2
               and inv["by_kind"].get("ciphered", 0) >= 1,
               f"inventory 分类: {inv['by_kind']}")
-        r = run([SCRIPTS / "log_format.py", dcm_zip, "--json", inv_json, "--quiet"])
+        r = run([SCRIPTS / "log_format.py", dcm_zip, "--json", inv_json, "--quiet"],
+                env_extra={"SKILL_FORMAT_POLICY": str(ROOT / "domains" / "bbu" / "domain-pack.yaml")})
         inv2 = json.loads(inv_json.read_text(encoding="utf-8"))
         check(r.returncode == 0 and inv2["total_files"] >= 5,
               "log_format zip 直读盘点（不解包）")
+
+        # P1-1 格式策略外置：core 不再内置 BBU 文件名；策略快照只影响声明域
+        sys.path.insert(0, str(SCRIPTS))
+        import log_format as _lf
+        old_policy = os.environ.pop("SKILL_FORMAT_POLICY", None)
+        try:
+            _lf._POLICY_STATE.update(path=None, mtime=None, policy=None)
+            check(_lf.classify_bytes("BspMoni.log.bak.1",
+                                     b"2026-02-09 BspMoni log\n")["kind"] == "text",
+                  "无域策略：BspMoni 轮转件不按名称判密文")
+            os.environ["SKILL_FORMAT_POLICY"] = str(ROOT / "domains" / "bbu" / "domain-pack.yaml")
+            check(_lf.classify_bytes("BspMoni.log.bak.1",
+                                     b"2026-02-09 BspMoni log\n")["kind"] == "text",
+                  "BBU 域策略：BspMoni 轮转件强制文本")
+            check(_lf.classify_bytes("verprotect.log.bak.1",
+                                     b"\x9f\x00\xff\x13cipher")["kind"] == "ciphered",
+                  "BBU 域策略：verprotect 仍按密文登记")
+        finally:
+            if old_policy is None:
+                os.environ.pop("SKILL_FORMAT_POLICY", None)
+            else:
+                os.environ["SKILL_FORMAT_POLICY"] = old_policy
+            _lf._POLICY_STATE.update(path=None, mtime=None, policy=None)
 
         fm_zip = fmt_dir / "fm-active-告警监控-test.zip"
         _make_fm_zip(fm_zip)
@@ -2200,6 +2228,9 @@ def main():
 
     if 13 in _want:
         def _s13():
+            if not (ROOT.parent / "bbu-fault-router" / "scripts" / "router.py").exists():
+                print("  [skip] 快照不含 meta/bbu-fault-router，跳过 S13 路由联调（基线缺口）")
+                return
             _make_xlsx_multi = _make_xlsx_sheets
             def to_yaml_for_test(o):
                 sys.path.insert(0, str(SCRIPTS))

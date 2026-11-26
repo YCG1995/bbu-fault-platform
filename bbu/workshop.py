@@ -26,7 +26,7 @@ from .workshop_spec import (audit_spec, compile_profile, derive_skill_name,
 from .workshop_recipes import list_recipes
 from .storage import extract_inputs, sample_text_files
 from .util import (env_with_vendor, iso_now, new_id, read_json, safe_filename,
-                   unique_path, write_json, write_text)
+                   sha256_file, unique_path, write_json, write_text)
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
 
@@ -134,6 +134,7 @@ class WorkshopService:
         self.registry = registry
         self.gateway = gateway
         self.meta = Path(config.meta_skill_dir)
+        self.domain_pack = str(getattr(config, "domain_pack", "bbu") or "bbu")
         # 生成是同步执行的；服务启动时仍停留在 generating/analyzing，说明上次进程异常中断。
         self._recover_interrupted()
 
@@ -784,17 +785,25 @@ class WorkshopService:
             return {"ok": False, "output": "元 Skill 缺少 scaffold_child_skill.py"}
         try:
             proc = subprocess.run(
-                [sys.executable, str(script), "--profile", str(path), "--check"],
+                [sys.executable, str(script), "--profile", str(path), "--check", "--json",
+                 "--domain-pack", self.domain_pack],
                 cwd=str(self.meta), env=env_with_vendor(), capture_output=True,
                 text=True, timeout=120)
         except (subprocess.TimeoutExpired, OSError) as exc:
             return {"ok": False, "output": str(exc)}
         output = (proc.stdout or "") + (proc.stderr or "")
+        payload = {}
+        try:
+            payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            payload = {}
         return {
-            "ok": proc.returncode == 0,
+            "ok": proc.returncode == 0 and bool(payload.get("ok", True)),
             "exit_code": proc.returncode,
             "output": output[:6000],
-            "errors": self._extract_errors(output),
+            "errors": payload.get("errors") or self._extract_errors(output),
+            "warnings": payload.get("warnings") or [],
+            "domain_pack": payload.get("domain_pack") or {},
             "unverified_rules": self._unverified_rules(profile_yaml),
         }
         # path 保留用于排错；正常流程由 /check 复用
@@ -940,6 +949,8 @@ class WorkshopService:
         cmd = [sys.executable, str(self.meta / "scripts" / "build_child_skill.py"),
                "--profile", str(profile_path), "--path", str(staging),
                "--json", str(build_json)]
+        domain_id = str((parsed.get("domain_pack") or {}).get("id") or self.domain_pack)
+        cmd += ["--domain-pack", domain_id]
         if regression_run:
             cmd += ["--cases-dir", str(self.config.cases_dir)]
         else:
@@ -962,7 +973,11 @@ class WorkshopService:
             and int(regression.get("passed") or 0) == int(regression.get("total") or 0)
             and int(regression.get("failed") or 0) == 0
             and int(regression.get("errors") or 0) == 0)
-        verified_mode = bool(ok and regression_ok)
+        attestation = read_json(skill_dir / "assets" / "build-attestation.json", {}) or {}
+        attestation_verification = attestation.get("verification") or {}
+        attestation_ok = bool(attestation_verification.get("status") == "case_regression"
+                              and attestation_verification.get("ok"))
+        verified_mode = bool(ok and regression_ok and attestation_ok)
         payload = {
             "ok": ok,
             "verified": verified_mode,
@@ -971,6 +986,8 @@ class WorkshopService:
             "output": output[-6000:],
             "result": result,
             "regression": regression,
+            "attestation": attestation,
+            "domain": (read_json(skill_dir / "assets" / "skill-manifest.json", {}) or {}).get("domain") or {},
             "skill_dir": str(skill_dir) if skill_dir.exists() else "",
         }
         if not ok:
@@ -1039,10 +1056,16 @@ class WorkshopService:
                        {"draft_id": draft_id, "published_at": iso_now(),
                         "published_by": username, "verified": build.get("verified")})
             from .supply import sign_skill
+            attestation_path = target / "assets" / "build-attestation.json"
+            attestation = read_json(attestation_path, {}) or {}
             sign_skill(
                 target, data_dir=self.config.data_dir, name=name, version=version,
                 builder="workshop",
                 verification={"status": "case_regression", "ok": bool(build.get("verified")),
+                              "attestation_sha256": sha256_file(attestation_path)
+                              if attestation_path.exists() else "",
+                              "engine_digest": str((attestation.get("engine") or {}).get("digest") or ""),
+                              "domain": attestation.get("domain") or {},
                               "regression": build.get("regression") or
                               (build.get("result") or {}).get("regression") or {},
                               "draft_id": draft_id, "published_by": username})
