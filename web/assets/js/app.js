@@ -22,16 +22,16 @@ const NAV = [
   { href: '#/tasks', label: '任务记录', icon: 'list' },
   { href: '#/usage', label: '用量统计', icon: 'activity' },
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
-  { href: '#/kb', label: '故障知识库', icon: 'search' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
+  { href: '#/kb', label: '故障知识库', icon: 'search' },
 ];
 const ADMIN_NAV = [
   { href: '#/models', label: '模型接入', icon: 'cpu' },
   { href: '#/users', label: '用户管理', icon: 'users' },
-  { href: '#/system', label: '系统信息', icon: 'info' },
   { href: '#/audit', label: '审计日志', icon: 'shield' },
   { href: '#/traces', label: '执行轨迹', icon: 'history' },
+  { href: '#/system', label: '系统信息', icon: 'info' },
 ];
 
 let loginRoot = null;

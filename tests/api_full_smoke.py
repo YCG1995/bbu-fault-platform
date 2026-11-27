@@ -1271,7 +1271,7 @@ def main() -> int:
         hit("GET /api/system/info")
         _, stats = admin_client.json("GET", "/api/stats")
         assert stats["today"] >= 1 and "pending_reviews" in stats
-        assert "cpu" in stats["system"] and "memory" in stats["system"]
+        assert "system" not in stats, "系统资源应只在 /api/system/info 返回"
         hit("GET /api/stats")
         _, notes = admin_client.json("GET", "/api/notifications")
         assert "items" in notes and "unread" in notes

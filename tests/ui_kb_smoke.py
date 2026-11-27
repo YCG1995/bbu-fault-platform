@@ -199,22 +199,32 @@ def main() -> int:
             # 总览必须提供知识库入口，任务记录必须能看见检索操作。
             page.goto(f"http://{host}:{port}/#/dashboard", wait_until="domcontentloaded")
             page.wait_for_selector(".kb-dashboard-card", timeout=15000)
-            page.wait_for_selector(".system-resource-card", timeout=15000)
             dash = page.locator("#view").inner_text()
-            for token in ("故障知识库", "生效文档", "操作记录", "系统资源", "CPU 使用率",
-                          "当前应用内存", "系统内存", "数据盘"):
+            for token in ("故障知识库", "生效文档", "操作记录"):
                 if token not in dash:
                     errors.append(f"总览页缺少：{token}")
-            nav_section = page.evaluate("""() => {
-              const link = document.querySelector('#nav a[href="#/system"]');
-              if (!link) return null;
-              let node = link.previousElementSibling;
-              while (node && !node.classList.contains('nav-section')) node = node.previousElementSibling;
-              return node ? node.textContent.trim() : '';
+            nav = page.evaluate("""() => {
+              const links = [...document.querySelectorAll('#nav a')].map((a) => a.getAttribute('href'));
+              const system = document.querySelector('#nav a[href="#/system"]');
+              let section = system?.previousElementSibling;
+              while (section && !section.classList.contains('nav-section')) section = section.previousElementSibling;
+              return { links, section: section ? section.textContent.trim() : '' };
             }""")
-            if nav_section != "管理":
-                errors.append(f"系统信息未放入管理分区：{nav_section}")
+            if nav["section"] != "管理":
+                errors.append(f"系统信息未放入管理分区：{nav['section']}")
+            if nav["links"].index("#/system") < nav["links"].index("#/traces"):
+                errors.append("系统信息没有排在执行轨迹后面")
+            if nav["links"].index("#/kb") < nav["links"].index("#/workshop"):
+                errors.append("故障知识库没有排在技能工坊后面")
             page.screenshot(path=str(out / "dashboard-kb.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/system", wait_until="domcontentloaded")
+            page.wait_for_selector(".system-resource-card", timeout=15000)
+            sys_body = page.locator("#view").inner_text()
+            for token in ("系统资源", "CPU 使用率", "当前应用内存", "系统内存", "数据盘"):
+                if token not in sys_body:
+                    errors.append(f"系统信息概览缺少：{token}")
+            page.screenshot(path=str(out / "system-resources.png"), full_page=True)
 
             page.goto(f"http://{host}:{port}/#/tasks?tab=kb", wait_until="domcontentloaded")
             page.wait_for_selector("#kb-op-table", timeout=15000)
@@ -258,7 +268,7 @@ def main() -> int:
         for item in errors:
             print(" -", item)
         return 1
-    print("[PASS] 知识库问答/进度/双主标签/文档分页/独立导入/详情/修订/管理分区/总览/任务记录/移动端")
+    print("[PASS] 知识库问答/进度/双主标签/文档分页/独立导入/详情/修订/导航顺序/系统信息资源/任务记录/移动端")
     print(f"[INFO] 截图: {out}")
     return 0
 

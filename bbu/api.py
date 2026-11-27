@@ -2037,7 +2037,6 @@ def h_stats(app: App, req):
         "real_cases_labeled": case_total,
         "model_status": app.gateway.model_status(user["id"]),
         "workers": app.worker.stats(),
-        "system": system_snapshot(app.config.data_dir),
         "recent": [_task_summary(r) for r in recent],
     })
 

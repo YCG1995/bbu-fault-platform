@@ -1985,6 +1985,53 @@ function renderMCPPanel(panel, payload) {
     cfg.textContent.trim().replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
 }
 
+function resourcePercent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+}
+
+function resourceText(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(1)}%` : '—';
+}
+
+function systemOverviewResources(system) {
+  if (!system) return '';
+  const cpu = system.cpu || {};
+  const memory = system.memory || null;
+  const process = system.process || {};
+  const disk = system.disk || null;
+  return `<div class="card system-resource-card" style="margin:0 0 16px">
+    <div class="card-head"><h2>系统资源</h2>
+      <span class="sub">系统信息概览 · ${esc(system.as_of ? fmtDate(system.as_of) : '')}</span></div>
+    <div class="card-body"><div class="resource-grid">
+      <div class="resource-tile">
+        <div class="resource-label">${icon('cpu')} CPU 使用率</div>
+        <div class="resource-value">${resourceText(cpu.percent)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(cpu.percent)}%"></span></div>
+        <div class="resource-note">${Number(cpu.cores || 1)} 核 · 1 分钟负载 ${cpu.load_1m == null ? '—' : Number(cpu.load_1m).toFixed(2)} · ${esc(cpu.source || '')}</div>
+      </div>
+      <div class="resource-tile">
+        <div class="resource-label">${icon('activity')} 当前应用内存</div>
+        <div class="resource-value">${fmtSize(process.rss_bytes)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(process.percent_of_total)}%"></span></div>
+        <div class="resource-note">总内存 ${memory ? fmtSize(memory.total_bytes) : '—'} · 占 ${resourceText(process.percent_of_total)}${process.threads ? ` · ${process.threads} 线程` : ''}</div>
+      </div>
+      <div class="resource-tile">
+        <div class="resource-label">${icon('layers')} 系统内存</div>
+        <div class="resource-value">${memory ? resourceText(memory.percent) : '—'}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(memory?.percent)}%"></span></div>
+        <div class="resource-note">${memory ? `${fmtSize(memory.used_bytes)} 已用 · ${fmtSize(memory.available_bytes)} 可用` : '内存信息不可用'}</div>
+      </div>
+      ${disk ? `<div class="resource-tile">
+        <div class="resource-label">${icon('inbox')} 数据盘</div>
+        <div class="resource-value">${resourceText(disk.percent)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(disk.percent)}%"></span></div>
+        <div class="resource-note">${fmtSize(disk.free_bytes)} 可用 / ${fmtSize(disk.total_bytes)} · ${esc(disk.path || '')}</div>
+      </div>` : ''}
+    </div></div></div>`;
+}
+
 function renderSystemView(view, info, config, updates, migrations, mcp) {
   const isAdmin = state.user?.role === 'admin';
   const tabs = isAdmin
@@ -2002,6 +2049,7 @@ function renderSystemView(view, info, config, updates, migrations, mcp) {
         <div class="card stat"><div class="stat-icon ok">${icon('clock')}</div><div><div class="stat-val">${fmtDur(info.uptime_sec)}</div><div class="stat-label">已运行</div></div></div>
         <div class="card stat"><div class="stat-icon warn">${icon('activity')}</div><div><div class="stat-val">${info.workers?.running || 0} / ${info.workers?.max_workers || '-'}</div><div class="stat-label">运行 / 并发上限</div></div></div>
       </div>
+      ${systemOverviewResources(info.system)}
       <div class="grid grid-2">
         <div class="card"><div class="card-head"><h2>运行环境</h2></div><div class="card-body">
           <div class="kv">

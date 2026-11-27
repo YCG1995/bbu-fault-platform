@@ -1,5 +1,5 @@
 // 总览页
-import { api, esc, fmtDate, fmtDur, fmtShortDate, fmtSize, icon, mount, state, statusBadge, shortId } from './core.js';
+import { api, esc, fmtDate, fmtDur, fmtShortDate, icon, mount, state, statusBadge, shortId } from './core.js';
 import { modelNoticeHtml, openPersonalModelModal } from './personal_model.js';
 
 function qualityCard(q) {
@@ -27,64 +27,6 @@ function qualityCard(q) {
       ${!q.ready_for_real_data ? `<div class="alert warn" style="margin-top:12px">${icon('alert')}<div>门禁未通过：合成回归通过只能说明规则闭环，不能对外宣称现网准确率。请优先补真实案例、专家复核和独立测试集。</div></div>` : ''}
     </div>
   </div>`;
-}
-
-function resourcePercent(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
-}
-
-function resourceText(value, suffix = '%') {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${n.toFixed(1)}${suffix}` : '—';
-}
-
-function systemResourceCard(resources) {
-  if (!resources) return '';
-  const cpu = resources.cpu || {};
-  const memory = resources.memory || null;
-  const process = resources.process || {};
-  const disk = resources.disk || null;
-  const isAdmin = state.user?.role === 'admin';
-  const cpuPct = resourcePercent(cpu.percent);
-  const memPct = resourcePercent(memory?.percent);
-  const diskPct = resourcePercent(disk?.percent);
-  const appPct = resourcePercent(process.percent_of_total);
-  return `<div class="card system-resource-card">
-    <div class="card-head"><h2>系统资源</h2>
-      <span class="sub">页面加载时采样 · ${esc(resources.as_of ? fmtShortDate(resources.as_of) : '')}</span>
-      <div class="inline" style="margin-left:auto">
-        <button class="btn btn-sm" data-act="refresh-resources">${icon('refresh')}刷新</button>
-        ${isAdmin ? '<a class="btn btn-sm" href="#/system">系统信息</a>' : ''}
-      </div></div>
-    <div class="card-body">
-      <div class="resource-grid">
-        <div class="resource-tile">
-          <div class="resource-label">${icon('cpu')} CPU 使用率</div>
-          <div class="resource-value">${resourceText(cpu.percent)}</div>
-          <div class="resource-bar"><span style="width:${cpuPct}%"></span></div>
-          <div class="resource-note">${Number(cpu.cores || 1)} 核 · 1 分钟负载 ${cpu.load_1m == null ? '—' : Number(cpu.load_1m).toFixed(2)} · ${esc(cpu.source || '')}</div>
-        </div>
-        <div class="resource-tile">
-          <div class="resource-label">${icon('activity')} 当前应用内存</div>
-          <div class="resource-value">${fmtSize(process.rss_bytes)}</div>
-          <div class="resource-bar"><span style="width:${appPct}%"></span></div>
-          <div class="resource-note">总内存 ${memory ? fmtSize(memory.total_bytes) : '—'} · 占 ${resourceText(process.percent_of_total)}${process.threads ? ` · ${process.threads} 线程` : ''}</div>
-        </div>
-        <div class="resource-tile">
-          <div class="resource-label">${icon('layers')} 系统内存</div>
-          <div class="resource-value">${memory ? resourceText(memory.percent) : '—'}</div>
-          <div class="resource-bar"><span style="width:${memPct}%"></span></div>
-          <div class="resource-note">${memory ? `${fmtSize(memory.used_bytes)} 已用 · ${fmtSize(memory.available_bytes)} 可用` : '内存信息不可用'}</div>
-        </div>
-        ${disk ? `<div class="resource-tile">
-          <div class="resource-label">${icon('inbox')} 数据盘</div>
-          <div class="resource-value">${resourceText(disk.percent)}</div>
-          <div class="resource-bar"><span style="width:${diskPct}%"></span></div>
-          <div class="resource-note">${fmtSize(disk.free_bytes)} 可用 / ${fmtSize(disk.total_bytes)} · ${esc(disk.path || '')}</div>
-        </div>` : ''}
-      </div>
-    </div></div>`;
 }
 
 function checklistCard(stats) {
@@ -163,7 +105,6 @@ export async function renderDashboard() {
         <div class="stat-note">模型调用 ${stats.workers?.running || 0} 个任务运行中</div></div></div>
     </div>
 
-    ${systemResourceCard(stats.system)}
     <div class="grid grid-2" style="margin-top:16px;grid-template-columns:minmax(0,1.5fr) minmax(0,.9fr)">
       <div class="card">
         <div class="card-head"><h2>最近诊断</h2><span class="sub">点击行查看证据链与报告</span>
@@ -236,6 +177,5 @@ export async function renderDashboard() {
     if (act === 'skills') location.hash = '#/skills';
     if (act === 'all-tasks') location.hash = '#/tasks';
     if (act === 'model-key') openPersonalModelModal(() => renderDashboard());
-    if (act === 'refresh-resources') renderDashboard();
   });
 }

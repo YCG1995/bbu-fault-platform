@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 126,
-    "action_instances": 302,
-    "buttons_all": 268,
-    "buttons_page": 251,
+    "distinct_actions": 125,
+    "action_instances": 301,
+    "buttons_all": 267,
+    "buttons_page": 250,
     "modal_calls": 33,
     "forms": 21
   },
@@ -585,13 +585,6 @@
         "web/assets/js/page_admin.js",
         "web/assets/js/page_traces.js",
         "web/assets/js/page_usage.js"
-      ]
-    },
-    {
-      "action": "refresh-resources",
-      "instances": 1,
-      "files": [
-        "web/assets/js/page_dashboard.js"
       ]
     },
     {
