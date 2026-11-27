@@ -11,13 +11,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
-from bbu.ai import AIGateway, NoModelError  # noqa: E402
+from bbu.ai import AIGateway, AIError, NoModelError, _call_openai  # noqa: E402
 from bbu.db import Database, SCHEMA_VERSION  # noqa: E402
 from bbu.relay import (  # noqa: E402
     RelayAbsentError, RelayCallConsumedError, RelayCrossUserError, RelayExecError,
@@ -190,6 +191,53 @@ class BrowserRelayTests(unittest.TestCase):
         self.assertEqual(result.text, '{"choices":[{"message":{"content":"OK"}}]}')
         self.assertFalse(self._errors, self._errors)
         self.assertEqual(self.hub.snapshot()["pending"], 0)
+
+    def test_browser_cors_failure_falls_back_to_server(self) -> None:
+        model = {
+            "id": 1, "name": "browser-fallback", "provider": "openai",
+            "base_url": "https://maas.example.com/v1", "api_key": "secret-key",
+            "model": "demo-model", "max_tokens": 512, "temperature": 0.2,
+            "timeout_sec": 30, "transport": "browser", "extra": {},
+            "allow_private": False, "private_allowlist": "", "_relay_max_bytes": 4096,
+        }
+
+        class CorsBlockedRelay:
+            @staticmethod
+            def submit(*_args, **_kwargs):
+                raise RelayExecError("浏览器执行失败（network）")
+
+        with mock.patch("bbu.ai._post_json") as post:
+            post.return_value = (
+                {"choices": [{"message": {"content": "OK"}}], "usage": {}}, 200)
+            text, _usage, streamed = _call_openai(
+                model, "system", "user", None, 32, 0.0,
+                relay=CorsBlockedRelay(), user_id=1, purpose="test")
+        self.assertEqual(text, "OK")
+        self.assertFalse(streamed)
+        self.assertEqual(model["_transport_used"], "server")
+        post.assert_called_once()
+
+    def test_browser_cors_failure_can_disable_server_fallback(self) -> None:
+        model = {
+            "id": 1, "name": "browser-only", "provider": "openai",
+            "base_url": "https://maas.example.com/v1", "api_key": "secret-key",
+            "model": "demo-model", "max_tokens": 512, "temperature": 0.2,
+            "timeout_sec": 30, "transport": "browser",
+            "extra": {"transport": "browser", "browser_relay": {"server_fallback": False}},
+            "allow_private": False, "private_allowlist": "", "_relay_max_bytes": 4096,
+        }
+
+        class CorsBlockedRelay:
+            @staticmethod
+            def submit(*_args, **_kwargs):
+                raise RelayExecError("浏览器执行失败（network）")
+
+        with mock.patch("bbu.ai._post_json") as post:
+            with self.assertRaises(AIError) as ctx:
+                _call_openai(model, "system", "user", None, 32, 0.0,
+                             relay=CorsBlockedRelay(), user_id=1, purpose="test")
+        self.assertEqual(ctx.exception.kind, "relay_exec_failed")
+        post.assert_not_called()
 
     def test_offline_submit_raises_absent(self) -> None:
         with self.assertRaises(RelayAbsentError):

@@ -629,7 +629,7 @@ class AIGateway:
             "error": str(item.get("error") or ""),
             "endpoint_host": host,
             "endpoint_path": path[:300],
-            "transport": str(model.get("transport") or "server"),
+            "transport": str(model.get("_transport_used") or model.get("transport") or "server"),
         }
         try:
             self.on_usage(event)
@@ -1411,6 +1411,19 @@ def browser_relay_config(model: dict[str, Any]) -> dict[str, Any]:
     return dict(cfg or {})
 
 
+def browser_relay_server_fallback(model: dict[str, Any]) -> bool:
+    """浏览器 fetch 被 CORS/代理阻断时，是否允许用同一配置由 Python 直连。
+
+    默认开启：浏览器代理是“优先走浏览器”，不是排他的执行位置。现场服务端
+    无法直连、只有浏览器能通时，可在模型配置里关闭；成功路径不会先走服务端，
+    因此默认开启不改变正常的浏览器代理时延。
+    """
+    value = browser_relay_config(model).get("server_fallback", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(value)
+
+
 def browser_relay_timeouts(model: dict[str, Any]) -> tuple[int, int]:
     """返回 (认领超时, 执行超时)，按计划约束夹到 5–60 / 30–120。"""
     cfg = browser_relay_config(model)
@@ -1442,10 +1455,16 @@ def build_browser_relay_spec(model: dict[str, Any], url: str, payload: dict[str,
 def _post_relay_json(relay: Any, user_id: int, model: dict[str, Any], url: str,
                      payload: dict[str, Any], headers: dict[str, str],
                      purpose: str) -> tuple[dict[str, Any], int]:
-    """把服务端已经构造好的 JSON 请求交给浏览器执行并解析原始响应。"""
+    """把服务端已经构造好的 JSON 请求交给浏览器执行并解析原始响应。
+
+    浏览器 fetch 受同源策略约束：目标网关没有放行平台 Origin 时，请求会在
+    浏览器内直接失败。此时若现场的服务端 Python 可以直连同一地址，就对同一
+    请求做一次服务端回退；这是浏览器代理的降级路径，不改变正常成功路径。
+    """
     if relay is None:
         raise AIError("浏览器代理未初始化", kind="relay_absent", retryable=False,
                       circuit_break=False)
+    model["_transport_used"] = "browser"
     spec = build_browser_relay_spec(
         model, url, payload, headers,
         max_bytes=int(model.get("_relay_max_bytes") or 1048576))
@@ -1453,13 +1472,33 @@ def _post_relay_json(relay: Any, user_id: int, model: dict[str, Any], url: str,
     try:
         result = relay.submit(user_id, model, spec, purpose=purpose,
                               claim_timeout=claim_timeout, exec_timeout=exec_timeout)
-    except RelayAbsentError as exc:
-        raise AIError(str(exc), kind="relay_absent", retryable=False,
-                      circuit_break=False) from exc
     except RelayExecError as exc:
+        # network 是 CORS/混合内容/代理/DNS 这类“请求未发出或未完成”的失败；
+        # timeout/abort 可能已在网关侧产生推理，盲目回退会重复计费，只按原
+        # 重试规则处理。
+        failure = str(exc).lower()
+        if browser_relay_server_fallback(model) and "timeout" not in failure and "abort" not in failure:
+            model["_transport_used"] = "server"
+            try:
+                return _post_json(
+                    url, payload, headers, int(model.get("timeout_sec") or 180),
+                    allow_private=bool(model.get("allow_private", False)),
+                    private_allowlist=model.get("private_allowlist") or (),
+                    max_bytes=int(model.get("_relay_max_bytes") or 1048576))
+            except AIError as server_exc:
+                raise AIError(
+                    f"浏览器代理失败（{exc}）；服务端直连回退也失败：{server_exc}",
+                    http_status=int(getattr(server_exc, "http_status", 0) or 0),
+                    response_body=str(getattr(server_exc, "response_body", "") or ""),
+                    retryable=bool(getattr(server_exc, "retryable", True)),
+                    circuit_break=bool(getattr(server_exc, "circuit_break", True)),
+                    kind="relay_server_fallback_failed") from server_exc
         raise AIError(str(exc), kind="relay_exec_failed",
                       http_status=int(getattr(exc, "http_status", 0) or 0),
                       retryable=False, circuit_break=False) from exc
+    except RelayAbsentError as exc:
+        raise AIError(str(exc), kind="relay_absent", retryable=False,
+                      circuit_break=False) from exc
     except RelayError as exc:
         raise AIError(str(exc), kind=getattr(exc, "kind", "relay_absent"),
                       http_status=int(getattr(exc, "http_status", 0) or 0),

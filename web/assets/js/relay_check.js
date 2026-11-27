@@ -295,9 +295,10 @@ async function runChecks() {
       const pna = isPrivateHost(state.target.host) && pageIsHttps &&
         !isPrivateHost(location.hostname);
       addRow('现场判断', 'warn',
-        pna ? '目标是私网地址且页面在公网/安全上下文：除 CORS 外还可能触发 Private Network Access 预检；网关需返回 Access-Control-Allow-Private-Network。'
-            : '网络层可达但浏览器读不到响应；请让网关放行平台 Origin，并允许 Authorization / api-key / x-api-key 等预检头。', 'cors-diagnosis');
-      setSummary('warn', 'CORS 拒绝', '网络/代理可达，但浏览器拒绝了跨域请求或预检。需要网关配置 CORS（包括 OPTIONS 预检和所需认证头），这不是网络故障。');
+        (pna ? '目标是私网地址且页面在公网/安全上下文：除 CORS 外还可能触发 Private Network Access 预检；网关需返回 Access-Control-Allow-Private-Network。'
+             : '网络层可达但浏览器读不到响应；请让网关放行平台 Origin，并允许 Authorization / api-key / x-api-key 等预检头。')
+        + ' 若平台服务端的 Python 可以直连该网关，无需浏览器代理，直接在模型配置改回“服务端执行”即可；启用回退时平台也会在浏览器失败后自动改走 Python。', 'cors-diagnosis');
+      setSummary('warn', 'CORS 拒绝', '网络/代理可达，但浏览器拒绝了跨域请求或预检。需要网关配置 CORS（包括 OPTIONS 预检和所需认证头），这不是网络故障。若 Python 可直连，改用服务端执行即可绕过这一限制。');
       return;
     }
 

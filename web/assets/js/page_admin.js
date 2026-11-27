@@ -33,14 +33,14 @@ export async function renderModels() {
         <td><div style="font-weight:600">${esc(m.name)}</div><div class="mono tiny muted">${esc(m.base_url || '—')}</div></td>
         <td>${esc(providerName(m.provider))}<div class="mono tiny">${esc(m.model)}</div></td>
         <td>${m.transport === 'browser'
-          ? '<span class="badge info"><i class="dot"></i>浏览器代理</span>'
+          ? `<span class="badge info"><i class="dot"></i>浏览器代理${m.extra?.browser_relay?.server_fallback === false ? '' : ' / 可回退'}</span>`
           : '<span class="badge muted"><i class="dot"></i>服务端</span>'}</td>
         <td>${(m.roles || []).map((r) => `<span class="role-tag">${esc(ROLE_LABELS[r] || r)}</span>`).join('') || '—'}</td>
         <td>${m.priority}</td>
         <td class="mono tiny">${esc(m.api_key_masked || '—')}</td>
         <td><button class="switch ${m.enabled ? 'on' : ''}" data-act="toggle" data-id="${m.id}" aria-label="启用/停用"></button></td>
         <td><div class="inline" style="gap:4px">
-          <button class="btn btn-sm" data-act="test" data-id="${m.id}">${m.transport === 'browser' ? '浏览器内自检' : '测试'}</button>
+          <button class="btn btn-sm" data-act="test" data-id="${m.id}">${m.transport === 'browser' ? '链路自检' : '测试'}</button>
           <button class="btn btn-sm" data-act="edit" data-id="${m.id}">编辑</button>
           <button class="btn btn-sm btn-danger" data-act="delete" data-id="${m.id}">删除</button>
         </div></td></tr>`).join('')}</tbody></table>`
@@ -97,9 +97,10 @@ async function runRelayTest(model, button) {
       const test = await api(`/api/models/${model.id}/relay-test/${encodeURIComponent(testId)}`);
       if (test.state === 'pending') continue;
       if (test.state === 'done' && test.ok) {
-        toast(`浏览器内自检成功：${test.reply || 'OK'} · ${test.latency_ms ?? '—'} ms`, 'ok');
+        const route = test.transport === 'server' ? '服务端直连成功（浏览器代理已回退）' : '浏览器代理自检成功';
+        toast(`${route}：${test.reply || 'OK'} · ${test.latency_ms ?? '—'} ms`, test.fallback ? 'warn' : 'ok');
       } else {
-        toast(`浏览器内自检失败：${test.error || test.code || '未返回有效响应'}`, 'error', 8000);
+        toast(`链路自检失败：${test.error || test.code || '未返回有效响应'}`, 'error', 10000);
       }
       return;
     }
@@ -153,6 +154,7 @@ function openModelModal(model, onDone) {
   const browserRelay = model?.browser_relay || initialExtra.browser_relay || {};
   const isBrowser = (model?.transport || initialExtra.transport || 'server') === 'browser';
   const browserRoles = Array.isArray(browserRelay.allow_roles) ? browserRelay.allow_roles : [];
+  const browserFallback = browserRelay.server_fallback !== false;
 
   const m = modal({
     title: model ? '编辑模型配置' : '添加模型配置',
@@ -178,8 +180,8 @@ function openModelModal(model, onDone) {
       </div>
       <div class="form-row">
         <label class="check" style="font-weight:600"><input type="checkbox" id="browser-transport" ${isBrowser ? 'checked' : ''}>
-          浏览器代理执行 <span class="hint">请求由当前打开的浏览器发起，服务端只解析响应</span></label>
-        <div class="help">适用于平台服务器无法直连模型网关、但浏览器可经系统代理访问的现场。Base URL 必须是浏览器视角可达地址；Key 只在执行瞬间下发到浏览器内存，不进入 URL、日志或轨迹。</div>
+          浏览器代理执行 <span class="hint">优先由当前浏览器发起；失败时可回退 Python 直连</span></label>
+        <div class="help">适用于平台服务器无法直连模型网关、但浏览器可经系统代理访问的现场。Base URL 必须是浏览器视角可达地址；Key 只在执行瞬间下发到浏览器内存，不进入 URL、日志或轨迹。若浏览器被 CORS 拦截、而 Python 可直连，可开启下方回退。</div>
       </div>
       <div class="card" id="browser-relay-box" style="box-shadow:none;border-color:#c7d2fe;margin-bottom:14px;${isBrowser ? '' : 'display:none'}">
         <div class="card-body">
@@ -187,6 +189,10 @@ function openModelModal(model, onDone) {
             <div class="form-row"><label class="label">单窗口并发</label><input class="input" type="number" id="browser-max-concurrent" min="1" max="4" value="${Number(browserRelay.max_concurrent) || 2}"><div class="help">1–4，默认 2</div></div>
             <div class="form-row"><label class="label">认领超时（秒）</label><input class="input" type="number" id="browser-claim-timeout" min="5" max="60" value="${Number(browserRelay.claim_timeout_sec) || 10}"><div class="help">5–60，默认 10</div></div>
             <div class="form-row"><label class="label">执行超时（秒）</label><input class="input" type="number" id="browser-exec-timeout" min="30" max="120" value="${Number(browserRelay.exec_timeout_sec) || 90}"><div class="help">30–120，默认 90</div></div>
+          </div>
+          <div class="form-row" style="margin-bottom:0"><label class="check" style="font-weight:600"><input type="checkbox" id="browser-server-fallback" ${browserFallback ? 'checked' : ''}>
+            浏览器执行失败时自动回退服务端直连</label>
+            <div class="help">默认开启。浏览器 fetch 受同源策略限制，目标网关未放行 CORS 时会失败；此时用同一 Base URL / Key 由 Python 直连。服务端没有出网能力时请关闭。</div>
           </div>
           <div class="form-row" style="margin-bottom:0"><label class="label">允许执行的用户角色</label>
             <div class="inline" style="gap:14px;flex-wrap:wrap">
@@ -397,6 +403,7 @@ function openModelModal(model, onDone) {
         claim_timeout_sec: claimTimeout,
         exec_timeout_sec: execTimeout,
         allow_roles: [...form.querySelectorAll('[data-browser-role]:checked')].map((el) => el.dataset.browserRole),
+        server_fallback: m.body.querySelector('#browser-server-fallback').checked,
       };
     }
     if (!out.api_key) delete out.api_key;
@@ -460,7 +467,7 @@ function openModelModal(model, onDone) {
       let payload;
       try { payload = collect(); } catch (err) { toast(err.message, 'error'); return; }
       if (payload.extra?.transport === 'browser') {
-        toast('浏览器代理模型请先保存，再点击列表中的“浏览器内自检”', 'warn');
+        toast('浏览器代理模型请先保存，再点击列表中的“链路自检”', 'warn');
         return;
       }
       if (model) payload.model_id = model.id;

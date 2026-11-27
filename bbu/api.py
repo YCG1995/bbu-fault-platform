@@ -37,6 +37,7 @@ from .ai import (
     AIError,
     _anthropic_url,
     _openai_url,
+    browser_relay_server_fallback,
     browser_relay_timeouts,
     browser_models_spec,
     browser_test_spec,
@@ -54,6 +55,7 @@ from .relay import (
     RelayCrossUserError,
     RelayDisabledError,
     RelayError,
+    RelayExecError,
     RelayHub,
     RelayNotFoundError,
     RelayOversizeError,
@@ -3243,6 +3245,7 @@ def _model_public(app: App, row: dict[str, Any], *, reveal: bool = True) -> dict
             "claim_timeout_sec": int(relay_cfg.get("claim_timeout_sec") or 10),
             "exec_timeout_sec": int(relay_cfg.get("exec_timeout_sec") or 90),
             "allow_roles": relay_cfg.get("allow_roles") or [],
+            "server_fallback": relay_cfg.get("server_fallback", True) is not False,
         }
         public["auto_reply"] = extra.get("auto_reply")
     return public
@@ -3324,11 +3327,16 @@ def _validate_model(app: App, data: dict[str, Any], existing: dict[str, Any] | N
         bad_roles = [x for x in allow_roles if x not in ROLES]
         if bad_roles:
             raise HTTPError(400, f"browser_relay.allow_roles 含未知角色: {', '.join(bad_roles)}")
+        server_fallback = relay_cfg.get("server_fallback", True)
+        if isinstance(server_fallback, str):
+            server_fallback = server_fallback.strip().lower() not in (
+                "0", "false", "no", "off", "")
         relay_cfg = {
             "max_concurrent": max_concurrent,
             "claim_timeout_sec": claim_timeout,
             "exec_timeout_sec": exec_timeout,
             "allow_roles": allow_roles,
+            "server_fallback": bool(server_fallback),
         }
         extra["browser_relay"] = relay_cfg
     extra["transport"] = transport
@@ -3578,6 +3586,37 @@ def _run_relay_test(app: App, test_id: str, user: dict[str, Any],
             except json.JSONDecodeError:
                 info.update({"ok": False, "error": "响应不是合法 JSON"})
         result = info
+    except RelayExecError as exc:
+        failure = str(exc).lower()
+        if (browser_relay_server_fallback(model) and "timeout" not in failure
+                and "abort" not in failure):
+            # 浏览器 fetch 被 CORS/代理阻断时，实测 Python 直连能给现场一条
+            # 可执行的结论，而不是只报“浏览器内自检失败”。
+            server_model = dict(model)
+            server_model["transport"] = "server"
+            previous = app.gateway.set_user(user["id"])
+            try:
+                server_test = app.gateway.test_model(server_model)
+            finally:
+                app.gateway.set_user(previous)
+            if server_test.get("ok"):
+                result = {
+                    "state": "done", "ok": True, "transport": "server",
+                    "fallback": True, "browser_error": str(exc)[:300],
+                    "http_status": 200, "latency_ms": int(server_test.get("latency_ms") or 0),
+                    "reply": server_test.get("reply") or "",
+                    "usage": server_test.get("usage") or 0,
+                }
+            else:
+                result = {
+                    "state": "failed", "ok": False, "transport": "server",
+                    "fallback": True, "browser_error": str(exc)[:300],
+                    "error": f"浏览器代理失败：{str(exc)[:240]}；服务端直连失败："
+                             f"{str(server_test.get('error') or '未知错误')[:300]}",
+                }
+        else:
+            result = {"state": "failed", "ok": False, "error": str(exc)[:500],
+                      "code": exc.code, "error_kind": exc.kind}
     except RelayError as exc:
         result = {"state": "failed", "ok": False, "error": str(exc)[:500],
                   "code": exc.code, "error_kind": exc.kind}
@@ -3594,6 +3633,8 @@ def _run_relay_test(app: App, test_id: str, user: dict[str, Any],
     try:
         app.db.audit(user["id"], user["username"], "model.relay_test", test_id,
                      {"model_id": model.get("id"), "ok": result.get("ok"),
+                      "transport": result.get("transport") or "browser",
+                      "fallback": bool(result.get("fallback")),
                       "http_status": result.get("http_status"),
                       "bytes": result.get("bytes")}, "")
     except Exception:
@@ -3715,6 +3756,7 @@ def h_model_discover(app: App, req):
         "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
         "private_allowlist": app.config.get("model_private_allowlist", ""),
     }
+    browser_fallback_error = ""
     if model["transport"] == "browser":
         if provider not in ("openai", "anthropic"):
             raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
@@ -3724,21 +3766,29 @@ def h_model_discover(app: App, req):
         try:
             result = app.relay.submit(user["id"], model, browser_models_spec(model),
                                       purpose="model.discover")
+        except RelayExecError as exc:
+            if not browser_relay_server_fallback(model):
+                raise HTTPError(503, str(exc)[:600], {"code": exc.code}) from exc
+            # 与推理一致：浏览器 CORS/代理阻断时，浏览器发现的请求改由 Python
+            # 直连；模型配置本身不改，仍保持“浏览器优先”。
+            model["transport"] = "server"
+            browser_fallback_error = str(exc)[:300]
         except RelayError as exc:
             raise HTTPError(503 if exc.http_status in (0, 503) else exc.http_status,
                             str(exc)[:600], {"code": exc.code}) from exc
-        if not (200 <= int(result.status or 0) < 300):
-            raise HTTPError(502, f"获取模型列表失败: HTTP {result.status}")
-        try:
-            names = parse_model_names(json.loads(result.text), provider)
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise HTTPError(502, f"浏览器回传的模型列表无法解析: {str(exc)[:300]}") from exc
-        parsed = urlparse(base_url)
-        app.db.audit(user["id"], user["username"], "model.discover", "",
-                     {"provider": provider, "transport": "browser",
-                      "base_url_host": parsed.hostname or "",
-                      "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
-        return response_json({"models": names, "count": len(names)})
+        else:
+            if not (200 <= int(result.status or 0) < 300):
+                raise HTTPError(502, f"获取模型列表失败: HTTP {result.status}")
+            try:
+                names = parse_model_names(json.loads(result.text), provider)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HTTPError(502, f"浏览器回传的模型列表无法解析: {str(exc)[:300]}") from exc
+            parsed = urlparse(base_url)
+            app.db.audit(user["id"], user["username"], "model.discover", "",
+                         {"provider": provider, "transport": "browser",
+                          "base_url_host": parsed.hostname or "",
+                          "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
+            return response_json({"models": names, "count": len(names)})
     try:
         names = list_models(model, timeout=timeout_sec)
     except OutboundPolicyError as exc:
@@ -3761,13 +3811,16 @@ def h_model_discover(app: App, req):
     except ValueError as exc:
         raise HTTPError(400, f"获取模型列表失败: {str(exc)[:600]}") from exc
     parsed = urlparse(base_url)
-    app.db.audit(user["id"], user["username"], "model.discover", "",
-                 {"provider": provider, "base_url_host": parsed.hostname or "",
-                  "base_url_path": parsed.path[:300], "count": len(names),
-                  "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
-                  "private_allowlist_count": len([
-                      x for x in str(app.config.get("model_private_allowlist", "")).split(",")
-                      if x.strip()])}, req.ip)
+    audit = {"provider": provider, "base_url_host": parsed.hostname or "",
+             "base_url_path": parsed.path[:300], "count": len(names),
+             "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+             "private_allowlist_count": len([
+                 x for x in str(app.config.get("model_private_allowlist", "")).split(",")
+                 if x.strip()])}
+    if browser_fallback_error:
+        audit.update({"transport": "server", "browser_fallback": True,
+                      "browser_error": browser_fallback_error})
+    app.db.audit(user["id"], user["username"], "model.discover", "", audit, req.ip)
     return response_json({"models": names, "count": len(names)})
 
 def h_model_test_draft(app: App, req):

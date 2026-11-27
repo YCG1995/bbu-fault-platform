@@ -95,7 +95,7 @@ def main() -> int:
             page.goto(f"http://{host}:{port}/#/models", wait_until="domcontentloaded")
             page.wait_for_selector("text=UI 浏览器代理", timeout=15000)
             body = page.locator("body").inner_text()
-            for token in ("执行位置", "浏览器代理", "浏览器内自检"):
+            for token in ("执行位置", "浏览器代理", "链路自检", "可回退"):
                 if token not in body:
                     errors.append(f"模型列表缺少：{token}")
 
