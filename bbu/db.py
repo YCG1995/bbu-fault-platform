@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -666,7 +666,24 @@ CREATE TABLE IF NOT EXISTS skill_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_approvals ON skill_approvals(skill, version, decision);
 
--- 故障知识库（schema 24）。文档层负责来源/权限/版本，案例层是检索与引用单元。
+-- 故障知识库（schema 24；schema 26 增加逻辑多库）。
+CREATE TABLE IF NOT EXISTS kb_libraries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'fault',
+  description TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT 'all',
+  status TEXT NOT NULL DEFAULT 'active',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_libraries_one_default
+  ON kb_libraries(is_default) WHERE is_default=1 AND status='active';
+
 CREATE TABLE IF NOT EXISTS kb_documents (
   id TEXT PRIMARY KEY,
   kb_id INTEGER NOT NULL DEFAULT 1,
@@ -676,6 +693,7 @@ CREATE TABLE IF NOT EXISTS kb_documents (
   source_type TEXT NOT NULL DEFAULT 'paste',
   source_name TEXT NOT NULL DEFAULT '',
   source_sha256 TEXT NOT NULL DEFAULT '',
+  content_sha256 TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
   quality REAL NOT NULL DEFAULT 0,
   confidence REAL NOT NULL DEFAULT 0.9,
@@ -692,12 +710,14 @@ CREATE TABLE IF NOT EXISTS kb_documents (
   updated_at TEXT NOT NULL,
   deleted_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_kb_docs_kb_status ON kb_documents(kb_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_status ON kb_documents(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_hash ON kb_documents(source_sha256);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_title ON kb_documents(title_clean);
 
 CREATE TABLE IF NOT EXISTS kb_cases (
   id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
   doc_id TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL DEFAULT 1,
   is_derived INTEGER NOT NULL DEFAULT 0,
@@ -748,6 +768,7 @@ CREATE INDEX IF NOT EXISTS idx_kb_case_tags_value ON kb_case_tags(kind, value);
 
 CREATE TABLE IF NOT EXISTS kb_import_jobs (
   id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
   user_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
   mode TEXT NOT NULL DEFAULT 'direct',
@@ -755,6 +776,7 @@ CREATE TABLE IF NOT EXISTS kb_import_jobs (
   total_files INTEGER NOT NULL DEFAULT 0,
   done_files INTEGER NOT NULL DEFAULT 0,
   failed_files INTEGER NOT NULL DEFAULT 0,
+  rollback_supported INTEGER NOT NULL DEFAULT 1,
   stats_json TEXT NOT NULL DEFAULT '{}',
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -774,13 +796,17 @@ CREATE TABLE IF NOT EXISTS kb_import_files (
   error TEXT NOT NULL DEFAULT '',
   doc_id TEXT NOT NULL DEFAULT '',
   draft_id TEXT NOT NULL DEFAULT '',
+  doc_ids_json TEXT NOT NULL DEFAULT '[]',
+  draft_ids_json TEXT NOT NULL DEFAULT '[]',
   confidence REAL NOT NULL DEFAULT 0,
   stored_path TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_kb_import_files_job ON kb_import_files(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_kb_import_files_sha ON kb_import_files(sha256, status);
 
 CREATE TABLE IF NOT EXISTS kb_drafts (
   id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
   job_id TEXT NOT NULL DEFAULT '',
   user_id INTEGER NOT NULL,
   title TEXT NOT NULL DEFAULT '',
@@ -791,6 +817,8 @@ CREATE TABLE IF NOT EXISTS kb_drafts (
   reviewed_by INTEGER,
   reviewed_at TEXT,
   doc_id TEXT NOT NULL DEFAULT '',
+  source_sha256 TEXT NOT NULL DEFAULT '',
+  content_sha256 TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_drafts_status ON kb_drafts(status, created_at DESC);
@@ -808,6 +836,8 @@ CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_doc_versions(doc_id, ve
 
 CREATE TABLE IF NOT EXISTS kb_query_logs (
   id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
+  kb_ids_json TEXT NOT NULL DEFAULT '[]',
   user_id INTEGER NOT NULL,
   query TEXT NOT NULL DEFAULT '',
   filters_json TEXT NOT NULL DEFAULT '{}',
@@ -844,8 +874,23 @@ CREATE TABLE IF NOT EXISTS kb_index_meta (
   error TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS kb_library_index_meta (
+  kb_id INTEGER PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 0,
+  doc_count INTEGER NOT NULL DEFAULT 0,
+  case_count INTEGER NOT NULL DEFAULT 0,
+  terms INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  build_ms INTEGER NOT NULL DEFAULT 0,
+  built_at TEXT NOT NULL DEFAULT '',
+  checksum TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'empty',
+  error TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS kb_terms (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kb_id INTEGER NOT NULL DEFAULT 1,
   kind TEXT NOT NULL DEFAULT 'synonym',
   term TEXT NOT NULL DEFAULT '',
   aliases_json TEXT NOT NULL DEFAULT '[]',
@@ -894,6 +939,7 @@ END;
 
 CREATE TABLE IF NOT EXISTS kb_reviews (
   id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
   target_type TEXT NOT NULL,
   target_id TEXT NOT NULL,
   stage TEXT NOT NULL DEFAULT 'import',
@@ -901,6 +947,8 @@ CREATE TABLE IF NOT EXISTS kb_reviews (
   prompt_version TEXT NOT NULL DEFAULT '',
   content_hash TEXT NOT NULL DEFAULT '',
   decision TEXT NOT NULL DEFAULT '',
+  model_decision TEXT NOT NULL DEFAULT '',
+  model_score REAL NOT NULL DEFAULT 0,
   score REAL NOT NULL DEFAULT 0,
   dimensions_json TEXT NOT NULL DEFAULT '[]',
   issues_json TEXT NOT NULL DEFAULT '[]',
@@ -1159,6 +1207,69 @@ class Database:
             ):
                 if name not in kb_case_cols:
                     conn.execute(ddl)
+            # schema 26：逻辑多库、导入批次关联、内容去重、审核原始结论。
+            conn.execute(
+                "INSERT OR IGNORE INTO kb_libraries(id,name,slug,kind,description,visibility,status,is_default,created_at,updated_at) "
+                "VALUES(1,'故障知识库','fault','fault','默认故障案例库','all','active',1,?,?)",
+                (utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),) * 2)
+            for table, columns in (
+                ("kb_documents", (
+                    ("content_sha256", "ALTER TABLE kb_documents ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''"),
+                )),
+                ("kb_cases", (
+                    ("kb_id", "ALTER TABLE kb_cases ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                )),
+                ("kb_import_jobs", (
+                    ("kb_id", "ALTER TABLE kb_import_jobs ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                    ("rollback_supported", "ALTER TABLE kb_import_jobs ADD COLUMN rollback_supported INTEGER NOT NULL DEFAULT 1"),
+                )),
+                ("kb_import_files", (
+                    ("doc_ids_json", "ALTER TABLE kb_import_files ADD COLUMN doc_ids_json TEXT NOT NULL DEFAULT '[]'"),
+                    ("draft_ids_json", "ALTER TABLE kb_import_files ADD COLUMN draft_ids_json TEXT NOT NULL DEFAULT '[]'"),
+                )),
+                ("kb_drafts", (
+                    ("kb_id", "ALTER TABLE kb_drafts ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                    ("source_sha256", "ALTER TABLE kb_drafts ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT ''"),
+                    ("content_sha256", "ALTER TABLE kb_drafts ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''"),
+                )),
+                ("kb_query_logs", (
+                    ("kb_id", "ALTER TABLE kb_query_logs ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                    ("kb_ids_json", "ALTER TABLE kb_query_logs ADD COLUMN kb_ids_json TEXT NOT NULL DEFAULT '[]'"),
+                )),
+                ("kb_reviews", (
+                    ("kb_id", "ALTER TABLE kb_reviews ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                    ("model_decision", "ALTER TABLE kb_reviews ADD COLUMN model_decision TEXT NOT NULL DEFAULT ''"),
+                    ("model_score", "ALTER TABLE kb_reviews ADD COLUMN model_score REAL NOT NULL DEFAULT 0"),
+                )),
+                ("kb_terms", (
+                    ("kb_id", "ALTER TABLE kb_terms ADD COLUMN kb_id INTEGER NOT NULL DEFAULT 1"),
+                )),
+            ):
+                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                for name, ddl in columns:
+                    if name not in existing:
+                        conn.execute(ddl)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_docs_kb_status ON kb_documents(kb_id, status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_docs_content_hash ON kb_documents(content_sha256)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_cases_kb_status ON kb_cases(kb_id, status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_import_jobs_kb ON kb_import_jobs(kb_id, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_import_files_sha ON kb_import_files(sha256, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_drafts_kb ON kb_drafts(kb_id, status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_drafts_hash ON kb_drafts(content_sha256, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_query_logs_kb ON kb_query_logs(kb_id, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_reviews_kb ON kb_reviews(kb_id, status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_terms_kb ON kb_terms(kb_id, kind, term)")
+            # 已有单库数据全部归入库 1；历史导入任务没有可靠 doc/draft 关联，标记不可回退。
+            conn.execute("UPDATE kb_cases SET kb_id=1 WHERE kb_id IS NULL OR kb_id=0")
+            conn.execute("UPDATE kb_cases SET kb_id=COALESCE((SELECT kb_id FROM kb_documents d WHERE d.id=kb_cases.doc_id),1)")
+            conn.execute("UPDATE kb_drafts SET kb_id=1 WHERE kb_id IS NULL OR kb_id=0")
+            conn.execute("UPDATE kb_reviews SET kb_id=1 WHERE kb_id IS NULL OR kb_id=0")
+            conn.execute("UPDATE kb_query_logs SET kb_id=1 WHERE kb_id IS NULL OR kb_id=0")
+            conn.execute("UPDATE kb_query_logs SET kb_ids_json='[1]' WHERE kb_ids_json='' OR kb_ids_json='[]'")
+            conn.execute(
+                "UPDATE kb_import_jobs SET rollback_supported=0 "
+                "WHERE id IN (SELECT job_id FROM kb_import_files "
+                "WHERE doc_ids_json='[]' AND draft_ids_json='[]')")
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),))

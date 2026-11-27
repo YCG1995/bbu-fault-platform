@@ -212,8 +212,9 @@ class KBServiceTests(unittest.TestCase):
         except Exception:
             pass
 
-    def service(self, gateway=None) -> KBService:
-        return KBService(self.db, self.config, gateway=gateway, start_worker=False)
+    def service(self, gateway=None, traces=None) -> KBService:
+        return KBService(self.db, self.config, gateway=gateway, traces=traces,
+                         start_worker=False)
 
     def test_image_upload_stays_in_review_even_for_admin_direct(self) -> None:
         png = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
@@ -237,7 +238,7 @@ class KBServiceTests(unittest.TestCase):
             svc.shutdown()
 
     def test_schema_and_sample_import(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 25)
+        self.assertEqual(SCHEMA_VERSION, 26)
         for table in ("kb_documents", "kb_cases", "kb_import_jobs", "kb_drafts",
                       "kb_doc_versions", "kb_query_logs", "kb_feedback", "kb_index_meta"):
             row = self.db.one("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -398,6 +399,13 @@ class KBServiceTests(unittest.TestCase):
         finally:
             svc.shutdown()
 
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["问题", "答案"])
+        writer.writerow(["VBPE2 复位（工程师）", "【原因分析】逻辑异常\n【处理方案】升级逻辑"])
+        csv_path.write_text(buf.getvalue(), encoding="utf-8")
+        Upload.size = csv_path.stat().st_size
+
         svc2 = self.service()
         try:
             job = svc2.create_import_job(self.engineer, [Upload()], mode="direct")
@@ -414,6 +422,75 @@ class KBServiceTests(unittest.TestCase):
             self.assertEqual(svc2.status(self.admin)["documents"], before + 1)
         finally:
             svc2.shutdown()
+
+    def test_import_dedup_and_batch_rollback(self) -> None:
+        svc = self.service()
+        try:
+            import csv
+            csv_path = self.tmp / "dup.csv"
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["问题", "答案"])
+            writer.writerow(["去重测试案例", "【原因分析】去重测试根因\n【处理方案】去重测试方案"])
+            csv_path.write_text(buf.getvalue(), encoding="utf-8")
+            upload = SimpleNamespace(filename=csv_path.name, size=csv_path.stat().st_size,
+                                     path=str(csv_path))
+            job1 = svc.create_import_job(self.admin, [upload], mode="direct", kb_id=1)
+            svc._process_job(job1["id"])
+            self.assertEqual(svc.get_job(job1["id"])["stats"]["documents"], 1)
+            doc_id = svc.list_documents(status="active")["items"][0]["id"]
+            case_id = svc.get_document(doc_id, reveal=True)["cases"][0]["id"]
+            job2 = svc.create_import_job(self.admin, [upload], mode="direct", kb_id=1)
+            svc._process_job(job2["id"])
+            got = svc.get_job(job2["id"])
+            self.assertEqual(got["status"], "completed")
+            self.assertEqual(got["stats"]["documents"], 0)
+            self.assertGreaterEqual(got["stats"]["skipped_files"], 1)
+            # 回退必须停用本批文档而不是物理删除；修订链仍可读。
+            rollback = svc.rollback_jobs([job1["id"]], self.admin)
+            self.assertTrue(rollback["items"][0]["ok"])
+            self.assertEqual(svc.get_document(doc_id, reveal=True)["status"], "disabled")
+            self.assertGreaterEqual(svc.list_case_revisions(case_id, self.admin)["total"], 1)
+        finally:
+            svc.shutdown()
+
+    def test_library_isolation_cross_search_and_backup(self) -> None:
+        from bbu.kb_ingest import parse_paste
+        svc = self.service()
+        try:
+            lib = svc.create_library(self.admin, name="专家经验库", kind="expert")
+            expert_id = int(lib["library"]["id"])
+            doc = parse_paste("【原因分析】跨库检索专用根因\n【处理方案】跨库专用方案",
+                              title="跨库专用案例")[0]
+            payload = {"document": doc.public(), "cases": [c.public() for c in doc.cases]}
+            svc.save_document(payload, self.admin, kb_id=expert_id)
+            svc.rebuild_index()
+            single = svc.search("跨库检索专用", self.admin, kb_id=1, log=False)
+            self.assertFalse(any(int(x.get("kb_id") or 1) == expert_id
+                                 for x in single.get("items") or []))
+            cross = svc.search("跨库检索专用", self.admin, kb_ids=[1, expert_id], log=False)
+            self.assertTrue(any(int(x.get("kb_id") or 0) == expert_id
+                                for x in cross.get("items") or []))
+            filename, data = svc.backup_library(expert_id, self.admin)
+            self.assertTrue(filename.endswith(".kbbackup.zip"))
+            restored = svc.restore_library(self.admin, data, name="恢复专家库")
+            self.assertGreaterEqual(restored["documents"], 1)
+            self.assertEqual(svc.status(self.admin, kb_id=restored["kb_id"])["documents"], 1)
+            self.assertEqual(svc.status(self.admin, kb_id=expert_id)["documents"], 1)
+            self.assertEqual(svc.stats(self.admin, kb_id=1)["inventory"]["documents"], 0)
+            self.assertEqual(svc.stats(self.admin, kb_id=expert_id)["inventory"]["documents"], 1)
+            expert_doc = svc.list_documents(kb_id=expert_id, status="active")["items"][0]
+            case = svc.get_document(expert_doc["id"], reveal=True)["cases"][0]
+            svc.create_review(self.admin, target_type="case", target_id=case["id"],
+                              stage="manual", run=False)
+            scoped = svc.list_reviews(self.admin, kb_id=expert_id)
+            self.assertTrue(scoped["items"])
+            self.assertTrue(all(int(x["kb_id"]) == expert_id for x in scoped["items"]))
+            self.assertFalse(svc.list_reviews(self.admin, kb_id=1)["items"])
+            with self.assertRaises(Exception):
+                svc.archive_library(1, self.admin)
+        finally:
+            svc.shutdown()
 
     def test_revision_ledger_restore_and_append_only(self) -> None:
         svc = self.service()
@@ -527,6 +604,82 @@ class KBServiceTests(unittest.TestCase):
             self.assertEqual(svc.get_case(case["id"])["case"]["prevention"], "补充预防措施")
         finally:
             svc.shutdown()
+
+    def test_kb_traces_record_import_and_search(self) -> None:
+        from bbu.trace import TraceStore
+        store = TraceStore(self.db, self.config)
+        svc = self.service(traces=store)
+        try:
+            csv_path = self.tmp / "trace.csv"
+            csv_path.write_text('问题,答案\n"轨迹测试","【原因分析】轨迹专用原因\n【处理方案】轨迹专用方案"\n',
+                                encoding="utf-8")
+            upload = SimpleNamespace(filename=csv_path.name, size=csv_path.stat().st_size,
+                                     path=str(csv_path))
+            job = svc.create_import_job(self.admin, [upload], mode="direct", kb_id=1)
+            svc._process_job(job["id"])
+            runs = store.list(kind="kb", ref_id=job["id"])
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], "success")
+            events = store.events(runs[0]["id"])["items"]
+            self.assertTrue(any(e.get("type") == "import_result" for e in events))
+            result = svc.search("轨迹专用", self.admin, kb_id=1, log=True)
+            search_runs = store.list(kind="kb", ref_id=result["query_id"])
+            self.assertEqual(len(search_runs), 1)
+            search_events = store.events(search_runs[0]["id"])["items"]
+            retrieval = next(e for e in search_events if e.get("type") == "retrieval")
+            self.assertEqual(int(retrieval.get("latency_ms") or 0) >= 0, True)
+            self.assertIn("hits", retrieval)
+        finally:
+            svc.shutdown()
+
+    def test_review_role_fallback_and_numeric_override(self) -> None:
+        review_data = {
+            "decision": "pass", "score": 90,
+            "dimensions": [
+                {"key": "answer_match", "score": 25, "max": 25},
+                {"key": "cause_complete", "score": 18, "max": 20},
+                {"key": "solution_actionable", "score": 18, "max": 20},
+                {"key": "entity_consistency", "score": 14, "max": 15},
+                {"key": "source_fidelity", "score": 9, "max": 10},
+                {"key": "safety_privacy", "score": 10, "max": 10},
+            ],
+            "issues": [], "suggested_patch": {}, "confidence": 0.9,
+        }
+
+        class _FallbackGateway:
+            def __init__(self) -> None:
+                self.roles: list[str] = []
+
+            def has_real_model(self, role: str) -> bool:
+                return role == "default"
+
+            def choose(self, role: str, override_id: int | None = None):
+                return [{"provider": "openai"}]
+
+            def complete(self, role: str, *args, **kwargs) -> AIResult:
+                self.roles.append(role)
+                return AIResult(text=json.dumps(review_data), data=review_data,
+                                model_name="fallback-model")
+
+        fake = _FallbackGateway()
+        self.config.values["kb_review_role"] = "kb_reviewer"
+        svc = self.service(fake)
+        try:
+            self.assertEqual(svc.reviews.roles(), ["kb_reviewer", "assistant", "default"])
+            created = svc.create_paste(self.engineer, title="回退审核案例",
+                                       text="【原因分析】回退原因\n【处理方案】回退方案")
+            review = self.db.one(
+                "SELECT * FROM kb_reviews WHERE target_id=? ORDER BY created_at DESC",
+                (created["draft_id"],))
+            result = svc.run_review(review["id"], self.admin)
+            self.assertEqual(result["decision"], "pass")
+            self.assertEqual(fake.roles, ["default"])
+            self.config.values["kb_review_model"] = "9"
+            self.assertEqual(svc.reviews.model_override(), 9)
+            self.config.values.pop("kb_review_model", None)
+        finally:
+            svc.shutdown()
+
 
 
 if __name__ == "__main__":

@@ -223,6 +223,15 @@ EXPECTED_ROUTES = {
     "GET /api/kb/import/jobs",
     "GET /api/kb/import/jobs/{id}",
     "POST /api/kb/import/jobs/{id}/cancel",
+    "POST /api/kb/import/jobs/rollback",
+    "POST /api/kb/import/jobs/delete",
+    "POST /api/kb/import/jobs/retry",
+    "GET /api/kb/libraries",
+    "POST /api/kb/libraries",
+    "PUT /api/kb/libraries/{kb_id}",
+    "POST /api/kb/libraries/{kb_id}/archive",
+    "GET /api/kb/libraries/{kb_id}/backup",
+    "POST /api/kb/libraries/restore",
     "GET /api/kb/drafts",
     "GET /api/kb/drafts/{id}",
     "PUT /api/kb/drafts/{id}",
@@ -1706,7 +1715,33 @@ def main() -> int:
                           {"reason": "资料不足"})
         hit("POST /api/kb/drafts/{id}/reject")
 
-        # 导入任务 + 文件下载 + 取消
+        # 多知识库：建库、改名、备份、恢复、归档
+        _, libs = admin_client.json("GET", "/api/kb/libraries")
+        assert libs["items"]
+        hit("GET /api/kb/libraries")
+        _, created = admin_client.json("POST", "/api/kb/libraries", {
+            "name": "API 冒烟专家库", "kind": "expert", "description": "smoke",
+        }, expected=201)
+        created_kb = int(created["library"]["id"])
+        hit("POST /api/kb/libraries")
+        admin_client.json("PUT", f"/api/kb/libraries/{created_kb}",
+                          {"description": "smoke-updated"})
+        hit("PUT /api/kb/libraries/{kb_id}")
+        status, backup_bytes, _ = admin_client.request(
+            "GET", f"/api/kb/libraries/{created_kb}/backup")
+        assert status == 200 and backup_bytes[:2] == b"PK"
+        hit("GET /api/kb/libraries/{kb_id}/backup")
+        admin_client.multipart("/api/kb/libraries/restore", {"name": "API 冒烟恢复库"},
+                               [("file", "api-smoke.kbbackup.zip", backup_bytes,
+                                 "application/zip")], expected=201)
+        hit("POST /api/kb/libraries/restore")
+        restored = json.loads(admin_client.request(
+            "GET", "/api/kb/libraries")[1])["items"]
+        restored_kb = next(int(x["id"]) for x in restored if x["name"] == "API 冒烟恢复库")
+        admin_client.json("POST", f"/api/kb/libraries/{restored_kb}/archive", {})
+        hit("POST /api/kb/libraries/{kb_id}/archive")
+
+        # 导入任务 + 文件下载 + 取消 + 批量回退/重试/删除
         csv_bytes = ("问题,答案\n" + '"VBPE2 复位","【原因分析】逻辑异常' + '\n' +
                      '【处理方案】升级逻辑"\n').encode("utf-8")
         _, imported = admin_client.multipart(
@@ -1732,6 +1767,15 @@ def main() -> int:
         hit("GET /api/kb/files/{id}")
         admin_client.json("POST", f"/api/kb/import/jobs/{job_id}/cancel", {})
         hit("POST /api/kb/import/jobs/{id}/cancel")
+        admin_client.json("POST", "/api/kb/import/jobs/rollback",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/rollback")
+        admin_client.json("POST", "/api/kb/import/jobs/retry",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/retry")
+        admin_client.json("POST", "/api/kb/import/jobs/delete",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/delete")
 
         # 迁移：列表、预检、导出/详情/下载/删除，导入错误路径
         _, migrations = admin_client.json("GET", "/api/system/migrations")

@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 125,
-    "action_instances": 301,
-    "buttons_all": 267,
-    "buttons_page": 250,
+    "distinct_actions": 134,
+    "action_instances": 310,
+    "buttons_all": 276,
+    "buttons_page": 259,
     "modal_calls": 33,
     "forms": 21
   },
@@ -328,6 +328,20 @@
       ]
     },
     {
+      "action": "draft-bulk-approve",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "draft-bulk-reject",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "draft-reject",
       "instances": 1,
       "files": [
@@ -396,6 +410,48 @@
       "files": [
         "web/assets/js/page_kb.js",
         "web/assets/js/page_skills.js"
+      ]
+    },
+    {
+      "action": "job-delete",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "job-retry",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "job-rollback",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-archive",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-create",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-restore",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -683,6 +739,13 @@
     },
     {
       "action": "review-batch",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "review-bulk-approve",
       "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"

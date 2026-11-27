@@ -40,6 +40,7 @@ class IndexCase:
     status: str = "active"
     created_at: str = ""
     found_date: str = ""
+    kb_id: int = 0
     sections: list[dict[str, Any]] = field(default_factory=list)
 
     def fields(self) -> dict[str, str]:
@@ -66,7 +67,7 @@ class SearchHit:
     def public(self) -> dict[str, Any]:
         case = self.case
         return {
-            "case_id": case.id, "doc_id": case.doc_id,
+            "case_id": case.id, "doc_id": case.doc_id, "kb_id": case.kb_id,
             "title": case.title, "title_clean": case.title_clean,
             "board": case.boards[0] if case.boards else "",
             "boards": case.boards, "domains": case.domains, "versions": case.versions,

@@ -8,19 +8,8 @@ const STATUS_LABEL = { active: '生效', reviewing: '待审核', disabled: '已�
 const STATUS_BADGE = { active: 'ok', reviewing: 'warn', disabled: '', deleted: 'danger' };
 const JOB_LABEL = {
   queued: '排队中', processing: '解析中', completed: '已完成', partial: '部分完成',
-  failed: '失败', cancelled: '已取消', cancelling: '取消中',
+  failed: '失败', cancelled: '已取消', cancelling: '取消中', rolled_back: '已回退',
 };
-
-const KB_MAIN_TABS = [
-  ['ask', '故障问答', '#/kb'],
-  ['manage', '知识库管理', '#/kb/docs?tab=overview'],
-];
-
-function kbMainNav(active) {
-  return `<div class="kb-main-tabs" role="tablist">${KB_MAIN_TABS.map(([key, label, href]) =>
-    `<a class="kb-main-tab ${key === active ? 'active' : ''}" href="${href}" role="tab"
-      aria-selected="${key === active ? 'true' : 'false'}">${label}</a>`).join('')}</div>`;
-}
 
 const KB_PROGRESS_STEPS = {
   search: [['parse', '解析问题与过滤条件'], ['retrieve', '检索索引与候选案例'], ['rank', '融合排序并生成结果']],
@@ -182,8 +171,9 @@ function kbRecordFooter(data) {
     <a href="#/tasks?tab=kb">查看知识库操作 →</a></div>`;
 }
 
-async function loadFacets() {
-  try { return await api('/api/kb/facets'); } catch { return { boards: [], domains: [] }; }
+async function loadFacets(kbId = 1) {
+  try { return await api(`/api/kb/facets?kb=${encodeURIComponent(kbId)}`); }
+  catch { return { boards: [], domains: [] }; }
 }
 
 function boardOptions(facets) {
@@ -197,15 +187,17 @@ function domainOptions(facets) {
 }
 
 export async function renderKb() {
-  const view = mount('故障知识库', '先查现场历史案例；结论必须能回到具体文档和案例', '');
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const kbId = Math.max(1, Number(params.get('kb') || 1));
+  const view = mount('故障问答', '先查现场历史案例；结论必须能回到具体文档和案例', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   let status;
   let facets;
   let recent = [];
   try {
     const [statusResp, facetData, recentResp] = await Promise.all([
-      api('/api/kb/status'), loadFacets(),
-      api('/api/kb/docs?size=6&status=active').catch(() => ({ items: [] })),
+      api(`/api/kb/status?kb=${kbId}`), loadFacets(kbId),
+      api(`/api/kb/docs?size=6&status=active&kb=${kbId}`).catch(() => ({ items: [] })),
     ]);
     status = statusResp.status;
     facets = facetData;
@@ -219,8 +211,16 @@ export async function renderKb() {
     return;
   }
   const empty = Number(status.documents || 0) === 0;
+  const libraryOptions = (status.libraries || []).filter((x) => x.status === 'active')
+    .map((x) => `<option value="${esc(x.id)}" ${Number(x.id) === Number(status.kb_id || 1) ? 'selected' : ''}>${esc(x.name)} · ${x.documents || 0} 文档</option>`).join('')
+    || '<option value="1">故障知识库</option>';
   view.innerHTML = `
-    ${kbMainNav('ask')}
+    <div class="card"><div class="card-body inline" style="gap:12px;flex-wrap:wrap">
+      <label class="small" for="kb-library-select">知识库</label>
+      <select class="input" id="kb-library-select" style="max-width:260px">${libraryOptions}</select>
+      <label class="check"><input type="checkbox" id="kb-cross" ${params.get('cross') === '1' ? 'checked' : ''}> 跨库检索（融合排序）</label>
+      <span class="tiny muted">专家库、语料库与故障库逻辑隔离；跨库检索只合并结果，不合并数据。</span>
+    </div></div>
     <div class="grid grid-4 kb-stats">
       <div class="card stat"><div><div class="stat-val">${status.documents || 0}</div>
         <div class="stat-label">生效文档</div><div class="stat-note">${status.cases || 0} 个可引用案例</div></div></div>
@@ -273,9 +273,12 @@ export async function renderKb() {
     const query = view.querySelector('#kb-query').value.trim();
     if (!query) { toast('请先描述故障现象', 'error'); return; }
     if (running) { toast('当前检索仍在进行，请等待本次结果', 'warn'); return; }
+    const selectedKb = Number(view.querySelector('#kb-library-select')?.value || kbId);
+    const cross = !!view.querySelector('#kb-cross')?.checked;
     const filters = {};
     const board = view.querySelector('#kb-board').value;
     const domain = view.querySelector('#kb-domain').value;
+    const kbIds = cross ? [...view.querySelectorAll('#kb-library-select option')].map((x) => Number(x.value)).filter((x) => x > 0) : [selectedKb];
     if (board) filters.board = board;
     if (domain) filters.domain = domain;
     running = true;
@@ -283,8 +286,8 @@ export async function renderKb() {
     setBusy(button, true, '检索中…');
     try {
       const data = endpoint === 'chat'
-        ? await api('/api/kb/chat', { method: 'POST', body: { query, filters }, timeoutMs: 90000 })
-        : await api(`/api/kb/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}&domain=${encodeURIComponent(domain)}&limit=10`);
+        ? await api('/api/kb/chat', { method: 'POST', body: { query, filters, kb_id: selectedKb, kb_ids: kbIds }, timeoutMs: 90000 })
+        : await api(`/api/kb/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}&domain=${encodeURIComponent(domain)}&limit=10&kb_ids=${kbIds.join(',')}`);
       if (!view.isConnected) return;
       progress.finish();
       if (endpoint === 'search') {
@@ -312,6 +315,9 @@ export async function renderKb() {
     }
   };
 
+  view.querySelector('#kb-library-select')?.addEventListener('change', (e) => {
+    location.hash = `#/kb?kb=${encodeURIComponent(e.target.value)}`;
+  });
   bindActions(view, {
     ask: (el) => run('chat', el),
     search: (el) => run('search', el),
@@ -320,7 +326,7 @@ export async function renderKb() {
       if (!(await confirmDialog('载入 20 条脱敏示例案例？示例只用于演示检索，不代表现场结论。'))) return;
       setBusy(el, true, '载入中…');
       try {
-        const r = await api('/api/kb/sample', { method: 'POST', body: {} });
+        const r = await api('/api/kb/sample', { method: 'POST', body: { kb_id: kbId } });
         toast(`已载入 ${r.documents || 0} 个文档`, 'ok');
         renderKb();
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
@@ -332,8 +338,21 @@ export async function renderKb() {
 const KB_TABS = [
   ['overview', '概览'], ['stats', '统计'], ['docs', '文档'], ['import', '导入'],
   ['review', '审核'], ['audit', '变更与审计'], ['terms', '词典'],
-  ['eval', '评测'], ['settings', '设置'],
+  ['libraries', '知识库'], ['eval', '评测'], ['settings', '设置'],
 ];
+
+function kbLibraryBar(status, kbId = 1) {
+  const items = (status.libraries || []).filter((x) => x.status === 'active');
+  if (!items.length) return '';
+  return `<div class="card" style="margin-top:10px"><div class="card-body inline" style="gap:10px;flex-wrap:wrap">
+    <span class="small muted">当前知识库</span>
+    <select class="input" id="kb-library-switch" style="max-width:280px">
+      ${items.map((x) => `<option value="${esc(x.id)}" ${Number(x.id) === Number(kbId) ? 'selected' : ''}>${esc(x.name)} · ${x.documents || 0} 文档 / ${x.cases || 0} 案例</option>`).join('')}
+    </select>
+    <a class="btn btn-sm" href="#/kb/docs?tab=libraries">${icon('layers')} 管理知识库</a>
+    <span class="tiny muted">逻辑隔离；每库独立索引与导入任务。</span>
+  </div></div>`;
+}
 
 const REVIEW_STATUS = {
   queued: '排队中', running: '审核中', done: '已完成', manual: '转人工',
@@ -342,9 +361,10 @@ const REVIEW_STATUS = {
 const REVIEW_STATUS_BADGE = { queued: 'warn', running: 'warn', done: 'ok', manual: 'warn',
   failed: 'danger', decided: 'ok' };
 
-function kbTabNav(active) {
+function kbTabNav(active, kbId = 1) {
+  const suffix = Number(kbId) && Number(kbId) !== 1 ? `&kb=${Number(kbId)}` : '';
   return `<div class="kb-tabbar">${KB_TABS.map(([key, label]) =>
-    `<a class="kb-tab ${key === active ? 'active' : ''}" href="#/kb/docs?tab=${key}">${label}</a>`).join('')}</div>`;
+    `<a class="kb-tab ${key === active ? 'active' : ''}" href="#/kb/docs?tab=${key}${suffix}">${label}</a>`).join('')}</div>`;
 }
 
 function reviewBadge(status) {
@@ -475,6 +495,26 @@ async function openDraft(id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
+function selectedJobIds(view) {
+  return [...view.querySelectorAll('.kb-job-check:checked')].map((el) => el.value).filter(Boolean);
+}
+
+async function batchJobAction(view, el, path, confirmText, busyText) {
+  const ids = selectedJobIds(view);
+  if (!ids.length) { toast('请先勾选导入任务', 'error'); return; }
+  if (!(await confirmDialog(confirmText.replace('{n}', ids.length)))) return;
+  setBusy(el, true, busyText);
+  try {
+    const r = await api(path, { method: 'POST', body: { job_ids: ids } });
+    toast(`已处理 ${ids.length} 个任务`, 'ok');
+    if (r.items?.some((x) => !x.ok)) {
+      toast(r.items.filter((x) => !x.ok).map((x) => x.error).join('；'), 'error');
+    }
+    renderKbDocs();
+  } catch (err) { toast(err.message, 'error'); }
+  finally { setBusy(el, false); }
+}
+
 function bindKbTabActions(view) {
   bindActions(view, {
     'review-view': (el) => openReviewModal(el.dataset.id),
@@ -490,12 +530,91 @@ function bindKbTabActions(view) {
       const action = view.querySelector('#kb-audit-action')?.value.trim() || '';
       location.hash = `#/kb/docs?tab=audit&actor=${encodeURIComponent(actor)}&action=${encodeURIComponent(action)}`;
     },
+    'library-create': async (el) => {
+      const name = view.querySelector('#kb-lib-name')?.value.trim();
+      if (!name) { toast('请填写知识库名称', 'error'); return; }
+      setBusy(el, true, '创建中…');
+      try {
+        await api('/api/kb/libraries', { method: 'POST', body: {
+          name, kind: view.querySelector('#kb-lib-kind')?.value || 'fault',
+          description: view.querySelector('#kb-lib-desc')?.value.trim() || '',
+        } });
+        toast('已创建知识库', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'library-archive': async (el) => {
+      if (!(await confirmDialog('归档该知识库？归档后不再出现在问答库列表；数据保留，可由管理员离线清理。'))) return;
+      setBusy(el, true, '归档中…');
+      try {
+        await api(`/api/kb/libraries/${encodeURIComponent(el.dataset.id)}/archive`, { method: 'POST', body: {} });
+        toast('已归档', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'library-restore': async (el) => {
+      const file = view.querySelector('#kb-lib-file')?.files?.[0];
+      if (!file) { toast('请选择备份包', 'error'); return; }
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      const name = view.querySelector('#kb-lib-restore-name')?.value.trim() || '';
+      if (name) fd.append('name', name);
+      setBusy(el, true, '恢复中…');
+      try {
+        const r = await api('/api/kb/libraries/restore', { method: 'POST', body: fd, timeoutMs: 300000 });
+        toast(`已恢复到新库：${r.documents || 0} 个文档`, 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'job-rollback': (el) => batchJobAction(view, el, '/api/kb/import/jobs/rollback',
+      '回退所选 {n} 个导入任务？本批新增文档会被停用，未审草稿会退回；版本与修订链保留。', '回退中…'),
+    'job-retry': (el) => batchJobAction(view, el, '/api/kb/import/jobs/retry',
+      '重试所选 {n} 个任务中的失败文件？', '重试中…'),
+    'job-delete': (el) => batchJobAction(view, el, '/api/kb/import/jobs/delete',
+      '删除所选 {n} 个导入任务记录？已入库文档不会删除，仅删除任务和暂存文件。', '删除中…'),
     'draft-view': (el) => openDraft(el.dataset.id),
     'draft-approve': async (el) => {
       if (!(await confirmDialog('批准该草稿并立即进入检索？'))) return;
       setBusy(el, true, '批准中…');
       try { await api(`/api/kb/drafts/${encodeURIComponent(el.dataset.id)}/approve`, { method: 'POST', body: {} }); toast('已批准', 'ok'); renderKbDocs(); }
       catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'draft-bulk-approve': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-draft-check:checked')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选草稿', 'error'); return; }
+      if (!(await confirmDialog(`批量批准 ${ids.length} 个草稿并写入知识库？`))) return;
+      setBusy(el, true, '批量批准中…');
+      let ok = 0; let failed = 0;
+      for (const id of ids) {
+        try { await api(`/api/kb/drafts/${encodeURIComponent(id)}/approve`, { method: 'POST', body: {} }); ok += 1; }
+        catch { failed += 1; }
+      }
+      toast(`已批准 ${ok} 个${failed ? `，${failed} 个失败` : ''}`, failed ? 'error' : 'ok');
+      renderKbDocs();
+    },
+    'draft-bulk-reject': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-draft-check:checked')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选草稿', 'error'); return; }
+      const reason = prompt('批量退回原因（可留空）') ?? null;
+      if (reason === null) return;
+      setBusy(el, true, '批量退回中…');
+      let ok = 0; let failed = 0;
+      for (const id of ids) {
+        try { await api(`/api/kb/drafts/${encodeURIComponent(id)}/reject`, { method: 'POST', body: { reason } }); ok += 1; }
+        catch { failed += 1; }
+      }
+      toast(`已退回 ${ok} 个${failed ? `，${failed} 个失败` : ''}`, failed ? 'error' : 'ok');
+      renderKbDocs();
+    },
+    'review-bulk-approve': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      if (!(await confirmDialog(`批量通过 ${ids.length} 条审核？存在 blocker 的记录会被拒绝。`))) return;
+      setBusy(el, true, '批量通过中…');
+      let ok = 0; let failed = 0;
+      for (const id of ids) {
+        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`, { method: 'POST', body: { decision: 'approve', note: '批量通过' } }); ok += 1; }
+        catch { failed += 1; }
+      }
+      toast(`已通过 ${ok} 条${failed ? `，${failed} 条被拦截或失败` : ''}`, failed ? 'error' : 'ok');
+      renderKbDocs();
     },
     'draft-reject': async (el) => {
       const reason = prompt('退回原因（可留空）') ?? null;
@@ -525,7 +644,7 @@ function importJobProgress(job) {
     <div class="kb-progress-bar"><span style="width:${pct}%"></span></div>
     <div class="tiny muted" style="margin-top:6px">${esc(job.error || (status === 'processing' ? '正在解析文件并写入案例；页面会持续刷新进度。' : '等待后台任务开始…'))}</div>
     ${files.length ? `<div class="kb-job-files">${files.map((f) => `<div class="kb-job-file">
-      <span class="mono tiny">${esc(f.name || f.rel_path || '')}</span>${f.status === 'done' ? '<span class="badge ok">完成</span>' : f.status === 'failed' ? '<span class="badge danger">失败</span>' : '<span class="badge warn">处理中</span>'}
+      <span class="mono tiny">${esc(f.name || f.rel_path || '')}</span>${f.status === 'done' ? '<span class="badge ok">完成</span>' : f.status === 'skipped' ? '<span class="badge warn">跳过</span>' : f.status === 'failed' ? '<span class="badge danger">失败</span>' : '<span class="badge warn">处理中</span>'}
       ${f.error ? `<span class="tiny danger-text">${esc(f.error)}</span>` : ''}</div>`).join('')}</div>` : ''}
   </div>`;
 }
@@ -557,9 +676,9 @@ function pollImportJob(view, jobId) {
   state.cleanup = () => clearInterval(timer);
 }
 
-async function renderKbImport(view, header, status) {
+async function renderKbImport(view, header, status, kbId = 1) {
   let jobs = { items: [] };
-  try { jobs = await api('/api/kb/import/jobs'); } catch { /* optional */ }
+  try { jobs = await api(`/api/kb/import/jobs?kb=${kbId}`); } catch { /* optional */ }
   view.innerHTML = `${header}
     <div class="grid kb-admin-grid">
       <div class="card">
@@ -573,6 +692,9 @@ async function renderKbImport(view, header, status) {
             ${state.user?.role === 'admin' ? `<div class="form-row"><label>入库方式</label>
               <select class="input" name="mode"><option value="direct">直接生效（管理员）</option>
               <option value="review">先进入审核队列</option></select></div>` : `<input type="hidden" name="mode" value="review">`}
+            <div class="form-row"><label>目标知识库</label><select class="input" name="kb_id">
+              ${(status.libraries || []).filter((x) => x.status === 'active').map((x) => `<option value="${esc(x.id)}" ${Number(x.id) === Number(status.kb_id || 1) ? 'selected' : ''}>${esc(x.name)}</option>`).join('') || '<option value="1">故障知识库</option>'}
+            </select></div>
             <div class="inline"><button class="btn btn-primary" type="button" data-act="import">${icon('upload')} 开始导入</button>
               <button class="btn" type="button" data-act="sample" ${(status.documents || 0) ? 'disabled' : ''}>载入示例</button></div>
           </form>
@@ -580,13 +702,22 @@ async function renderKbImport(view, header, status) {
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><h2>最近导入任务</h2><span class="sub">点击任务查看文件状态</span></div>
+        <div class="card-head"><h2>最近导入任务</h2><span class="sub">勾选后可批量回退、重试或删除记录</span></div>
         <div class="card-body tight">
           ${(jobs.items || []).length ? `<div class="kb-job-list">${jobs.items.slice(0, 10).map((j) => `<div class="kb-job-row">
-            <span class="mono tiny">${esc(j.id)}</span>${jobBadge(j.status)}
+            <label class="check"><input type="checkbox" class="kb-job-check" value="${esc(j.id)}"></label>
+            <span style="font-weight:600">${esc(j.display_name || j.id)}</span>${jobBadge(j.status)}
             <span class="tiny muted">${j.done_files || 0}/${j.total_files || 0} 文件</span>
+            ${j.stats?.skipped ? `<span class="tiny muted">跳过 ${j.stats.skipped}</span>` : ''}
             <span class="tiny muted">${esc(j.created_at ? fmtDate(j.created_at) : '')}</span>
-          </div>`).join('')}</div>` : '<div class="empty small">还没有导入任务</div>'}
+            ${j.rollback_supported === false ? '<span class="badge warn">旧任务</span>' : ''}
+          </div>`).join('')}</div>
+          <div class="inline" style="margin-top:10px;flex-wrap:wrap">
+            <button class="btn btn-sm" data-act="job-rollback">${icon('history')} 回退所选</button>
+            <button class="btn btn-sm" data-act="job-retry">${icon('refresh')} 重试失败</button>
+            <button class="btn btn-sm btn-danger" data-act="job-delete">${icon('trash')} 删除记录</button>
+            <span class="tiny muted">回退会停用本批新增文档、退回未审草稿；版本与修订链保留。</span>
+          </div>` : '<div class="empty small">还没有导入任务</div>'}
         </div>
       </div>
     </div>
@@ -602,6 +733,7 @@ async function renderKbImport(view, header, status) {
       const fd = new FormData();
       for (const f of files) fd.append('files', f, f.name);
       fd.append('mode', form.querySelector('[name="mode"]')?.value || 'review');
+      fd.append('kb_id', form.querySelector('[name="kb_id"]')?.value || '1');
       setBusy(el, true, '上传中…');
       try {
         const r = await api('/api/kb/import', { method: 'POST', body: fd, timeoutMs: 600000 });
@@ -621,17 +753,23 @@ async function renderKbImport(view, header, status) {
   });
 }
 
-async function renderKbTab(tab, view, status, facets) {
+async function renderKbTab(tab, view, status, facets, kbId = 1) {
   const admin = state.user?.role === 'admin';
   bindKbTabActions(view);
-  const tabs = kbTabNav(tab);
-  const header = `${kbMainNav('manage')}${tabs}`;
+  view.addEventListener('change', (e) => {
+    if (e.target.id === 'kb-library-switch') {
+      location.hash = `#/kb/docs?tab=overview&kb=${encodeURIComponent(e.target.value)}`;
+    }
+  });
+  const tabs = kbTabNav(tab, kbId);
+  const kbSuffix = Number(kbId) && Number(kbId) !== 1 ? `&kb=${Number(kbId)}` : '';
+  const header = `${tabs}${kbLibraryBar(status, kbId)}`;
   if (!admin) {
     view.innerHTML = `${header}<div class="alert warn">${icon('alert')}<div>仅管理员可进入知识库管理。</div></div>`;
     return;
   }
   if (tab === 'import') {
-    await renderKbImport(view, header, status);
+    await renderKbImport(view, header, status, kbId);
     return;
   }
   const statsDays = Math.max(1, Math.min(365, Number(
@@ -641,18 +779,55 @@ async function renderKbTab(tab, view, status, facets) {
     try { stats = await api(`/api/kb/stats?days=${statsDays}`); }
     catch (err) { view.innerHTML = `${header}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
   }
+  if (tab === 'libraries') {
+    let libraries = { items: [] };
+    try { libraries = await api('/api/kb/libraries?include_archived=1'); }
+    catch (err) { view.innerHTML = `${header}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
+    const kindLabel = { fault: '故障库', expert: '专家库', corpus: '语料库' };
+    view.innerHTML = `${header}
+      <div class="grid grid-2">
+        <div class="card"><div class="card-head"><h2>知识库列表</h2><span class="sub">故障库 / 专家库 / 语料库同构；默认库不可归档</span></div>
+          <div class="card-body tight"><div class="kb-job-list">
+            ${(libraries.items || []).map((x) => `<div class="kb-job-row" style="flex-wrap:wrap">
+              <span style="font-weight:600">${esc(x.name)}</span>
+              <span class="badge ${x.status === 'active' ? 'ok' : 'warn'}">${x.status === 'active' ? '生效' : '已归档'}</span>
+              <span class="badge info">${esc(kindLabel[x.kind] || x.kind)}</span>
+              <span class="tiny muted">${x.documents || 0} 文档 / ${x.cases || 0} 案例</span>
+              ${x.is_default ? '<span class="badge">默认</span>' : ''}
+              <span style="margin-left:auto" class="inline">
+                <a class="btn btn-sm" href="/api/kb/libraries/${encodeURIComponent(x.id)}/backup">${icon('download')} 备份</a>
+                ${x.status === 'active' && !x.is_default ? `<button class="btn btn-sm btn-danger" data-act="library-archive" data-id="${esc(x.id)}">归档</button>` : ''}
+              </span>
+              ${x.description ? `<div class="tiny muted" style="flex-basis:100%">${esc(x.description)}</div>` : ''}
+            </div>`).join('') || '<div class="empty small">还没有知识库</div>'}
+          </div></div></div>
+        <div class="card"><div class="card-head"><h2>新建 / 恢复</h2><span class="sub">备份格式 *.kbbackup.zip，含文档与案例 JSONL</span></div>
+          <div class="card-body">
+            <div class="form-row"><label>名称</label><input class="input" id="kb-lib-name" maxlength="80" placeholder="例如：专家经验库"></div>
+            <div class="form-row"><label>类型</label><select class="input" id="kb-lib-kind">
+              <option value="fault">故障库</option><option value="expert">专家库</option><option value="corpus">语料库</option></select></div>
+            <div class="form-row"><label>说明</label><input class="input" id="kb-lib-desc" maxlength="500" placeholder="可选"></div>
+            <button class="btn btn-primary" data-act="library-create">${icon('plus')} 创建知识库</button>
+            <hr style="margin:16px 0;border:0;border-top:1px solid var(--line)">
+            <div class="form-row"><label>从备份恢复</label><input class="input" id="kb-lib-file" type="file" accept=".zip,.kbbackup.zip">
+              <input class="input" id="kb-lib-restore-name" placeholder="恢复后的名称（可选）" style="margin-top:6px"></div>
+            <button class="btn" data-act="library-restore">${icon('upload')} 上传并恢复</button>
+          </div></div>
+      </div>`;
+    return;
+  }
   if (tab === 'overview') {
     let reviews = { items: [] };
     let jobs = { items: [] };
-    try { reviews = await api('/api/kb/reviews?status=pending&limit=6'); } catch { /* optional */ }
-    try { jobs = await api('/api/kb/import/jobs'); } catch { /* optional */ }
+    try { reviews = await api(`/api/kb/reviews?status=pending&limit=6&kb=${kbId}`); } catch { /* optional */ }
+    try { jobs = await api(`/api/kb/import/jobs?kb=${kbId}`); } catch { /* optional */ }
     const attention = [];
     if (reviews.items?.length) attention.push(`<div class="kb-attention"><strong>${reviews.items.length} 条审核待处理</strong>
-      <a href="#/kb/docs?tab=review">去审核</a></div>`);
+      <a href="#/kb/docs?tab=review${kbSuffix}">去审核</a></div>`);
     if (Number(stats.review?.pending || 0)) attention.push(`<div class="kb-attention"><strong>${stats.review.pending} 条 AI/人工审核未完成</strong>
-      <a href="#/kb/docs?tab=review">查看</a></div>`);
+      <a href="#/kb/docs?tab=review${kbSuffix}">查看</a></div>`);
     if (Number(stats.inventory?.drafts || 0)) attention.push(`<div class="kb-attention"><strong>${stats.inventory.drafts} 个草稿待入库</strong>
-      <a href="#/kb/docs?tab=review">处理</a></div>`);
+      <a href="#/kb/docs?tab=review${kbSuffix}">处理</a></div>`);
     if (!attention.length) attention.push(`<div class="kb-attention ok">当前没有待处理事项</div>`);
     view.innerHTML = `${header}
       <div class="grid grid-4 kb-stats">
@@ -663,9 +838,9 @@ async function renderKbTab(tab, view, status, facets) {
       </div>
       <div class="grid grid-2" style="margin-top:14px">
         <div class="card"><div class="card-head"><h2>需要关注</h2></div><div class="card-body">${attention.join('')}</div></div>
-        <div class="card"><div class="card-head"><h2>最近导入</h2><a class="tiny" href="#/kb/docs?tab=import" style="margin-left:auto">全部</a></div>
+        <div class="card"><div class="card-head"><h2>最近导入</h2><a class="tiny" href="#/kb/docs?tab=import${kbSuffix}" style="margin-left:auto">全部</a></div>
           <div class="card-body tight">${(jobs.items || []).slice(0, 5).map((j) => `<div class="kb-job-row">
-            <span class="mono tiny">${esc(j.id)}</span>${jobBadge(j.status)}<span class="tiny muted">${j.done_files || 0}/${j.total_files || 0} 文件</span></div>`).join('') || emptyState('inbox', '还没有导入', '导入 CSV/文档或载入示例。')}</div></div>
+            <span>${esc(j.display_name || j.id)}</span>${jobBadge(j.status)}<span class="tiny muted">${j.done_files || 0}/${j.total_files || 0} 文件</span></div>`).join('') || emptyState('inbox', '还没有导入', '导入 CSV/文档或载入示例。')}</div></div>
       </div>
       <div class="grid grid-2" style="margin-top:14px">
         <div class="card"><div class="card-head"><h2>索引状态</h2></div><div class="card-body small">
@@ -673,9 +848,9 @@ async function renderKbTab(tab, view, status, facets) {
           <div class="k">文档 / 案例</div><div class="v">${stats.index.documents} / ${stats.index.cases}</div>
           <div class="k">词项 / 体积</div><div class="v">${stats.index.terms} / ${Math.round((stats.index.bytes || 0) / 1024)} KB</div>
           <div class="k">最近构建</div><div class="v tiny">${esc(stats.index.built_at || '—')} · ${stats.index.build_ms} ms</div></div></div></div>
-        <div class="card"><div class="card-head"><h2>最近变更</h2><a class="tiny" href="#/kb/docs?tab=audit" style="margin-left:auto">审计</a></div>
+        <div class="card"><div class="card-head"><h2>最近变更</h2><a class="tiny" href="#/kb/docs?tab=audit${kbSuffix}" style="margin-left:auto">审计</a></div>
           <div class="card-body tight">${stats.changes.top_cases.slice(0, 6).map((x) => `<div class="kb-job-row">
-            <span class="mono tiny">${esc(x.case_id)}</span><span class="tiny muted">${x.revisions} 次修订</span></div>`).join('') || '<div class="empty small">暂无修订</div>'}</div></div>
+            <span>${esc(x.title || x.case_id)}</span><span class="tiny muted">${x.revisions} 次修订</span></div>`).join('') || '<div class="empty small">暂无修订</div>'}</div></div>
       </div>`;
     return;
   }
@@ -683,7 +858,7 @@ async function renderKbTab(tab, view, status, facets) {
     view.innerHTML = `${header}
       <div class="inline" style="margin-bottom:10px"><span class="tiny muted">统计范围：最近 ${stats.days} 天；库存与索引为当前真值</span>
         <span class="kb-range">${[7, 30, 90].map((d) => `<a class="btn btn-sm ${stats.days === d ? 'btn-primary' : ''}"
-          href="#/kb/docs?tab=stats&days=${d}">${d} 天</a>`).join('')}</span>
+          href="#/kb/docs?tab=stats&days=${d}${kbSuffix}">${d} 天</a>`).join('')}</span>
         <a class="btn btn-sm" href="/api/kb/stats?format=csv&days=${stats.days}" style="margin-left:auto">${icon('download')} 导出 CSV</a></div>
       <div class="grid grid-4 kb-stats">
         <div class="card stat"><div><div class="stat-val">${stats.inventory.active_documents}</div><div class="stat-label">生效文档</div><div class="stat-note">${stats.inventory.active_cases} 案例 · ${stats.inventory.drafts} 待审草稿</div></div></div>
@@ -717,29 +892,56 @@ async function renderKbTab(tab, view, status, facets) {
     return;
   }
   if (tab === 'review') {
+    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    const activeView = params.get('view') === 'reviews' ? 'reviews' : 'drafts';
     let drafts = { items: [] };
     let reviews = { items: [] };
-    try { drafts = await api('/api/kb/drafts'); } catch { /* optional */ }
-    try { reviews = await api('/api/kb/reviews?status=pending&limit=100'); } catch { /* optional */ }
+    try { drafts = await api(`/api/kb/drafts?kb=${kbId}`); } catch { /* optional */ }
+    try { reviews = await api(`/api/kb/reviews?status=pending&limit=100&kb=${kbId}`); } catch { /* optional */ }
+    const reviewTabs = [
+      ['drafts', `待入库草稿 ${drafts.items?.length || 0}`],
+      ['reviews', `AI / 人工审核 ${reviews.items?.length || 0}`],
+    ];
+    const panels = {
+      drafts: `${(drafts.items || []).length ? `<table class="data responsive"><thead><tr>
+        <th><input type="checkbox" id="kb-draft-all" aria-label="全选草稿"></th><th>标题</th><th>案例</th><th>操作</th></tr></thead><tbody>
+        ${drafts.items.map((d) => `<tr><td data-label="选择"><input type="checkbox" class="kb-draft-check" value="${esc(d.id)}"></td>
+        <td data-label="标题"><strong>${esc(d.title)}</strong><div class="tiny muted">${esc((d.warnings || []).join('；') || '无警告')}</div></td>
+        <td data-label="案例">${d.case_count || 0}</td>
+        <td data-label="操作"><button class="btn btn-sm" data-act="draft-view" data-id="${esc(d.id)}">查看</button>
+        <button class="btn btn-sm btn-primary" data-act="draft-approve" data-id="${esc(d.id)}">批准</button>
+        <button class="btn btn-sm btn-danger" data-act="draft-reject" data-id="${esc(d.id)}">退回</button></td></tr>`).join('')}
+        </tbody></table>` : emptyState('check', '没有待审草稿', '工程师导入的文档会先进入这里。')}
+        <div class="inline" style="margin-top:10px"><button class="btn btn-sm btn-primary" data-act="draft-bulk-approve">批量批准</button>
+        <button class="btn btn-sm btn-danger" data-act="draft-bulk-reject">批量退回</button>
+        <span class="tiny muted">勾选后批量处理；每条仍会走 blocker 检查与修订链。</span></div>`,
+      reviews: `${(reviews.items || []).length ? `<table class="data responsive"><thead><tr>
+        <th><input type="checkbox" id="kb-review-all" aria-label="全选审核"></th><th>对象</th><th>结论</th><th>状态</th><th>操作</th></tr></thead><tbody>
+        ${reviews.items.map((r) => `<tr><td data-label="选择"><input type="checkbox" class="kb-review-check" value="${esc(r.id)}" ${r.status === 'decided' ? 'disabled' : ''}></td>
+        <td data-label="对象"><strong>${esc(r.target_title || r.target_id)}</strong><div class="tiny muted">${esc(r.target_type)} · ${esc(r.target_id)}</div></td>
+        <td data-label="结论">${r.decision ? `<span class="badge ${r.decision === 'pass' ? 'ok' : r.decision === 'reject' ? 'danger' : 'warn'}">${esc(r.decision)}</span> <span class="tiny">${r.score ? Math.round(r.score) + ' 分' : ''}</span>` : '—'}</td>
+        <td data-label="状态">${reviewBadge(r.status)}</td>
+        <td data-label="操作"><button class="btn btn-sm" data-act="review-view" data-id="${esc(r.id)}">详情</button>
+        ${r.status !== 'decided' ? `<button class="btn btn-sm" data-act="review-decision" data-id="${esc(r.id)}">终审</button>` : ''}</td></tr>`).join('')}
+        </tbody></table>` : emptyState('check', '没有待处理审核', '导入或编辑后会生成审核记录。')}
+        <div class="inline" style="margin-top:10px"><button class="btn btn-sm btn-primary" data-act="review-bulk-approve">批量通过</button>
+        <button class="btn btn-sm" data-act="review-batch">${icon('refresh')} 处理排队中的 AI 预审</button>
+        <span class="tiny muted">批量通过仍会拒绝 blocker；需要逐条备注时点“终审”。</span></div>`,
+    };
     view.innerHTML = `${header}
-      <div class="grid grid-2">
-        <div class="card"><div class="card-head"><h2>待入库草稿（${drafts.items?.length || 0}）</h2><span class="sub">人工确认字段与原文</span></div>
-          <div class="card-body tight table-wrap">${(drafts.items || []).length ? `<table class="data responsive"><thead><tr><th>标题</th><th>案例</th><th>操作</th></tr></thead><tbody>
-            ${drafts.items.map((d) => `<tr><td data-label="标题"><strong>${esc(d.title)}</strong><div class="tiny muted">${esc((d.warnings || []).join('；') || '无警告')}</div></td>
-            <td data-label="案例">${d.case_count || 0}</td>
-            <td data-label="操作"><button class="btn btn-sm" data-act="draft-view" data-id="${esc(d.id)}">查看</button>
-            <button class="btn btn-sm btn-primary" data-act="draft-approve" data-id="${esc(d.id)}">批准</button>
-            <button class="btn btn-sm btn-danger" data-act="draft-reject" data-id="${esc(d.id)}">退回</button></td></tr>`).join('')}</tbody></table>` : emptyState('check', '没有待审草稿', '工程师导入的文档会先进入这里。')}</div></div>
-        <div class="card"><div class="card-head"><h2>AI / 人工审核（${reviews.items?.length || 0}）</h2><span class="sub">默认只预审，人工终审后才发布</span></div>
-          <div class="card-body tight table-wrap">${(reviews.items || []).length ? `<table class="data responsive"><thead><tr><th>对象</th><th>结论</th><th>状态</th><th>操作</th></tr></thead><tbody>
-            ${reviews.items.map((r) => `<tr><td data-label="对象"><strong>${esc(r.target_title || r.target_id)}</strong><div class="tiny muted">${esc(r.target_type)} · ${esc(r.target_id)}</div></td>
-            <td data-label="结论">${r.decision ? `<span class="badge ${r.decision === 'pass' ? 'ok' : r.decision === 'reject' ? 'danger' : 'warn'}">${esc(r.decision)}</span> <span class="tiny">${r.score ? Math.round(r.score) + ' 分' : ''}</span>` : '—'}</td>
-            <td data-label="状态">${reviewBadge(r.status)}</td>
-            <td data-label="操作"><button class="btn btn-sm" data-act="review-view" data-id="${esc(r.id)}">详情</button>
-            ${r.status !== 'decided' ? `<button class="btn btn-sm" data-act="review-decision" data-id="${esc(r.id)}">终审</button>` : ''}</td></tr>`).join('')}</tbody></table>` : emptyState('check', '没有待处理审核', '导入或编辑后会生成审核记录。')}</div></div>
-      </div>
-      <div class="card" style="margin-top:14px"><div class="card-body inline"><span class="small muted">也可对存量案例发起单条审核：</span>
-        <button class="btn btn-sm" data-act="review-batch">${icon('refresh')} 处理排队中的审核</button></div></div>`;
+      <div class="card"><div class="card-head"><h2>审核队列</h2><span class="sub">草稿与 AI 预审分开展示；处理后再发布</span></div>
+        <div class="card-body">
+          <div class="kb-tabbar" role="tablist">${reviewTabs.map(([key, label]) =>
+            `<a class="kb-tab ${key === activeView ? 'active' : ''}" href="#/kb/docs?tab=review&view=${key}${kbSuffix}" role="tab">${label}</a>`).join('')}</div>
+          <div class="table-wrap" style="margin-top:10px">${panels[activeView]}</div>
+        </div></div>`;
+    const checks = view.querySelectorAll('.kb-draft-check,.kb-review-check');
+    view.querySelector('#kb-draft-all')?.addEventListener('change', (e) => {
+      view.querySelectorAll('.kb-draft-check').forEach((x) => { x.checked = e.target.checked; });
+    });
+    view.querySelector('#kb-review-all')?.addEventListener('change', (e) => {
+      view.querySelectorAll('.kb-review-check:not(:disabled)').forEach((x) => { x.checked = e.target.checked; });
+    });
     return;
   }
   if (tab === 'audit') {
@@ -747,11 +949,11 @@ async function renderKbTab(tab, view, status, facets) {
     const actor = params.get('actor') || '';
     const action = params.get('action') || '';
     let audit = { items: [] };
-    try { audit = await api(`/api/kb/audit?limit=100&actor=${encodeURIComponent(actor)}&action=${encodeURIComponent(action)}`); }
+    try { audit = await api(`/api/kb/audit?limit=100&actor=${encodeURIComponent(actor)}&action=${encodeURIComponent(action)}&kb=${kbId}`); }
     catch (err) { view.innerHTML = `${header}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
     view.innerHTML = `${header}
       <div class="card"><div class="card-head"><h2>变更与审计</h2><span class="sub">案例字段级 diff、文档操作与审核决策</span>
-        <a class="btn btn-sm" style="margin-left:auto" href="/api/kb/audit?format=csv&limit=500">${icon('download')} 导出 CSV</a></div>
+        <a class="btn btn-sm" style="margin-left:auto" href="/api/kb/audit?format=csv&limit=500&kb=${kbId}">${icon('download')} 导出 CSV</a></div>
         <div class="card-body">
           <div class="inline"><input class="input" id="kb-audit-actor" placeholder="操作人" value="${esc(actor)}" style="max-width:160px">
             <input class="input" id="kb-audit-action" placeholder="动作，如 case.update" value="${esc(action)}" style="max-width:220px">
@@ -759,7 +961,7 @@ async function renderKbTab(tab, view, status, facets) {
           <div class="table-wrap" style="margin-top:10px"><table class="data responsive"><thead><tr><th>时间</th><th>动作</th><th>对象</th><th>操作人</th><th>原因</th></tr></thead><tbody>
             ${(audit.items || []).map((x) => `<tr><td data-label="时间" class="tiny">${esc(x.created_at ? fmtDate(x.created_at) : '—')}</td>
               <td data-label="动作"><span class="mono tiny">${esc(x.action)}</span></td>
-              <td data-label="对象" class="mono tiny">${esc(x.target || '')}</td>
+              <td data-label="对象"><div>${esc(x.target_title || x.target || '')}</div><div class="tiny muted mono">${esc(x.target || '')}</div></td>
               <td data-label="操作人">${esc(x.actor || '—')}</td>
               <td data-label="原因" class="tiny">${esc(x.message || (Array.isArray(x.detail) ? x.detail.map((d) => d.field).join('、') : ''))}</td></tr>`).join('') || '<tr><td colspan="5" class="empty small">暂无审计记录</td></tr>'}
           </tbody></table></div>
@@ -806,12 +1008,14 @@ export async function renderKbDocs() {
   const docStatus = params.get('status') || 'all';
   const docQ = params.get('q') || '';
   const page = Math.max(1, Number(params.get('page') || 1));
+  const kbId = Math.max(1, Number(params.get('kb') || 1));
   const view = mount('知识库管理', '文档库、导入、审核、变更与审计；原始文本仅管理员可见', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   if (tab !== 'docs') {
     try {
-      const [statusResp, facets] = await Promise.all([api('/api/kb/status'), loadFacets()]);
-      await renderKbTab(tab, view, statusResp.status, facets);
+      const [statusResp, facets] = await Promise.all([
+        api(`/api/kb/status?kb=${kbId}`), loadFacets(kbId)]);
+      await renderKbTab(tab, view, statusResp.status, facets, kbId);
     } catch (err) {
       view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     }
@@ -821,8 +1025,8 @@ export async function renderKbDocs() {
   let docs;
   try {
     [status, docs] = await Promise.all([
-      api('/api/kb/status').then((r) => r.status),
-      api(`/api/kb/docs?size=50&page=${page}&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}`),
+      api(`/api/kb/status?kb=${kbId}`).then((r) => r.status),
+      api(`/api/kb/docs?size=50&page=${page}&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&kb=${kbId}`),
     ]);
   } catch (err) {
     view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
@@ -831,7 +1035,7 @@ export async function renderKbDocs() {
   const items = docs.items || [];
   const pages = Math.max(1, Math.ceil(Number(docs.total || items.length) / 50));
   view.innerHTML = `
-    ${kbMainNav('manage')}${kbTabNav('docs')}
+    ${kbTabNav('docs', kbId)}
     <div class="grid grid-4 kb-stats">
       <div class="card stat"><div><div class="stat-val">${status.documents || 0}</div>
         <div class="stat-label">生效文档</div><div class="stat-note">${status.cases || 0} 个案例</div></div></div>
@@ -863,7 +1067,7 @@ export async function renderKbDocs() {
             <td data-label="更新时间" class="tiny">${esc(d.updated_at ? fmtDate(d.updated_at) : '—')}</td>
           </tr>`).join('')}</tbody></table>`
           : emptyState('inbox', '暂无文档', '管理员可在“导入”标签导入 CSV/TXT/MD，或载入示例数据。',
-            admin ? '<a class="btn btn-sm" href="#/kb/docs?tab=import">去导入</a>' : '')}
+            admin ? `<a class="btn btn-sm" href="#/kb/docs?tab=import${kbParam}">去导入</a>` : '')}
       </div>
       ${pages > 1 ? `<div class="pager"><span class="small muted">第 ${page} / ${pages} 页</span>
         <button class="btn btn-sm" data-act="page-docs" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
@@ -873,14 +1077,15 @@ export async function renderKbDocs() {
       <strong>数据纪律：</strong>原始文本只对管理员开放；普通用户和模型证据只使用脱敏文本。删除是软删除，版本仍保留用于审计。
     </div></div>`;
 
+  const kbParam = Number(kbId) !== 1 ? `&kb=${Number(kbId)}` : '';
   const goDocs = (nextPage = page) => {
-    location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&page=${nextPage}`;
+    location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&page=${nextPage}${kbParam}`;
   };
   bindActions(view, {
     'filter-docs': () => {
       const statusVal = view.querySelector('#kb-doc-status').value;
       const q = view.querySelector('#kb-doc-q').value.trim();
-      location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(statusVal)}&q=${encodeURIComponent(q)}&page=1`;
+      location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(statusVal)}&q=${encodeURIComponent(q)}&page=1&kb=${Number(kbId)}`;
     },
     'page-docs': (el) => goDocs(Number(el.dataset.page || 1)),
   });

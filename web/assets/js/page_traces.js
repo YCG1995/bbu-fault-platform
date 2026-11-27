@@ -1,12 +1,12 @@
 // 管理员执行轨迹：诊断 / 技能工坊每一步操作、模型原文、工具输出与失败详情
 import { api, bindActions, esc, fmtDate, fmtDur, fmtSize, icon, mount, state, statusBadge, toast } from './core.js';
 
-const KIND_LABELS = { diagnosis: '故障诊断', workshop: '技能工坊' };
+const KIND_LABELS = { diagnosis: '故障诊断', workshop: '技能工坊', kb: '故障知识库' };
 const EVENT_LABELS = {
   run_start: '开始', stage: '阶段', step_start: '步骤开始', step_end: '步骤结束',
   model_request: '模型请求', model_response: '模型回复', model_error: '模型失败',
   tool_call: '工具调用', tool_result: '工具结果', validation: '校验', error: '错误',
-  run_end: '结束',
+  run_end: '结束', retrieval: '检索', import: '导入', import_result: '导入结果', review_result: '审核结果',
 };
 const STATUS_LABELS = {
   running: '运行中', success: '成功', failed: '失败', needs_data: '需补充数据',

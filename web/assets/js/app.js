@@ -24,7 +24,8 @@ const NAV = [
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
-  { href: '#/kb', label: '故障知识库', icon: 'search' },
+  { href: '#/kb', label: '故障问答', icon: 'search' },
+  { href: '#/kb/docs?tab=overview', label: '知识库管理', icon: 'layers', adminOnly: true },
 ];
 const ADMIN_NAV = [
   { href: '#/models', label: '模型接入', icon: 'cpu' },
@@ -121,7 +122,8 @@ function updateNav() {
   document.querySelectorAll('#nav a').forEach((a) => {
     const href = a.getAttribute('href');
     const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path))
-      || (href === '#/kb' && /^#\/kb(?:$|\/|\?)/.test(path));
+      || (href === '#/kb' && path === '#/kb')
+      || (href.startsWith('#/kb/docs') && path.startsWith('#/kb/docs'));
     a.classList.toggle('active', active);
   });
 }
@@ -134,7 +136,7 @@ function renderShell() {
   const baseNav = NAV;
   const nav = document.getElementById('nav');
   nav.innerHTML = `<div class="nav-section">${reviewer ? '诊断与复核' : '诊断'}</div>
-    ${baseNav.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}
+    ${baseNav.filter((n) => !n.adminOnly || admin).map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}
     ${admin ? `<div class="nav-section">管理</div>
     ${ADMIN_NAV.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}` : ''}`;
   const display = state.user?.display_name || state.user?.username || '用户';

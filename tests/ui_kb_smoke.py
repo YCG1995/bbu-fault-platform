@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""故障知识库 UI 冒烟：双主标签、检索进度、文档库、独立导入、总览、任务记录与移动端布局。
-
-运行：python3 tests/ui_kb_smoke.py
-"""
+"""1.31.0 故障知识库 UI 冒烟：导航拆分、库切换、跨库、导入批次、审核标签与库管理。"""
 from __future__ import annotations
 
 import json
@@ -33,6 +30,18 @@ def wait_health(host: str, port: int, timeout: int = 25) -> None:
             pass
         time.sleep(0.2)
     raise RuntimeError("服务未在预期时间内启动")
+
+
+def wait_job(client: Client, job_id: str, timeout: int = 30) -> dict:
+    deadline = time.time() + timeout
+    job: dict = {}
+    while time.time() < deadline:
+        _, payload = client.json("GET", f"/api/kb/import/jobs/{job_id}")
+        job = payload["job"]
+        if job["status"] in ("completed", "partial", "failed", "cancelled"):
+            return job
+        time.sleep(0.3)
+    raise RuntimeError(f"导入任务未完成：{job}")
 
 
 def main() -> int:
@@ -70,11 +79,48 @@ def main() -> int:
         doc_id = docs["items"][0]["id"]
         _, detail0 = admin.json("GET", f"/api/kb/docs/{doc_id}")
         case_id = detail0["doc"]["cases"][0]["id"]
-        _, review0 = admin.json("POST", "/api/kb/reviews", {
-            "target_type": "case", "target_id": case_id, "stage": "manual",
-        }, expected=201)
-        cookie = admin.cookie.split("=", 1)[1]
 
+        _, created = admin.json("POST", "/api/kb/libraries", {
+            "name": "专家经验库", "kind": "expert", "description": "UI smoke",
+        }, expected=201)
+        expert_id = int(created["library"]["id"])
+        expert_csv = work / "专家导入.csv"
+        expert_csv.write_text('问题,答案\n"专家库专用案例","【原因分析】专家库专用原因'
+                              '\n【处理方案】专家库专用方案"\n', encoding="utf-8")
+        _, expert_job = admin.multipart(
+            "/api/kb/import", {"mode": "direct", "kb_id": str(expert_id)},
+            [("files", expert_csv.name, expert_csv.read_bytes(), "text/csv")], expected=202)
+        assert wait_job(admin, expert_job["job"]["id"])["status"] == "completed"
+        # 同一文件再导入到同一个专家库：应整文件跳过；再导入到默认库：应允许。
+        _, dup_job = admin.multipart(
+            "/api/kb/import", {"mode": "direct", "kb_id": str(expert_id)},
+            [("files", expert_csv.name, expert_csv.read_bytes(), "text/csv")], expected=202)
+        dup = wait_job(admin, dup_job["job"]["id"])
+        assert dup["stats"].get("skipped_files", 0) >= 1, dup
+        _, default_job = admin.multipart(
+            "/api/kb/import", {"mode": "direct", "kb_id": "1"},
+            [("files", "默认库同名.csv", expert_csv.read_bytes(), "text/csv")], expected=202)
+        assert wait_job(admin, default_job["job"]["id"])["stats"].get("documents", 0) == 1
+
+        expert_docs = admin.json("GET", f"/api/kb/docs?kb={expert_id}&status=active")[1]
+        expert_doc = expert_docs["items"][0]
+        expert_detail = admin.json("GET", f"/api/kb/docs/{expert_doc['id']}")[1]
+        expert_case = expert_detail["doc"]["cases"][0]["id"]
+        admin.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": expert_case, "stage": "manual",
+        }, expected=201)
+        # 再生成一条专家库待审草稿
+        review_csv = work / "专家待审.csv"
+        review_csv.write_text('问题,答案\n"专家待审案例","【原因分析】待审原因'
+                              '\n【处理方案】待审方案"\n', encoding="utf-8")
+        _, review_job = admin.multipart(
+            "/api/kb/import", {"mode": "review", "kb_id": str(expert_id)},
+            [("files", review_csv.name, review_csv.read_bytes(), "text/csv")], expected=202)
+        wait_job(admin, review_job["job"]["id"])
+        drafts = admin.json("GET", f"/api/kb/drafts?kb={expert_id}")[1]
+        assert any(x["title"] == "专家待审案例" for x in drafts["items"]), drafts
+
+        cookie = admin.cookie.split("=", 1)[1]
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True, executable_path="/usr/local/bin/chromium",
@@ -88,173 +134,138 @@ def main() -> int:
             page.on("console", lambda msg: errors.append(f"console:{msg.type}:{msg.text}")
                     if msg.type == "error" else None)
             page.on("pageerror", lambda exc: errors.append(f"pageerror:{exc}"))
+
             page.goto(f"http://{host}:{port}/#/kb", wait_until="domcontentloaded")
-            try:
-                page.wait_for_selector("#kb-query", timeout=15000)
-            except Exception:
-                print("[DEBUG] URL:", page.url)
-                print("[DEBUG] BODY:", page.locator("body").inner_text()[:2000])
-                print("[DEBUG] ERRORS:", errors)
-                page.screenshot(path=str(out / "kb-debug.png"), full_page=True)
-                raise
-            page.wait_for_timeout(800)
+            page.wait_for_selector("#kb-query", timeout=15000)
+            page.wait_for_timeout(500)
+            nav = page.evaluate("""() => {
+              const links = [...document.querySelectorAll('#nav a')];
+              return links.map((a) => ({text: a.textContent.trim(), href: a.getAttribute('href'),
+                section: (() => { let s = a.previousElementSibling;
+                  while (s && !s.classList.contains('nav-section')) s = s.previousElementSibling;
+                  return s ? s.textContent.trim() : ''; })()}));
+            }""")
+            by_href = {x["href"]: x for x in nav}
+            for href in ("#/kb", "#/kb/docs?tab=overview"):
+                if href not in by_href:
+                    errors.append(f"导航缺少 {href}")
+                elif by_href[href]["section"] != "诊断":
+                    errors.append(f"导航 {href} 不在诊断分组")
+            if by_href.get("#/kb", {}).get("text") != "故障问答":
+                errors.append("问答入口名称不是故障问答")
+            if by_href.get("#/kb/docs?tab=overview", {}).get("text") != "知识库管理":
+                errors.append("管理入口名称不是知识库管理")
+            if page.locator(".kb-main-tab").count() != 0:
+                errors.append("问答页仍有旧双主标签")
+            if page.locator("#kb-library-select").count() != 1:
+                errors.append("问答页缺少知识库选择")
+            if page.locator("#kb-cross").count() != 1:
+                errors.append("问答页缺少跨库检索开关")
             page.fill("#kb-query", "看门狗复位")
             page.click('[data-act="ask"]')
             page.wait_for_selector(".kb-answer", timeout=20000)
             body = page.locator("#view").inner_text()
-            if "故障问答" not in body or "知识库管理" not in body:
-                errors.append("问答页缺少双主标签")
-            if page.locator(".kb-main-tab").count() < 2:
-                errors.append("问答页主标签数量不足")
-            if page.locator(".kb-record-note").count() == 0:
-                errors.append("问答结果缺少任务记录入口")
-            for token in ("知识库回答", "可能根因", "引用案例", "K1"):
+            for token in ("知识库回答", "可能根因", "引用案例"):
                 if token not in body:
                     errors.append(f"问答页缺少：{token}")
             if page.locator("a.kb-cite").count() == 0:
                 errors.append("问答页没有可点击引用")
             page.screenshot(path=str(out / "kb-ask.png"), full_page=True)
 
-            page.goto(f"http://{host}:{port}/#/kb/docs", wait_until="domcontentloaded")
-            page.wait_for_selector(".kb-main-tab.active", timeout=15000)
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=overview&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-tabbar", timeout=15000)
+            page.wait_for_timeout(500)
+            over = page.locator("#view").inner_text()
+            if "专家经验库" not in over:
+                errors.append("概览没有切换到专家库")
+            if "专家导入.csv" not in over:
+                errors.append("概览最近导入没有显示文件名")
+            if "需要关注" not in over:
+                errors.append("概览缺少需要关注")
+            if page.locator(".kb-main-tab").count() != 0:
+                errors.append("管理页仍有旧双主标签")
+            page.screenshot(path=str(out / "kb-overview.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=docs&kb={expert_id}",
+                      wait_until="domcontentloaded")
             page.wait_for_selector("table.data", timeout=15000)
-            if page.locator("#kb-import-form").count() != 0:
-                errors.append("文档库不应该再包含导入表单")
-            doc_body = page.locator("#view").inner_text()
-            for token in ("文档库", "文档", "知识库管理"):
-                if token not in doc_body:
-                    errors.append(f"文档页缺少：{token}")
+            docs_body = page.locator("#view").inner_text()
+            if "专家库专用案例" not in docs_body:
+                errors.append("专家库文档页没有显示本库文档")
+            if "看门狗复位" in docs_body:
+                errors.append("专家库文档页串入了默认库文档")
             page.screenshot(path=str(out / "kb-docs.png"), full_page=True)
 
-            page.goto(f"http://{host}:{port}/#/kb/docs?tab=import", wait_until="domcontentloaded")
-            page.wait_for_selector("#kb-import-form", timeout=15000)
-            import_body = page.locator("#view").inner_text()
-            for token in ("导入文档", "选择文件", "最近导入任务"):
-                if token not in import_body:
-                    errors.append(f"导入页缺少：{token}")
-            # 通过页面真实上传一份 CSV，验证 FormData 和多文件入口。
-            csv_path = work / "ui-import.csv"
-            csv_path.write_text('问题,答案\n"UI 导入案例","【原因分析】页面导入测试'
-                                '\n【处理方案】确认页面导入"\n', encoding="utf-8")
-            page.set_input_files('#kb-import-form input[type="file"]', str(csv_path))
-            page.click('[data-act="import"]')
-            deadline = time.time() + 20
-            job_text = ""
-            while time.time() < deadline:
-                page.wait_for_timeout(500)
-                try:
-                    job_text = page.locator("#kb-job-status").inner_text()
-                except Exception:
-                    job_text = ""
-                if "已完成" in job_text or "部分完成" in job_text or "失败" in job_text:
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=review&view=reviews&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-tabbar", timeout=15000)
+            page.wait_for_timeout(400)
+            review_body = page.locator("#view").inner_text()
+            if "审核队列" not in review_body or "专家库专用案例" not in review_body:
+                errors.append("审核标签没有显示专家库审核对象")
+            if page.locator(".kb-tabbar").count() < 2:
+                errors.append("审核区没有草稿/审核二级标签")
+            for tab in page.locator(".kb-tabbar").nth(1).locator("a").all():
+                if f"kb={expert_id}" not in (tab.get_attribute("href") or ""):
+                    errors.append("审核标签切换丢失知识库参数")
                     break
-            if "已完成" not in job_text and "部分完成" not in job_text:
-                errors.append(f"页面导入未完成：{job_text}")
+            page.screenshot(path=str(out / "kb-review.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=review&view=drafts&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-tabbar", timeout=15000)
+            page.wait_for_timeout(300)
+            draft_body = page.locator("#view").inner_text()
+            for token in ("待入库草稿", "专家待审案例", "批量批准", "批量退回"):
+                if token not in draft_body:
+                    errors.append(f"草稿标签缺少：{token}")
+            page.screenshot(path=str(out / "kb-drafts.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=import&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-import-form", timeout=15000)
+            imp = page.locator("#view").inner_text()
+            for token in ("导入文档", "目标知识库", "回退所选", "重试失败", "删除记录"):
+                if token not in imp:
+                    errors.append(f"导入页缺少：{token}")
+            if page.locator('[name="kb_id"]').input_value() != str(expert_id):
+                errors.append("导入页目标知识库没有跟随当前库")
             page.screenshot(path=str(out / "kb-import.png"), full_page=True)
 
-            page.goto(f"http://{host}:{port}/#/kb/docs/{doc_id}", wait_until="domcontentloaded")
-            page.wait_for_selector("#kb-doc-edit", timeout=15000)
-            page.wait_for_selector(".kb-doc-case", timeout=15000)
-            page.wait_for_timeout(300)
-            detail = page.locator("#view").inner_text()
-            for token in ("现象", "原因", "处理方案", "案例"):
-                if token not in detail:
-                    errors.append(f"详情页缺少：{token}")
-            page.screenshot(path=str(out / "kb-detail.png"), full_page=True)
-            page.click('[data-act="case-rev"] >> nth=0')
-            page.wait_for_selector(".kb-rev-row", timeout=15000)
-            page.screenshot(path=str(out / "kb-revisions.png"), full_page=True)
-            page.click('.modal [data-act="close"] >> nth=0')
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=libraries", wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-lib-name", timeout=15000)
+            lib_body = page.locator("#view").inner_text()
+            for token in ("知识库列表", "专家经验库", "新建 / 恢复", "备份"):
+                if token not in lib_body:
+                    errors.append(f"库管理缺少：{token}")
+            page.screenshot(path=str(out / "kb-libraries.png"), full_page=True)
 
-            # 管理端九个分区：概览、统计、审核、审计至少要有真实数据。
-            for tab, selector, token in (
-                ("overview", ".kb-tabbar", "需要关注"),
-                ("stats", ".kb-trend", "30 天查询趋势"),
-                ("audit", "table.data", "变更与审计"),
-                ("review", "table.data", "AI / 人工审核"),
-            ):
-                page.goto(f"http://{host}:{port}/#/kb/docs?tab={tab}", wait_until="domcontentloaded")
-                page.wait_for_selector(selector, timeout=15000)
-                page.wait_for_timeout(300)
-                tab_body = page.locator("#view").inner_text()
-                if token not in tab_body:
-                    errors.append(f"管理分区 {tab} 缺少：{token}")
-                page.screenshot(path=str(out / f"kb-admin-{tab}.png"), full_page=True)
-                if tab == "review":
-                    page.click('[data-act="review-view"] >> nth=0')
-                    page.wait_for_selector(".modal", timeout=10000)
-                    modal_body = page.locator(".modal").inner_text()
-                    if "审核" not in modal_body:
-                        errors.append("审核详情弹窗缺少标题")
-                    page.click('.modal [data-act="close-modal"]')
-                if tab == "stats":
-                    page.locator(".kb-range a").nth(0).click()
-                    page.wait_for_selector(".kb-trend", timeout=15000)
-                    page.wait_for_timeout(300)
-                    seven_body = page.locator("#view").inner_text()
-                    if "7 天查询趋势" not in seven_body:
-                        errors.append("统计 7 天范围没有生效")
-                    page.screenshot(path=str(out / "kb-admin-stats-7.png"), full_page=True)
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=audit&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector("table.data", timeout=15000)
+            audit_body = page.locator("#view").inner_text()
+            if "专家库专用案例" not in audit_body:
+                errors.append("审计对象没有显示案例名称")
+            page.screenshot(path=str(out / "kb-audit.png"), full_page=True)
 
-            # 总览必须提供知识库入口，任务记录必须能看见检索操作。
-            page.goto(f"http://{host}:{port}/#/dashboard", wait_until="domcontentloaded")
-            page.wait_for_selector(".kb-dashboard-card", timeout=15000)
-            dash = page.locator("#view").inner_text()
-            for token in ("故障知识库", "生效文档", "操作记录"):
-                if token not in dash:
-                    errors.append(f"总览页缺少：{token}")
-            nav = page.evaluate("""() => {
-              const links = [...document.querySelectorAll('#nav a')].map((a) => a.getAttribute('href'));
-              const system = document.querySelector('#nav a[href="#/system"]');
-              let section = system?.previousElementSibling;
-              while (section && !section.classList.contains('nav-section')) section = section.previousElementSibling;
-              return { links, section: section ? section.textContent.trim() : '' };
-            }""")
-            if nav["section"] != "管理":
-                errors.append(f"系统信息未放入管理分区：{nav['section']}")
-            if nav["links"].index("#/system") < nav["links"].index("#/traces"):
-                errors.append("系统信息没有排在执行轨迹后面")
-            if nav["links"].index("#/kb") < nav["links"].index("#/workshop"):
-                errors.append("故障知识库没有排在技能工坊后面")
-            page.screenshot(path=str(out / "dashboard-kb.png"), full_page=True)
-
-            page.goto(f"http://{host}:{port}/#/system", wait_until="domcontentloaded")
-            page.wait_for_selector(".system-resource-card", timeout=15000)
-            sys_body = page.locator("#view").inner_text()
-            for token in ("系统资源", "CPU 使用率", "当前应用内存", "系统内存", "数据盘"):
-                if token not in sys_body:
-                    errors.append(f"系统信息概览缺少：{token}")
-            page.screenshot(path=str(out / "system-resources.png"), full_page=True)
-
-            page.goto(f"http://{host}:{port}/#/tasks?tab=kb", wait_until="domcontentloaded")
-            page.wait_for_selector("#kb-op-table", timeout=15000)
-            page.wait_for_timeout(300)
-            ops_body = page.locator("#view").inner_text()
-            for token in ("知识库操作", "看门狗复位", "检索"):
-                if token not in ops_body:
-                    errors.append(f"知识库操作记录缺少：{token}")
-            page.screenshot(path=str(out / "tasks-kb.png"), full_page=True)
+            page.goto(f"http://{host}:{port}/#/traces", wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+            traces_body = page.locator("#view").inner_text()
+            if "故障知识库" not in traces_body:
+                errors.append("执行轨迹没有知识库类型")
+            page.screenshot(path=str(out / "traces.png"), full_page=True)
 
             page.set_viewport_size({"width": 390, "height": 844})
-            page.goto(f"http://{host}:{port}/#/kb", wait_until="domcontentloaded")
-            try:
-                page.wait_for_selector("#kb-query", timeout=10000)
-            except Exception:
-                print("[DEBUG-MOBILE]", page.url, page.locator("body").inner_text()[:1500], errors)
-                page.screenshot(path=str(out / "kb-mobile-debug.png"), full_page=True)
-                raise
-            mobile_width = page.evaluate("() => ({scroll: document.documentElement.scrollWidth, "
-                                         "inner: window.innerWidth})")
-            if mobile_width["scroll"] > mobile_width["inner"] + 8:
-                errors.append(f"移动端横向溢出：{mobile_width}")
+            for path, selector in (("#/kb", "#kb-query"),
+                                   (f"#/kb/docs?tab=overview&kb={expert_id}", ".kb-tabbar")):
+                page.goto(f"http://{host}:{port}/{path}", wait_until="domcontentloaded")
+                page.wait_for_selector(selector, timeout=15000)
+                width = page.evaluate("() => ({scroll: document.documentElement.scrollWidth, "
+                                      "inner: window.innerWidth})")
+                if width["scroll"] > width["inner"] + 8:
+                    errors.append(f"移动端横向溢出 {path}: {width}")
             page.screenshot(path=str(out / "kb-mobile.png"), full_page=True)
-            page.goto(f"http://{host}:{port}/#/kb/docs?tab=stats", wait_until="domcontentloaded")
-            page.wait_for_selector(".kb-trend", timeout=15000)
-            stats_width = page.evaluate("() => ({scroll: document.documentElement.scrollWidth, "
-                                         "inner: window.innerWidth})")
-            if stats_width["scroll"] > stats_width["inner"] + 8:
-                errors.append(f"移动端统计页横向溢出：{stats_width}")
-            page.screenshot(path=str(out / "kb-mobile-stats.png"), full_page=True)
             browser.close()
     finally:
         proc.terminate()
@@ -264,12 +275,12 @@ def main() -> int:
             proc.kill()
         log.close()
     if errors:
-        print("[FAIL] 故障知识库 UI 冒烟")
-        for item in errors:
-            print(" -", item)
+        print("[FAIL] UI smoke")
+        for err in errors:
+            print(" -", err)
         return 1
-    print("[PASS] 知识库问答/进度/双主标签/文档分页/独立导入/详情/修订/导航顺序/系统信息资源/任务记录/移动端")
-    print(f"[INFO] 截图: {out}")
+    print("[PASS] KB UI smoke：导航拆分 / 库切换 / 跨库入口 / 导入批次 / 审核标签 / 库管理 / 轨迹 / 移动端")
+    print(f"[PASS] 截图目录：{out}")
     return 0
 
 

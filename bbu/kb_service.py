@@ -9,12 +9,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import queue
+import re
 import shutil
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -85,6 +88,16 @@ def _kb_id(prefix: str) -> str:
     return new_id(prefix, with_time=False, entropy=8)
 
 
+def _payload_hashes(payload: dict[str, Any]) -> tuple[str, str]:
+    """Return (source_sha256, content_sha256) for dedup and audit."""
+    doc = payload.get("document") or {}
+    raw = str(doc.get("raw_text") or "")
+    source = str(doc.get("source_sha256") or "")
+    content = hashlib.sha256(
+        (str(doc.get("title") or "") + "\n" + raw).encode("utf-8")).hexdigest()
+    return source, content
+
+
 class KBError(Exception):
     def __init__(self, message: str, status: int = 400, code: str = "kb_error") -> None:
         super().__init__(message)
@@ -93,10 +106,12 @@ class KBError(Exception):
 
 
 class KBService:
-    def __init__(self, db, config, gateway=None, *, start_worker: bool = True) -> None:
+    def __init__(self, db, config, gateway=None, *, start_worker: bool = True,
+                 traces=None) -> None:
         self.db = db
         self.config = config
         self.gateway = gateway
+        self.traces = traces
         self.root = Path(config.data_dir) / "kb"
         self.files_dir = self.root / "files"
         self.staging_dir = self.root / "staging"
@@ -105,6 +120,7 @@ class KBService:
             path.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._index: KBIndex | None = None
+        self._indexes: dict[int, KBIndex] = {}
         self._dirty = True
         self._facets_cache: dict[str, Any] | None = None
         self._generation = 1
@@ -112,7 +128,7 @@ class KBService:
         self._rebuild_thread: threading.Thread | None = None
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._worker: threading.Thread | None = None
-        self.reviews = ReviewService(db, config, gateway=gateway)
+        self.reviews = ReviewService(db, config, gateway=gateway, traces=traces)
         self._review_queue: queue.Queue[str | None] = queue.Queue()
         self._review_worker: threading.Thread | None = None
         self.last_error = ""
@@ -185,25 +201,35 @@ class KBService:
                     return
             time.sleep(0.25)
 
-    def ensure_index(self) -> KBIndex:
+    def ensure_index(self, kb_id: int = 1) -> KBIndex:
+        kb_id = int(kb_id or 1)
         with self._lock:
-            if self._index is not None and not self._dirty:
-                return self._index
-            return self._build_index_locked()
+            cached = self._indexes.get(kb_id)
+            if cached is not None and not self._dirty:
+                return cached
+            return self._build_index_locked(kb_id)
 
-    def rebuild_index(self) -> dict[str, Any]:
+    def rebuild_index(self, kb_id: int | None = None) -> dict[str, Any]:
         with self._lock:
-            index = self._build_index_locked()
-            return index.public_stats()
+            if kb_id is not None:
+                index = self._build_index_locked(int(kb_id))
+                return index.public_stats()
+            children = [int(r["id"]) for r in self.db.all(
+                "SELECT id FROM kb_libraries WHERE status='active' AND deleted_at IS NULL")]
+            default = self._build_index_locked(1)
+            for child in children:
+                if child != 1:
+                    self._build_index_locked(child)
+            return default.public_stats()
 
-    def _build_index_locked(self) -> KBIndex:
+    def _build_index_locked(self, kb_id: int = 1) -> KBIndex:
         generation = self._generation
         started = time.monotonic()
         rows = self.db.all(
             "SELECT c.*, d.status AS doc_status, d.deleted_at AS doc_deleted_at, "
             "d.title AS doc_title FROM kb_cases c JOIN kb_documents d ON d.id=c.doc_id "
-            "WHERE c.status='active' AND d.status='active' AND d.deleted_at IS NULL "
-            "ORDER BY c.created_at ASC")
+            "WHERE c.kb_id=? AND d.kb_id=? AND c.status='active' AND d.status='active' "
+            "AND d.deleted_at IS NULL ORDER BY c.created_at ASC", (int(kb_id), int(kb_id)))
         max_cases = max(100, int(self.config.get("kb_index_max_cases", 20000)))
         if len(rows) > max_cases:
             rows = rows[-max_cases:]
@@ -228,21 +254,25 @@ class KBService:
                 status=str(row.get("status") or "active"),
                 created_at=str(row.get("created_at") or ""),
                 found_date=str(row.get("found_date") or ""),
+                kb_id=int(row.get("kb_id") or kb_id),
                 sections=[s for s in sections if isinstance(s, dict)],
             ))
         index = KBIndex(cases)
         checksum = hashlib.sha256(
             "\n".join(f"{c.id}:{c.doc_id}" for c in cases).encode("utf-8")).hexdigest()[:24]
-        self._index = index
+        self._indexes[int(kb_id)] = index
+        if int(kb_id) == 1:
+            self._index = index
         if generation == self._generation:
             self._dirty = False
         self.last_error = ""
         self._write_meta("ready" if cases else "empty", index=index, checksum=checksum,
-                         build_ms=index.build_ms)
+                         build_ms=index.build_ms, kb_id=int(kb_id))
         return index
 
     def _write_meta(self, status: str, *, index: KBIndex | None = None,
-                    checksum: str = "", build_ms: int = 0, error: str = "") -> None:
+                    checksum: str = "", build_ms: int = 0, error: str = "",
+                    kb_id: int = 1) -> None:
         try:
             stats = index.public_stats() if index else {}
             self.db.execute(
@@ -254,36 +284,222 @@ class KBService:
                 "built_at=excluded.built_at, checksum=excluded.checksum, "
                 "status=excluded.status, error=excluded.error",
                 (int(self.config.get("kb_index_max_cases", 20000)),
-                 int(self.db.one("SELECT COUNT(*) AS n FROM kb_documents WHERE status='active' "
-                                 "AND deleted_at IS NULL")["n"]),
+                 int(self.db.one("SELECT COUNT(*) AS n FROM kb_documents WHERE kb_id=? AND "
+                                 "status='active' AND deleted_at IS NULL", (int(kb_id),))["n"]),
+                 int(stats.get("cases", 0)), int(stats.get("terms", 0)),
+                 int(stats.get("bytes", 0)), int(build_ms or stats.get("build_ms", 0)),
+                 iso_now(), checksum or "", status, error[:500]))
+            self.db.execute(
+                "INSERT INTO kb_library_index_meta(kb_id,version,doc_count,case_count,terms,"
+                "bytes,build_ms,built_at,checksum,status,error) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(kb_id) DO UPDATE SET version=excluded.version,"
+                "doc_count=excluded.doc_count,case_count=excluded.case_count,"
+                "terms=excluded.terms,bytes=excluded.bytes,build_ms=excluded.build_ms,"
+                "built_at=excluded.built_at,checksum=excluded.checksum,status=excluded.status,"
+                "error=excluded.error",
+                (int(kb_id), int(self.config.get("kb_index_max_cases", 20000)),
+                 int(self.db.one("SELECT COUNT(*) AS n FROM kb_documents WHERE kb_id=? AND "
+                                 "status='active' AND deleted_at IS NULL", (int(kb_id),))["n"]),
                  int(stats.get("cases", 0)), int(stats.get("terms", 0)),
                  int(stats.get("bytes", 0)), int(build_ms or stats.get("build_ms", 0)),
                  iso_now(), checksum or "", status, error[:500]))
         except Exception:
             pass
 
+    # ------------------------------------------------------------ 知识库
+    def list_libraries(self, *, include_archived: bool = False) -> dict[str, Any]:
+        where = "" if include_archived else " WHERE l.status='active' AND l.deleted_at IS NULL"
+        rows = self.db.all(
+            "SELECT l.*, "
+            "(SELECT COUNT(*) FROM kb_documents d WHERE d.kb_id=l.id AND d.status='active' "
+            " AND d.deleted_at IS NULL) AS documents, "
+            "(SELECT COUNT(*) FROM kb_cases c WHERE c.kb_id=l.id AND c.status='active') AS cases "
+            "FROM kb_libraries l" + where + " ORDER BY l.is_default DESC,l.created_at ASC")
+        return {"items": [dict(r) for r in rows]}
+
+    def get_library(self, kb_id: int) -> dict[str, Any]:
+        row = self.db.one(
+            "SELECT * FROM kb_libraries WHERE id=? AND deleted_at IS NULL", (int(kb_id),))
+        if not row:
+            raise KBError("知识库不存在", 404, "not_found")
+        return dict(row)
+
+    def create_library(self, user: dict[str, Any], *, name: str, kind: str = "fault",
+                       description: str = "", visibility: str = "all") -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可创建知识库", 403, "forbidden")
+        name = str(name or "").strip()
+        if not name or len(name) > 80:
+            raise KBError("知识库名称需为 1–80 个字符")
+        kind = kind if kind in {"fault", "expert", "corpus"} else "fault"
+        visibility = visibility if visibility in {"all", "admin"} else "all"
+        base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "kb"
+        slug = base
+        if self.db.one("SELECT id FROM kb_libraries WHERE slug=?", (slug,)):
+            slug = f"{base}-{_kb_id('L').lower()[-6:]}"
+        now = iso_now()
+        with self.db.tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO kb_libraries(name,slug,kind,description,visibility,status,is_default,"
+                "created_by,created_at,updated_at) VALUES(?,?,?,?,?,'active',0,?,?,?)",
+                (name, slug, kind, description[:500], visibility, user.get("id"), now, now))
+            kb_id = int(cur.lastrowid)
+        self._mark_dirty()
+        return {"ok": True, "library": self.get_library(kb_id)}
+
+    def backup_library(self, kb_id: int, user: dict[str, Any]) -> tuple[str, bytes]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可备份知识库", 403, "forbidden")
+        lib = self.get_library(kb_id)
+        docs = [dict(r) for r in self.db.all(
+            "SELECT * FROM kb_documents WHERE kb_id=? AND deleted_at IS NULL ORDER BY created_at",
+            (int(kb_id),))]
+        cases = [dict(r) for r in self.db.all(
+            "SELECT * FROM kb_cases WHERE kb_id=? ORDER BY ordinal,id", (int(kb_id),))]
+        manifest = {
+            "format": "bbu-kb-backup", "version": 1, "kb_id": int(kb_id),
+            "name": lib.get("name") or "", "kind": lib.get("kind") or "fault",
+            "exported_at": iso_now(), "documents": len(docs), "cases": len(cases),
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            zf.writestr("documents.jsonl", "\n".join(
+                json.dumps(x, ensure_ascii=False) for x in docs))
+            zf.writestr("cases.jsonl", "\n".join(
+                json.dumps(x, ensure_ascii=False) for x in cases))
+        safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", str(lib.get("name") or f"kb-{kb_id}"))
+        return f"{safe}-{iso_now()[:10]}.kbbackup.zip", buf.getvalue()
+
+    def restore_library(self, user: dict[str, Any], data: bytes, *,
+                        name: str = "") -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可恢复知识库", 403, "forbidden")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                manifest = _json_obj(zf.read("manifest.json").decode("utf-8"))
+                if manifest.get("format") != "bbu-kb-backup":
+                    raise KBError("不是知识库备份包", 400, "bad_backup")
+                docs = [json.loads(line) for line in zf.read("documents.jsonl").decode(
+                    "utf-8").splitlines() if line.strip()]
+                cases = [json.loads(line) for line in zf.read("cases.jsonl").decode(
+                    "utf-8").splitlines() if line.strip()]
+        except (KeyError, ValueError, zipfile.BadZipFile) as exc:
+            raise KBError(f"备份包损坏：{exc}", 400, "bad_backup")
+        if len(docs) > 50000 or len(cases) > 100000:
+            raise KBError("备份包超过恢复上限", 413, "too_large")
+        library = self.create_library(
+            user, name=name or f"{manifest.get('name') or '恢复的知识库'}（恢复）",
+            kind=str(manifest.get("kind") or "fault"), description="从备份恢复")
+        target = int(library["library"]["id"])
+        case_map: dict[str, list[dict[str, Any]]] = {}
+        for case in cases:
+            case_map.setdefault(str(case.get("doc_id") or ""), []).append(case)
+        restored = 0
+        for doc in docs:
+            payload = {
+                "document": {
+                    "title": doc.get("title") or "", "title_clean": doc.get("title_clean") or "",
+                    "doc_type": doc.get("doc_type") or "fault",
+                    "source_type": doc.get("source_type") or "restore",
+                    "source_name": doc.get("source_name") or "备份恢复",
+                    "source_sha256": doc.get("source_sha256") or "",
+                    "raw_text": doc.get("raw_text") or "", "masked_text": doc.get("masked_text") or "",
+                    "pii_masked": bool(doc.get("pii_masked", 1)),
+                    "boards": _json_list(doc.get("boards_json")),
+                    "domains": _json_list(doc.get("domains_json")),
+                    "versions": _json_list(doc.get("versions_json")),
+                    "quality": float(doc.get("quality") or 0),
+                    "confidence": float(doc.get("confidence") or 0.9),
+                },
+                "cases": [],
+            }
+            for case in case_map.get(str(doc.get("id")), []):
+                payload["cases"].append({
+                    "title": case.get("title") or "", "title_clean": case.get("title_clean") or "",
+                    "symptom": case.get("symptom") or "", "environment": case.get("environment") or "",
+                    "expected": case.get("expected") or "", "actual": case.get("actual") or "",
+                    "repro": case.get("repro") or "", "found_date": case.get("found_date") or "",
+                    "location": case.get("location") or "", "cause": case.get("cause") or "",
+                    "cause_detail": case.get("cause_detail") or "",
+                    "solution": case.get("solution") or "", "prevention": case.get("prevention") or "",
+                    "root_cause_key": case.get("root_cause_key") or "",
+                    "sections": _json_list(case.get("sections_json")),
+                    "boards": _json_list(case.get("boards_json")),
+                    "domains": _json_list(case.get("domains_json")),
+                    "versions": _json_list(case.get("versions_json")),
+                    "quality": float(case.get("quality") or 0),
+                    "confidence": float(case.get("confidence") or 0.9),
+                    "is_derived": bool(case.get("is_derived")),
+                })
+            if not payload["cases"]:
+                continue
+            self._insert_document(payload, int(user["id"]), kb_id=target,
+                                  action="restore", actor_type="human", reason="从备份恢复")
+            restored += 1
+        self._mark_dirty()
+        return {"ok": True, "kb_id": target, "documents": restored,
+                "cases": sum(len(v) for v in case_map.values())}
+
+    def update_library(self, kb_id: int, data: dict[str, Any],
+                       user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可修改知识库", 403, "forbidden")
+        row = self.get_library(kb_id)
+        name = str(data.get("name", row.get("name"))).strip()
+        if not name or len(name) > 80:
+            raise KBError("知识库名称需为 1–80 个字符")
+        description = str(data.get("description", row.get("description") or ""))[:500]
+        status = str(data.get("status", row.get("status")) or "active")
+        if status not in {"active", "archived"}:
+            raise KBError("非法知识库状态")
+        self.db.execute(
+            "UPDATE kb_libraries SET name=?,description=?,status=?,deleted_at=?,updated_at=? "
+            "WHERE id=?",
+            (name, description, status, iso_now() if status == "archived" else None,
+             iso_now(), int(kb_id)))
+        self._mark_dirty()
+        return {"ok": True, "library": self.get_library(kb_id)}
+
+    def archive_library(self, kb_id: int, user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可归档知识库", 403, "forbidden")
+        row = self.get_library(kb_id)
+        if bool(row.get("is_default")):
+            raise KBError("默认知识库不能归档", 409, "default_library")
+        self.db.execute(
+            "UPDATE kb_libraries SET status='archived',deleted_at=?,updated_at=? WHERE id=?",
+            (iso_now(), iso_now(), int(kb_id)))
+        self._mark_dirty()
+        return {"ok": True, "id": int(kb_id), "status": "archived"}
+
     # ------------------------------------------------------------ 状态与统计
-    def status(self, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    def status(self, user: dict[str, Any] | None = None, kb_id: int = 1) -> dict[str, Any]:
+        kb_id = int(kb_id or 1)
         counts = self.db.one(
             "SELECT "
-            "(SELECT COUNT(*) FROM kb_documents WHERE status='active' AND deleted_at IS NULL) AS docs,"
-            "(SELECT COUNT(*) FROM kb_cases WHERE status='active') AS cases,"
-            "(SELECT COUNT(*) FROM kb_drafts WHERE status='reviewing') AS drafts,"
-            "(SELECT COUNT(*) FROM kb_reviews WHERE status IN "
-            "  ('queued','running','manual','failed')) AS review_pending,"
-            "(SELECT COUNT(*) FROM kb_case_revisions) AS revisions"
-        ) or {}
+            "(SELECT COUNT(*) FROM kb_documents WHERE kb_id=? AND status='active' "
+            " AND deleted_at IS NULL) AS docs,"
+            "(SELECT COUNT(*) FROM kb_cases WHERE kb_id=? AND status='active') AS cases,"
+            "(SELECT COUNT(*) FROM kb_drafts WHERE kb_id=? AND status='reviewing') AS drafts,"
+            "(SELECT COUNT(*) FROM kb_reviews r LEFT JOIN kb_drafts d ON d.id=r.target_id "
+            " WHERE d.kb_id=? AND r.status IN ('queued','running','manual','failed')) AS review_pending,"
+            "(SELECT COUNT(*) FROM kb_case_revisions v LEFT JOIN kb_cases c ON c.id=v.case_id "
+            " WHERE c.kb_id=?) AS revisions",
+            (kb_id, kb_id, kb_id, kb_id, kb_id)) or {}
         active_docs = int(counts.get("docs") or 0)
         active_cases = int(counts.get("cases") or 0)
         drafts = int(counts.get("drafts") or 0)
         review_pending = int(counts.get("review_pending") or 0)
         enabled = bool(self.config.get("kb_enabled", True))
-        index = self._index.public_stats() if self._index else {}
-        meta = self.db.one("SELECT * FROM kb_index_meta WHERE id=1") or {}
+        index = self._indexes.get(kb_id).public_stats() if self._indexes.get(kb_id) else {}
+        meta = self.db.one("SELECT * FROM kb_library_index_meta WHERE kb_id=?", (kb_id,)) or {}
+        libraries = self.list_libraries()
         return {
             "enabled": enabled,
             "can_admin": bool(user and user.get("role") == "admin"),
             "documents": active_docs, "cases": active_cases, "drafts": drafts,
+            "kb_id": kb_id, "libraries": libraries.get("items") or [],
             "index": {
                 "status": meta.get("status") or ("ready" if index else "empty"),
                 "documents": meta.get("doc_count") or active_docs,
@@ -311,15 +527,16 @@ class KBService:
             },
         }
 
-    def facets(self) -> dict[str, Any]:
+    def facets(self, kb_id: int = 1) -> dict[str, Any]:
+        kb_id = int(kb_id or 1)
         with self._lock:
-            cached = self._facets_cache
+            cached = (self._facets_cache or {}).get(kb_id) if isinstance(self._facets_cache, dict) else None
             generation = self._generation
             if cached is not None:
                 return cached
         docs = self.db.all(
             "SELECT boards_json, domains_json FROM kb_documents "
-            "WHERE status='active' AND deleted_at IS NULL")
+            "WHERE kb_id=? AND status='active' AND deleted_at IS NULL", (kb_id,))
         boards: dict[str, int] = {}
         domains: dict[str, int] = {}
         for doc in docs:
@@ -335,18 +552,20 @@ class KBService:
             # 查询期间发生导入/编辑时 generation 会递增；不要把旧结果缓存
             # 回来，否则下一次进入问答页会看到过期板卡/领域。
             if generation == self._generation:
-                self._facets_cache = result
+                if not isinstance(self._facets_cache, dict):
+                    self._facets_cache = {}
+                self._facets_cache[kb_id] = result
         return result
 
     # ------------------------------------------------------------ 文档
     def list_documents(self, *, q: str = "", board: str = "", domain: str = "",
                        status: str = "active", page: int = 1, size: int = 20,
-                       reveal: bool = False) -> dict[str, Any]:
+                       reveal: bool = False, kb_id: int = 1) -> dict[str, Any]:
         # 列表只取轻量列，过滤/分页在 SQL 与内存轻量行上完成，且只对当前页
         # 读取全文并构造公开对象。旧实现对全部文档构造 _doc_public（含 excerpt
         # 和原文）并逐行做相关子查询，2,000+ 文档时首屏会达到数秒。
-        where = ["d.deleted_at IS NULL"]
-        args: list[Any] = []
+        where = ["d.deleted_at IS NULL", "d.kb_id=?"]
+        args: list[Any] = [int(kb_id)]
         if status and status != "all":
             where.append("d.status=?")
             args.append(status)
@@ -485,11 +704,11 @@ class KBService:
         }
 
     def save_document(self, payload: dict[str, Any], user: dict[str, Any],
-                      draft_id: str = "") -> dict[str, Any]:
+                      draft_id: str = "", kb_id: int = 1) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503)
-        doc_id = self._insert_document(payload, int(user["id"]), action="create",
-                                       actor_type="human", reason="创建文档")
+        doc_id = self._insert_document(payload, int(user["id"]), kb_id=int(kb_id),
+                                       action="create", actor_type="human", reason="创建文档")
         if draft_id:
             self.db.execute("UPDATE kb_drafts SET status='approved', doc_id=?, reviewed_by=?, "
                             "reviewed_at=? WHERE id=?",
@@ -578,21 +797,23 @@ class KBService:
         return resolved, dict(row)
 
     # ------------------------------------------------------------ 粘贴/导入
-    def create_paste(self, user: dict[str, Any], *, title: str, text: str) -> dict[str, Any]:
+    def create_paste(self, user: dict[str, Any], *, title: str, text: str,
+                     kb_id: int = 1) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503)
         docs = parse_paste(text, title=title, source_name="粘贴文本")
         doc = docs[0]
         payload = {"document": doc.public(), "cases": [c.public() for c in doc.cases]}
         if user.get("role") == "admin" and bool(self.config.get("kb_auto_approve_admin", True)):
-            return {"status": "active", **self.save_document(payload, user)}
-        draft_id = self._create_draft(payload, int(user["id"]), job_id="", title=doc.title,
-                                      confidence=doc.confidence, warnings=doc.warnings)
+            return {"status": "active", **self.save_document(payload, user, kb_id=kb_id)}
+        draft_id = self._create_draft(payload, int(user["id"]), kb_id=kb_id, job_id="",
+                                      title=doc.title, confidence=doc.confidence,
+                                      warnings=doc.warnings)
         return {"status": "reviewing", "draft_id": draft_id, "document": doc.public(),
                 "cases": payload["cases"]}
 
     def create_import_job(self, user: dict[str, Any], uploads: Iterable[Any],
-                          *, mode: str = "review") -> dict[str, Any]:
+                          *, mode: str = "review", kb_id: int = 1) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503)
         if user.get("role") not in {"admin", "engineer"}:
@@ -612,9 +833,9 @@ class KBService:
         job_dir.mkdir(parents=True, exist_ok=True)
         clean_mode = "direct" if mode == "direct" else "review"
         self.db.execute(
-            "INSERT INTO kb_import_jobs(id,user_id,status,mode,total_files,created_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (job_id, user["id"], "queued", clean_mode, len(files), iso_now()))
+            "INSERT INTO kb_import_jobs(id,kb_id,user_id,status,mode,total_files,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (job_id, int(kb_id), user["id"], "queued", clean_mode, len(files), iso_now()))
         for item in files:
             size = int(getattr(item, "size", 0) or 0)
             name = safe_filename(getattr(item, "filename", "") or "upload")
@@ -639,7 +860,7 @@ class KBService:
         self._queue.put(job_id)
         return self.get_job(job_id)
 
-    def import_sample(self, user: dict[str, Any]) -> dict[str, Any]:
+    def import_sample(self, user: dict[str, Any], kb_id: int = 1) -> dict[str, Any]:
         path = Path(self.config.examples_dir) / "kb" / "故障知识库示例-脱敏.csv"
         if not path.exists():
             raise KBError("示例数据未安装", 404, "missing_sample")
@@ -650,18 +871,18 @@ class KBService:
         for doc in docs:
             sha = str(doc.public().get("source_sha256") or "")
             if sha and self.db.one(
-                    "SELECT id FROM kb_documents WHERE source_sha256=? AND deleted_at IS NULL "
-                    "LIMIT 1", (sha,)):
+                    "SELECT id FROM kb_documents WHERE kb_id=? AND source_sha256=? "
+                    "AND deleted_at IS NULL LIMIT 1", (int(kb_id), sha)):
                 skipped += 1
                 continue
             payload = {"document": doc.public(), "cases": [c.public() for c in doc.cases]}
             if (user.get("role") == "admin"
                     and bool(self.config.get("kb_auto_approve_admin", True))
                     and not doc.force_review):
-                self._insert_document(payload, int(user["id"]))
+                self._insert_document(payload, int(user["id"]), kb_id=int(kb_id))
                 inserted += 1
             else:
-                self._create_draft(payload, int(user["id"]), job_id="sample",
+                self._create_draft(payload, int(user["id"]), kb_id=int(kb_id), job_id="sample",
                                    title=doc.title, confidence=doc.confidence,
                                    warnings=doc.warnings)
         self._schedule_rebuild()
@@ -717,6 +938,38 @@ class KBService:
 
     def _process_job(self, job_id: str) -> None:
         job = self.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
+        user_id = int((job or {}).get("user_id") or 0)
+        trace = None
+        if self.traces is not None:
+            try:
+                trace = self.traces.start(
+                    kind="kb", ref_id=str(job_id), user_id=user_id,
+                    meta={"action": "import", "kb_id": int((job or {}).get("kb_id") or 1)})
+                trace.append("import", phase="import", status="running",
+                             job_id=str(job_id), kb_id=int((job or {}).get("kb_id") or 1))
+            except Exception:
+                trace = None
+        try:
+            self._process_job_inner(job_id)
+        except Exception as exc:
+            if trace is not None:
+                try:
+                    trace.finish("error", error_code="import_failed",
+                                 error_summary=str(exc)[:500])
+                except Exception:
+                    pass
+            raise
+        if trace is not None:
+            try:
+                job_now = self.db.one("SELECT stats_json FROM kb_import_jobs WHERE id=?", (job_id,))
+                trace.append("import_result", phase="import", status="success",
+                             stats=_json_obj((job_now or {}).get("stats_json")))
+                trace.finish("success")
+            except Exception:
+                pass
+
+    def _process_job_inner(self, job_id: str) -> None:
+        job = self.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
         if not job or job.get("status") in {"cancelled", "cancelling"}:
             return
         self.db.execute("UPDATE kb_import_jobs SET status='processing' WHERE id=?", (job_id,))
@@ -729,9 +982,12 @@ class KBService:
         mode = str(job.get("mode") or "review")
         auto = (user_dict["role"] == "admin" and mode == "direct"
                 and bool(self.config.get("kb_auto_approve_admin", True)))
-        stats = {"documents": 0, "cases": 0, "drafts": 0, "skipped": 0}
+        kb_id = int(job.get("kb_id") or 1)
+        stats = {"documents": 0, "cases": 0, "drafts": 0,
+                 "skipped": 0, "skipped_files": 0, "skipped_documents": 0}
         files = self.db.all("SELECT * FROM kb_import_files WHERE job_id=? ORDER BY rowid",
                             (job_id,))
+        seen_content: set[str] = set()
         for file_row in files:
             if self._stop.is_set() or self.db.one(
                     "SELECT status FROM kb_import_jobs WHERE id=?", (job_id,))["status"] in {
@@ -742,36 +998,69 @@ class KBService:
             self.db.execute("UPDATE kb_import_files SET status='processing' WHERE id=?",
                             (file_row["id"],))
             try:
-                if file_row.get("status") == "failed":
-                    continue
                 sha = str(file_row.get("sha256") or "")
-                if sha and (self.db.one(
-                        "SELECT id FROM kb_documents WHERE source_sha256=? AND "
-                        "status IN ('active','disabled','reviewing') LIMIT 1", (sha,))
-                        or self.db.one(
-                            "SELECT id FROM kb_import_files WHERE job_id=? AND sha256=? "
-                            "AND status='done' LIMIT 1", (job_id, sha))):
+                duplicate = None
+                if sha:
+                    # 跨任务查重：已完成的同 SHA 文件、已入库文档、待审/已审草稿。
+                    duplicate = self.db.one(
+                        "SELECT f.id FROM kb_import_files f JOIN kb_import_jobs j "
+                        "ON j.id=f.job_id WHERE f.sha256=? AND f.status='done' "
+                        "AND j.kb_id=? AND f.id!=? LIMIT 1", (sha, kb_id, file_row["id"]))
+                    duplicate = duplicate or self.db.one(
+                        "SELECT id FROM kb_documents WHERE kb_id=? AND source_sha256=? "
+                        "AND deleted_at IS NULL LIMIT 1", (kb_id, sha))
+                    duplicate = duplicate or self.db.one(
+                        "SELECT id FROM kb_drafts WHERE kb_id=? AND source_sha256=? "
+                        "AND status IN ('reviewing','approved') LIMIT 1", (kb_id, sha))
+                if duplicate:
                     self.db.execute("UPDATE kb_import_files SET status='skipped', "
                                     "error='重复文件，已跳过' WHERE id=?", (file_row["id"],))
                     stats["skipped"] += 1
+                    stats["skipped_files"] += 1
                     continue
                 docs = parse_file(
                     Path(file_row["stored_path"]), str(file_row.get("name") or "upload"),
                     sha256=sha, pii_masked=bool(self.config.get("kb_mask_pii", True)))
+                doc_ids: list[str] = []
+                draft_ids: list[str] = []
                 for doc in docs:
                     payload = {"document": doc.public(), "cases": [c.public() for c in doc.cases]}
+                    _, content_hash = _payload_hashes(payload)
+                    if content_hash in seen_content or self.db.one(
+                            "SELECT id FROM kb_documents WHERE kb_id=? AND content_sha256=? "
+                            "AND deleted_at IS NULL LIMIT 1", (kb_id, content_hash)
+                    ) or self.db.one(
+                            "SELECT id FROM kb_drafts WHERE kb_id=? AND content_sha256=? "
+                            "AND status IN ('reviewing','approved') LIMIT 1",
+                            (kb_id, content_hash)):
+                        stats["skipped"] += 1
+                        stats["skipped_documents"] += 1
+                        continue
+                    seen_content.add(content_hash)
                     if auto and not doc.force_review:
-                        self._insert_document(payload, int(user_dict["id"]))
+                        doc_id = self._insert_document(payload, int(user_dict["id"]), kb_id=kb_id)
+                        doc_ids.append(doc_id)
                         stats["documents"] += 1
                     else:
-                        self._create_draft(payload, int(user_dict["id"]), job_id=job_id,
-                                           title=doc.title, confidence=doc.confidence,
-                                           warnings=doc.warnings)
+                        draft_id = self._create_draft(
+                            payload, int(user_dict["id"]), kb_id=kb_id, job_id=job_id,
+                            title=doc.title, confidence=doc.confidence, warnings=doc.warnings)
+                        draft_ids.append(draft_id)
                         stats["drafts"] += 1
                     stats["cases"] += len(doc.cases)
-                self.db.execute("UPDATE kb_import_files SET status='done', doc_id=?, "
-                                "confidence=? WHERE id=?",
-                                ("", max([d.confidence for d in docs] or [0]), file_row["id"]))
+                if not doc_ids and not draft_ids:
+                    self.db.execute("UPDATE kb_import_files SET status='skipped', "
+                                    "error='重复内容，已跳过' WHERE id=?", (file_row["id"],))
+                    stats["skipped_files"] += 1
+                else:
+                    self.db.execute(
+                        "UPDATE kb_import_files SET status='done', doc_id=?, draft_id=?, "
+                        "doc_ids_json=?, draft_ids_json=?, confidence=? WHERE id=?",
+                        (doc_ids[0] if len(doc_ids) == 1 else "",
+                         draft_ids[0] if len(draft_ids) == 1 else "",
+                         json.dumps(doc_ids, ensure_ascii=False),
+                         json.dumps(draft_ids, ensure_ascii=False),
+                         max([d.confidence for d in docs] or [0]), file_row["id"]))
             except Exception as exc:  # noqa: BLE001 - 单文件失败继续下一文件
                 self.db.execute("UPDATE kb_import_files SET status='failed', error=? WHERE id=?",
                                 (str(exc)[:500], file_row["id"]))
@@ -801,29 +1090,54 @@ class KBService:
         files = self.db.all(
             "SELECT id,name,rel_path,size,sha256,status,error,doc_id,draft_id,confidence,"
             "stored_path FROM kb_import_files WHERE job_id=? ORDER BY rowid", (job_id,))
+        first_name = next((str(f.get("name") or "") for f in files if f.get("name")), "")
+        display_name = first_name
+        if display_name and len(files) > 1:
+            display_name += f" 等 {len(files)} 个文件"
         return {
-            "id": row["id"], "status": row.get("status"), "mode": row.get("mode"),
+            "id": row["id"], "kb_id": int(row.get("kb_id") or 1),
+            "display_name": display_name or f"导入任务 {row['id']}",
+            "status": row.get("status"), "mode": row.get("mode"),
             "total_files": int(row.get("total_files") or 0),
             "done_files": int(row.get("done_files") or 0),
             "failed_files": int(row.get("failed_files") or 0),
             "stats": _json_obj(row.get("stats_json")),
+            "rollback_supported": bool(row.get("rollback_supported")),
             "error": row.get("error") or "", "created_at": row.get("created_at") or "",
             "finished_at": row.get("finished_at") or "",
             "files": [{k: v for k, v in dict(f).items() if k != "stored_path"} for f in files],
         }
 
-    def list_jobs(self, user: dict[str, Any], limit: int = 20) -> dict[str, Any]:
+    def list_jobs(self, user: dict[str, Any], limit: int = 20,
+                  kb_id: int | None = None) -> dict[str, Any]:
         limit = max(1, min(100, limit))
-        if user.get("role") == "admin":
-            rows = self.db.all(
-                "SELECT id,status,mode,total_files,done_files,failed_files,created_at,finished_at "
-                "FROM kb_import_jobs ORDER BY created_at DESC LIMIT ?", (limit,))
-        else:
-            rows = self.db.all(
-                "SELECT id,status,mode,total_files,done_files,failed_files,created_at,finished_at "
-                "FROM kb_import_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-                (user.get("id"), limit))
-        return {"items": [dict(r) for r in rows]}
+        where = ["1=1"]
+        args: list[Any] = []
+        if user.get("role") != "admin":
+            where.append("user_id=?")
+            args.append(user.get("id"))
+        if kb_id is not None:
+            where.append("kb_id=?")
+            args.append(int(kb_id))
+        rows = self.db.all(
+            "SELECT id,kb_id,user_id,status,mode,total_files,done_files,failed_files,"
+            "created_at,finished_at,stats_json,rollback_supported FROM kb_import_jobs "
+            "WHERE " + " AND ".join(where) + " ORDER BY created_at DESC LIMIT ?",
+            (*args, limit))
+        items = []
+        for row in rows:
+            row = dict(row)
+            first = self.db.one(
+                "SELECT name FROM kb_import_files WHERE job_id=? AND name<>'' "
+                "ORDER BY rowid LIMIT 1", (row["id"],))
+            name = str((first or {}).get("name") or "")
+            if name and int(row.get("total_files") or 0) > 1:
+                name += f" 等 {int(row.get('total_files') or 0)} 个文件"
+            row["display_name"] = name or f"导入任务 {row['id']}"
+            row["stats"] = _json_obj(row.pop("stats_json", "{}"))
+            row["rollback_supported"] = bool(row.get("rollback_supported"))
+            items.append(row)
+        return {"items": items}
 
     def cancel_job(self, job_id: str, user: dict[str, Any]) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
@@ -835,13 +1149,112 @@ class KBService:
         self.db.execute("UPDATE kb_import_jobs SET status=? WHERE id=?", (status, job_id))
         return {"ok": True, "status": status}
 
+    def rollback_jobs(self, job_ids: list[str], user: dict[str, Any]) -> dict[str, Any]:
+        """按批次软回退：停用本批新增文档，未审草稿退回，保留版本与修订链。"""
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可回退导入批次", 403, "forbidden")
+        items = []
+        for job_id in job_ids:
+            job = self.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
+            if not job:
+                items.append({"id": job_id, "ok": False, "error": "任务不存在"})
+                continue
+            if not bool(job.get("rollback_supported")):
+                items.append({"id": job_id, "ok": False,
+                              "error": "该任务为旧版本导入，不支持回退"})
+                continue
+            if str(job.get("status") or "") == "processing":
+                items.append({"id": job_id, "ok": False, "error": "任务仍在处理中"})
+                continue
+            docs: list[str] = []
+            drafts: list[str] = []
+            for file_row in self.db.all(
+                    "SELECT doc_id,doc_ids_json,draft_id,draft_ids_json FROM kb_import_files "
+                    "WHERE job_id=?", (job_id,)):
+                for value in _json_list(file_row.get("doc_ids_json")):
+                    if str(value):
+                        docs.append(str(value))
+                for value in _json_list(file_row.get("draft_ids_json")):
+                    if str(value):
+                        drafts.append(str(value))
+                if file_row.get("doc_id"):
+                    docs.append(str(file_row["doc_id"]))
+                if file_row.get("draft_id"):
+                    drafts.append(str(file_row["draft_id"]))
+            docs = sorted(set(docs))
+            drafts = sorted(set(drafts))
+            disabled = 0
+            for doc_id in docs:
+                row = self.db.one(
+                    "SELECT status,deleted_at FROM kb_documents WHERE id=?", (doc_id,))
+                if not row or row.get("deleted_at"):
+                    continue
+                if str(row.get("status") or "") == "active":
+                    self.set_document_status(doc_id, "disabled", user)
+                    disabled += 1
+            rejected = 0
+            for draft_id in drafts:
+                result = self.db.execute(
+                    "UPDATE kb_drafts SET status='rejected', reviewed_by=?, reviewed_at=? "
+                    "WHERE id=? AND status='reviewing'",
+                    (user.get("id"), iso_now(), draft_id))
+                rejected += int(result or 0)
+            self.db.execute(
+                "UPDATE kb_import_jobs SET status='rolled_back', error=?, rollback_supported=0 "
+                "WHERE id=?", (f"已回退：停用 {disabled} 个文档、退回 {rejected} 个草稿", job_id))
+            items.append({"id": job_id, "ok": True, "documents": disabled,
+                          "drafts": rejected, "display_name": self.get_job(job_id)["display_name"]})
+        self._mark_dirty()
+        return {"ok": all(i.get("ok") for i in items), "items": items}
+
+    def delete_jobs(self, job_ids: list[str], user: dict[str, Any]) -> dict[str, Any]:
+        """删除导入任务记录与暂存目录；不删除已入库文档。"""
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可删除导入记录", 403, "forbidden")
+        deleted = 0
+        for job_id in job_ids:
+            job = self.db.one("SELECT status FROM kb_import_jobs WHERE id=?", (job_id,))
+            if not job or str(job.get("status") or "") == "processing":
+                continue
+            self.db.execute("DELETE FROM kb_import_files WHERE job_id=?", (job_id,))
+            self.db.execute("DELETE FROM kb_import_jobs WHERE id=?", (job_id,))
+            shutil.rmtree(self.staging_dir / job_id, ignore_errors=True)
+            deleted += 1
+        return {"ok": True, "deleted": deleted}
+
+    def retry_jobs(self, job_ids: list[str], user: dict[str, Any]) -> dict[str, Any]:
+        """重试失败文件；已完成/跳过文件不重复处理。"""
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可重试导入", 403, "forbidden")
+        queued = 0
+        for job_id in job_ids:
+            job = self.db.one("SELECT status FROM kb_import_jobs WHERE id=?", (job_id,))
+            if not job or str(job.get("status") or "") in {"processing", "queued", "cancelling"}:
+                continue
+            self.db.execute(
+                "UPDATE kb_import_files SET status='queued', error='' "
+                "WHERE job_id=? AND status='failed'", (job_id,))
+            self.db.execute(
+                "UPDATE kb_import_jobs SET status='queued', error='', finished_at=NULL, "
+                "stats_json='{}' WHERE id=?", (job_id,))
+            self._update_job_counts(job_id)
+            self._queue.put(job_id)
+            queued += 1
+        return {"ok": True, "queued": queued}
+
     # ------------------------------------------------------------ 草稿审核
-    def list_drafts(self, user: dict[str, Any], status: str = "reviewing") -> dict[str, Any]:
+    def list_drafts(self, user: dict[str, Any], status: str = "reviewing",
+                    kb_id: int | None = None) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可查看审核队列", 403, "forbidden")
-        rows = self.db.all(
-            "SELECT id,job_id,user_id,title,confidence,warnings_json,status,doc_id,created_at "
-            "FROM kb_drafts WHERE status=? ORDER BY created_at DESC", (status,))
+        sql = ("SELECT id,job_id,user_id,title,confidence,warnings_json,status,doc_id,created_at "
+               "FROM kb_drafts WHERE status=?")
+        args: list[Any] = [status]
+        if kb_id:
+            sql += " AND kb_id=?"
+            args.append(int(kb_id))
+        sql += " ORDER BY created_at DESC"
+        rows = self.db.all(sql, tuple(args))
         return {"items": [self._draft_public(dict(r)) for r in rows]}
 
     def get_draft(self, draft_id: str, user: dict[str, Any]) -> dict[str, Any]:
@@ -887,7 +1300,20 @@ class KBService:
         payload = _json_obj(row.get("payload_json"))
         if not payload:
             raise KBError("草稿内容损坏", 409, "bad_draft")
-        doc_id = self._insert_document(payload, int(user["id"]))
+        _, content_hash = _payload_hashes(payload)
+        content_hash = str(row.get("content_sha256") or "") or content_hash
+        existing = self.db.one(
+            "SELECT id FROM kb_documents WHERE kb_id=? AND content_sha256=? "
+            "AND deleted_at IS NULL ORDER BY created_at LIMIT 1",
+            (int(row.get("kb_id") or 1), content_hash))
+        if existing:
+            self.db.execute("UPDATE kb_drafts SET status='approved', doc_id=?, reviewed_by=?, "
+                            "reviewed_at=? WHERE id=?",
+                            (existing["id"], user["id"], iso_now(), draft_id))
+            return {"ok": True, "draft_id": draft_id, "doc_id": existing["id"],
+                    "duplicate": True}
+        doc_id = self._insert_document(payload, int(user["id"]),
+                                       kb_id=int(row.get("kb_id") or 1))
         self.db.execute("UPDATE kb_drafts SET status='approved', doc_id=?, reviewed_by=?, "
                         "reviewed_at=? WHERE id=?",
                         (doc_id, user["id"], iso_now(), draft_id))
@@ -920,24 +1346,101 @@ class KBService:
     # ------------------------------------------------------------ 问答
     def search(self, query: str, user: dict[str, Any], *,
                filters: dict[str, Any] | None = None, limit: int = 10,
-               log: bool = True) -> dict[str, Any]:
+               log: bool = True, kb_id: int = 1,
+               kb_ids: list[int] | None = None) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503, "disabled")
-        index = self.ensure_index()
-        result = retrieve(index, query, filters=filters, limit=limit,
-                          threshold=float(self.config.get("kb_no_answer_threshold", 0.18)))
+        ids = [int(x) for x in (kb_ids or [kb_id]) if int(x or 0) > 0]
+        if not ids:
+            ids = [1]
+        threshold = float(self.config.get("kb_no_answer_threshold", 0.18))
+        if len(ids) == 1:
+            result = retrieve(self.ensure_index(ids[0]), query, filters=filters, limit=limit,
+                              threshold=threshold)
+        else:
+            per_library = []
+            for child in ids:
+                try:
+                    per_library.append((child, retrieve(
+                        self.ensure_index(child), query, filters=filters,
+                        limit=max(limit, 8), threshold=threshold)))
+                except Exception:
+                    continue
+            if not per_library:
+                result = {"items": [], "no_answer": True, "analysis": {},
+                          "latency_ms": 0, "channels": {}, "total_cases": 0,
+                          "top_score": 0, "reason": "没有可用知识库"}
+            else:
+                merged: dict[str, dict[str, Any]] = {}
+                for child, child_result in per_library:
+                    for rank, item in enumerate(child_result.get("items") or []):
+                        key = str(item.get("case_id") or "")
+                        if not key:
+                            continue
+                        entry = merged.setdefault(key, {"item": dict(item), "rrf": 0.0})
+                        entry["rrf"] += 1.0 / (60 + rank)
+                        entry["item"]["score"] = max(
+                            float(entry["item"].get("score") or 0),
+                            float(item.get("score") or 0))
+                        entry["item"]["kb_id"] = child
+                ordered = sorted(merged.values(), key=lambda x: (-x["rrf"], -float(
+                    x["item"].get("score") or 0)))
+                items = []
+                for entry in ordered[:limit]:
+                    item = entry["item"]
+                    item["score"] = round(float(item.get("score") or 0), 4)
+                    item["rrf"] = round(entry["rrf"], 4)
+                    items.append(item)
+                first = per_library[0][1]
+                result = {
+                    "items": items,
+                    "no_answer": not items or all(x[1].get("no_answer") for x in per_library),
+                    "analysis": first.get("analysis") or {},
+                    "latency_ms": sum(int(x[1].get("latency_ms") or 0) for x in per_library),
+                    "channels": first.get("channels") or {},
+                    "total_cases": sum(int(x[1].get("total_cases") or 0) for x in per_library),
+                    "top_score": round(max((float(x.get("score") or 0) for x in items),
+                                           default=0.0), 4),
+                    "reason": "" if items else "没有找到足够相关的历史案例",
+                    "libraries": len(per_library),
+                }
         query_id = _kb_id("Q")
         result["query_id"] = query_id
+        result["kb_id"] = ids[0] if len(ids) == 1 else 0
+        result["kb_ids"] = ids
         if log:
             self._log_query(user, query, filters or {}, result)
             self._record_hits(result.get("items") or [], user)
+            self._trace_query(user, query, result)
         return result
+
+    def _trace_query(self, user: dict[str, Any], query: str, result: dict[str, Any]) -> None:
+        if self.traces is None:
+            return
+        try:
+            trace = self.traces.start(
+                kind="kb", ref_id=str(result.get("query_id") or ""), user_id=int(user.get("id") or 0),
+                meta={"action": "search", "kb_ids": result.get("kb_ids") or []})
+            trace.append("retrieval", phase="retrieval", status="success",
+                         query=str(query)[:500],
+                         analysis=result.get("analysis") or {},
+                         hits=[{
+                             "case_id": x.get("case_id"), "doc_id": x.get("doc_id"),
+                             "score": x.get("score"), "kb_id": x.get("kb_id"),
+                         } for x in (result.get("items") or [])],
+                         no_answer=bool(result.get("no_answer")),
+                         latency_ms=int(result.get("latency_ms") or 0))
+            trace.finish("success")
+        except Exception:
+            pass
 
     def answer(self, query: str, user: dict[str, Any], *,
                filters: dict[str, Any] | None = None,
-               limit: int | None = None) -> dict[str, Any]:
+               limit: int | None = None, kb_id: int = 1,
+               kb_ids: list[int] | None = None) -> dict[str, Any]:
         top_k = max(1, min(12, int(limit or self.config.get("kb_top_k", 6))))
-        result = self.search(query, user, filters=filters, limit=top_k)
+        result = self.search(query, user, filters=filters, limit=top_k,
+                             kb_id=kb_id, kb_ids=kb_ids)
         items = result.get("items") or []
         cases = []
         for index, item in enumerate(items, start=1):
@@ -1076,14 +1579,16 @@ class KBService:
             query_text, _ = (mask_pii(query) if self.config.get("kb_mask_pii", True) else (query, False))
             self.db.execute(
                 "INSERT INTO kb_query_logs(id,user_id,query,filters_json,analysis_json,"
-                "top_ids_json,latency_ms,zero_result,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "top_ids_json,latency_ms,zero_result,model,kb_ids_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (result["query_id"], user["id"], query_text[:1000],
                  json.dumps(filters, ensure_ascii=False),
                  json.dumps(result.get("analysis") or {}, ensure_ascii=False),
                  json.dumps([x.get("case_id") for x in (result.get("items") or [])],
                             ensure_ascii=False),
                  int(result.get("latency_ms") or 0),
-                 1 if result.get("no_answer") else 0, "", iso_now()))
+                 1 if result.get("no_answer") else 0, "",
+                 json.dumps(result.get("kb_ids") or [], ensure_ascii=False), iso_now()))
         except Exception:
             pass
 
@@ -1253,8 +1758,32 @@ class KBService:
         result["case_id"] = case_id
         return result
 
+    def _target_title(self, target: str) -> str:
+        target = str(target or "")
+        if not target:
+            return ""
+        doc = self.db.one("SELECT title FROM kb_documents WHERE id=?", (target,))
+        if doc:
+            return str(doc.get("title") or "")
+        case = self.db.one("SELECT title FROM kb_cases WHERE id=?", (target,))
+        if case:
+            return str(case.get("title") or "")
+        job = self.db.one("SELECT id FROM kb_import_jobs WHERE id=?", (target,))
+        if job:
+            first = self.db.one(
+                "SELECT name FROM kb_import_files WHERE job_id=? AND name<>'' "
+                "ORDER BY rowid LIMIT 1", (target,))
+            if first and first.get("name"):
+                return str(first["name"])
+            return f"导入任务 {target}"
+        draft = self.db.one("SELECT title FROM kb_drafts WHERE id=?", (target,))
+        if draft:
+            return str(draft.get("title") or "")
+        return ""
+
     def list_audit(self, user: dict[str, Any], *, actor: str = "", action: str = "",
-                   target: str = "", since: str = "", until: str = "", limit: int = 100) -> dict[str, Any]:
+                   target: str = "", since: str = "", until: str = "", limit: int = 100,
+                   kb_id: int | None = None) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可查看审计", 403, "forbidden")
         limit = max(1, min(500, int(limit or 100)))
@@ -1269,6 +1798,9 @@ class KBService:
         if target:
             rev_sql += " AND (case_id LIKE ? OR doc_id LIKE ?)"
             rev_args.extend([f"%{target}%", f"%{target}%"])
+        if kb_id:
+            rev_sql += " AND case_id IN (SELECT id FROM kb_cases WHERE kb_id=?)"
+            rev_args.append(int(kb_id))
         if actor:
             rev_sql += " AND actor_name LIKE ?"
             rev_args.append(f"%{actor}%")
@@ -1282,6 +1814,7 @@ class KBService:
             item = dict(row)
             item.update({"kind": "revision", "action": f"case.{item.get('action')}",
                          "target": item.get("case_id"), "object_type": "case",
+                         "target_title": self._target_title(str(item.get("case_id") or "")),
                          "detail": _json_list(item.pop("diff_json")),
                          "actor": item.get("actor_name") or "",
                          "message": item.get("reason") or ""})
@@ -1303,6 +1836,14 @@ class KBService:
         if action:
             log_sql += " AND action LIKE ?"
             log_args.append(f"%{action}%")
+        if kb_id:
+            log_sql += (" AND target IN (SELECT id FROM kb_documents WHERE kb_id=? "
+                        "UNION SELECT id FROM kb_cases WHERE kb_id=? "
+                        "UNION SELECT id FROM kb_drafts WHERE kb_id=? "
+                        "UNION SELECT id FROM kb_import_jobs WHERE kb_id=? "
+                        "UNION SELECT id FROM kb_reviews WHERE kb_id=? "
+                        "UNION SELECT CAST(id AS TEXT) FROM kb_libraries WHERE id=?)")
+            log_args.extend([int(kb_id)] * 6)
         log_sql += " ORDER BY ts DESC LIMIT ?"
         log_args.append(limit)
         for row in self.db.all(log_sql, tuple(log_args)):
@@ -1310,6 +1851,7 @@ class KBService:
             item.update({"kind": "audit", "actor": item.get("username") or "",
                          "created_at": item.get("ts") or "", "object_type": "kb",
                          "detail": _json_obj(item.get("detail_json")),
+                         "target_title": self._target_title(str(item.get("target") or "")),
                          "message": ""})
             items.append(item)
         items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
@@ -1353,6 +1895,7 @@ class KBService:
                     "kind": "revision", "action": f"case.{item.get('action') or ''}",
                     "target": item.get("case_id"), "object_type": "case",
                     "actor": item.get("actor_name") or "", "message": item.get("reason") or "",
+                    "target_title": self._target_title(str(item.get("case_id") or "")),
                     "created_at": item.get("created_at") or "",
                     "detail": _json_list(item.get("diff_json")),
                 })
@@ -1365,6 +1908,7 @@ class KBService:
                     "kind": "audit", "action": item.get("action") or "",
                     "target": item.get("target") or "", "object_type": "kb",
                     "actor": item.get("username") or "", "message": "",
+                    "target_title": self._target_title(str(item.get("target") or "")),
                     "created_at": item.get("ts") or "",
                     "detail": _json_obj(item.get("detail_json")),
                 })
@@ -1386,21 +1930,25 @@ class KBService:
         return buf.getvalue()
 
     # ------------------------------------------------------------ 统计与审核
-    def stats(self, user: dict[str, Any], *, days: int = 90) -> dict[str, Any]:
+    def stats(self, user: dict[str, Any], *, days: int = 90,
+              kb_id: int | None = None) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可查看知识库统计", 403, "forbidden")
-        return build_stats(self.db, self.config, days=days)
+        return build_stats(self.db, self.config, days=days, kb_id=kb_id)
 
-    def stats_csv(self, user: dict[str, Any], *, days: int = 90) -> str:
+    def stats_csv(self, user: dict[str, Any], *, days: int = 90,
+                  kb_id: int | None = None) -> str:
         if user.get("role") != "admin":
             raise KBError("仅管理员可查看知识库统计", 403, "forbidden")
-        return stats_csv(build_stats(self.db, self.config, days=days))
+        return stats_csv(build_stats(self.db, self.config, days=days, kb_id=kb_id))
 
     def list_reviews(self, user: dict[str, Any], *, status: str = "",
-                     target_type: str = "", limit: int = 50) -> dict[str, Any]:
+                     target_type: str = "", limit: int = 50,
+                     kb_id: int | None = None) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可查看审核队列", 403, "forbidden")
-        data = self.reviews.list(status=status, target_type=target_type, limit=limit)
+        data = self.reviews.list(status=status, target_type=target_type, limit=limit,
+                                 kb_id=kb_id)
         for item in data["items"]:
             item["target_title"] = self._review_target_title(item.get("target_type"),
                                                              item.get("target_id"))
@@ -1447,12 +1995,18 @@ class KBService:
         item["target_title"] = self._review_target_title(item.get("target_type"), item.get("target_id"))
         return item
 
-    def run_reviews(self, user: dict[str, Any], *, limit: int = 20) -> dict[str, Any]:
+    def run_reviews(self, user: dict[str, Any], *, limit: int = 20,
+                    kb_id: int | None = None) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可批量审核", 403, "forbidden")
-        rows = self.db.all(
-            "SELECT id FROM kb_reviews WHERE status IN ('queued','manual','failed') "
-            "ORDER BY created_at LIMIT ?", (max(1, min(100, limit)),))
+        sql = ("SELECT id FROM kb_reviews WHERE status IN ('queued','manual','failed')")
+        args: list[Any] = []
+        if kb_id:
+            sql += " AND kb_id=?"
+            args.append(int(kb_id))
+        sql += " ORDER BY created_at LIMIT ?"
+        args.append(max(1, min(100, limit)))
+        rows = self.db.all(sql, tuple(args))
         done, failed = [], []
         for row in rows:
             try:
@@ -1475,6 +2029,11 @@ class KBService:
         target_id = str(review.get("target_id") or "")
         patch = review.get("suggested_patch") or {}
         applied: dict[str, Any] = {}
+        if decision == "approve" and any(
+                str(item.get("severity") or "") == "blocker"
+                for item in (review.get("issues") or []) if isinstance(item, dict)):
+            raise KBError("审核存在 blocker，不能直接通过；请采纳 patch 或驳回",
+                          409, "blocker")
         if decision == "adopt_patch" or apply_patch:
             if not patch:
                 raise KBError("审核没有可采纳的 patch", 409, "no_patch")
@@ -1487,20 +2046,23 @@ class KBService:
                     if exc.code != "already_reviewed":
                         raise
             elif target_type == "case":
-                self.db.execute("UPDATE kb_cases SET status='active',review_status='pass',"
+                # 统一走 set_case_status，保证状态变更进入 append-only 修订链。
+                self.set_case_status(target_id, "active", user,
+                                     reason=f"审核 {review_id} 通过")
+                self.db.execute("UPDATE kb_cases SET review_status='pass',"
                                 "last_review_id=?,updated_at=? WHERE id=?",
                                 (review_id, iso_now(), target_id))
-                self._schedule_rebuild()
             elif target_type == "doc":
                 self.set_document_status(target_id, "active", user)
         elif decision == "reject":
             if target_type == "draft":
                 self.reject_draft(target_id, user, note)
             elif target_type == "case":
-                self.db.execute("UPDATE kb_cases SET status='disabled',review_status='reject',"
+                self.set_case_status(target_id, "disabled", user,
+                                     reason=f"审核 {review_id} 驳回")
+                self.db.execute("UPDATE kb_cases SET review_status='reject',"
                                 "last_review_id=?,updated_at=? WHERE id=?",
                                 (review_id, iso_now(), target_id))
-                self._schedule_rebuild()
             elif target_type == "doc":
                 self.set_document_status(target_id, "disabled", user)
         self.db.execute(
@@ -1553,10 +2115,11 @@ class KBService:
         raise KBError("文档级 patch 暂不支持，请按案例编辑", 400, "unsupported_patch")
 
 
-    def _document_payload(self, doc_row: dict[str, Any]) -> dict[str, Any]:
+    def _document_payload(self, doc_row: dict[str, Any], *, include_inactive: bool = True) -> dict[str, Any]:
+        status_sql = "" if include_inactive else " AND status='active'"
         payload = {"document": self._doc_public(doc_row, reveal=True),
                    "cases": [self._case_public(dict(c)) for c in self.db.all(
-                       "SELECT * FROM kb_cases WHERE doc_id=? AND status='active' "
+                       f"SELECT * FROM kb_cases WHERE doc_id=? AND status!='deleted'{status_sql} "
                        "ORDER BY ordinal,id", (doc_row["id"],))]}
         return payload
 
@@ -1632,8 +2195,8 @@ class KBService:
                              (case_id, kind, str(value)))
 
     def _insert_case_row(self, conn, doc_id: str, case: dict[str, Any], doc: dict[str, Any],
-                         ordinal: int, now: str, user_id: int, *, action: str,
-                         actor_type: str, reason: str) -> tuple[str, dict[str, Any]]:
+                         ordinal: int, now: str, user_id: int, *, kb_id: int = 1,
+                         action: str, actor_type: str, reason: str) -> tuple[str, dict[str, Any]]:
         values = self._case_values(case, doc, ordinal)
         case_id = _kb_id("K")
         case_vals = {
@@ -1650,12 +2213,12 @@ class KBService:
             "is_derived": values["is_derived"], "ordinal": ordinal,
         }
         conn.execute(
-            "INSERT INTO kb_cases(id,doc_id,ordinal,is_derived,title,title_clean,symptom,"
+            "INSERT INTO kb_cases(id,kb_id,doc_id,ordinal,is_derived,title,title_clean,symptom,"
             "environment,expected,actual,repro,found_date,location,cause,cause_detail,solution,"
             "prevention,root_cause_key,sections_json,boards_json,domains_json,versions_json,"
             "quality,confidence,status,revision,review_status,created_at,updated_at,updated_by) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',1,'unreviewed',?,?,?)",
-            (case_id, doc_id, case_vals["ordinal"], case_vals["is_derived"],
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',1,'unreviewed',?,?,?)",
+            (case_id, int(kb_id), doc_id, case_vals["ordinal"], case_vals["is_derived"],
              case_vals["title"], case_vals["title_clean"], case_vals["symptom"],
              case_vals["environment"], case_vals["expected"], case_vals["actual"],
              case_vals["repro"], case_vals["found_date"], case_vals["location"],
@@ -1716,7 +2279,7 @@ class KBService:
         result["id"] = case_id
         return result
 
-    def _insert_document(self, payload: dict[str, Any], user_id: int, *,
+    def _insert_document(self, payload: dict[str, Any], user_id: int, *, kb_id: int = 1,
                          action: str = "import", actor_type: str = "import",
                          reason: str = "导入建库") -> str:
         doc = dict(payload.get("document") or {})
@@ -1727,6 +2290,7 @@ class KBService:
         now = iso_now()
         raw = str(doc.get("raw_text") or "")
         masked = str(doc.get("masked_text") or raw)
+        _, content_hash = _payload_hashes(payload)
         boards = _json_list(doc.get("boards"))
         domains = _json_list(doc.get("domains"))
         versions = _json_list(doc.get("versions"))
@@ -1735,12 +2299,13 @@ class KBService:
         with self.db.tx() as conn:
             conn.execute(
                 "INSERT INTO kb_documents(id,kb_id,title,title_clean,doc_type,source_type,"
-                "source_name,source_sha256,status,quality,confidence,pii_masked,boards_json,"
+                "source_name,source_sha256,content_sha256,status,quality,confidence,pii_masked,boards_json,"
                 "domains_json,versions_json,tags_json,raw_text,masked_text,attachments_json,"
-                "created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (doc_id, 1, str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
+                "created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (doc_id, int(kb_id), str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
                  str(doc.get("doc_type") or "fault"), str(doc.get("source_type") or "paste"),
                  str(doc.get("source_name") or ""), str(doc.get("source_sha256") or ""),
+                 content_hash,
                  "active", quality, float(doc.get("confidence") or 0.9),
                  1 if doc.get("pii_masked", True) else 0,
                  json.dumps(boards, ensure_ascii=False),
@@ -1749,8 +2314,8 @@ class KBService:
                  user_id, now, now))
             for ordinal, case in enumerate(cases, start=1):
                 _, version_case = self._insert_case_row(
-                    conn, doc_id, case, doc, ordinal, now, user_id, action=action,
-                    actor_type=actor_type, reason=reason)
+                    conn, doc_id, case, doc, ordinal, now, user_id, kb_id=kb_id,
+                    action=action, actor_type=actor_type, reason=reason)
                 version_cases.append(version_case)
             version_payload = {"document": doc, "cases": version_cases}
             conn.execute(
@@ -1762,7 +2327,8 @@ class KBService:
         return doc_id
 
     def _replace_document(self, doc_id: str, payload: dict[str, Any], user_id: int, *,
-                          action: str = "update", reason: str = "编辑文档") -> None:
+                          action: str = "update", reason: str = "编辑文档",
+                          preserve_status: bool = True) -> None:
         doc = dict(payload.get("document") or {})
         cases = list(payload.get("cases") or [])
         if not cases:
@@ -1773,6 +2339,11 @@ class KBService:
             "SELECT MAX(version) AS v FROM kb_doc_versions WHERE doc_id=?", (doc_id,)) or {}
             ).get("v") or 0) + 1
         with self.db.tx() as conn:
+            old_doc = dict(conn.execute(
+                "SELECT status,deleted_at FROM kb_documents WHERE id=?", (doc_id,)).fetchone() or {})
+            doc_status = str(old_doc.get("status") or "active") if preserve_status \
+                else str(doc.get("status") or old_doc.get("status") or "active")
+            doc_deleted_at = old_doc.get("deleted_at") if preserve_status else None
             old_rows = [dict(r) for r in conn.execute(
                 "SELECT * FROM kb_cases WHERE doc_id=? ORDER BY ordinal,id", (doc_id,)).fetchall()]
             old_by_id = {str(r["id"]): r for r in old_rows}
@@ -1812,11 +2383,12 @@ class KBService:
                                     int(old.get("revision") or 1) + 1, "delete", before, after,
                                     user_id, reason=reason)
             conn.execute(
-                "UPDATE kb_documents SET title=?,title_clean=?,status='active',quality=?,"
+                "UPDATE kb_documents SET title=?,title_clean=?,status=?,quality=?,"
                 "confidence=?,pii_masked=?,boards_json=?,domains_json=?,versions_json=?,"
                 "source_type=?,source_name=?,source_sha256=?,raw_text=?,masked_text=?,"
-                "updated_at=?,deleted_at=NULL WHERE id=?",
+                "updated_at=?,deleted_at=? WHERE id=?",
                 (str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
+                 doc_status,
                  max([float(c.get("quality") or 0) for c in cases] or [0]),
                  float(doc.get("confidence") or 0.9),
                  1 if doc.get("pii_masked", True) else 0,
@@ -1825,7 +2397,7 @@ class KBService:
                  json.dumps(_json_list(doc.get("versions")), ensure_ascii=False),
                  str(doc.get("source_type") or "paste"), str(doc.get("source_name") or ""),
                  str(doc.get("source_sha256") or ""),
-                 raw, str(doc.get("masked_text") or raw), now, doc_id))
+                 raw, str(doc.get("masked_text") or raw), now, doc_deleted_at, doc_id))
             version_payload = {"document": doc, "cases": version_cases}
             conn.execute(
                 "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
@@ -1834,15 +2406,17 @@ class KBService:
                  json.dumps(version_payload, ensure_ascii=False),
                  hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
 
-    def _create_draft(self, payload: dict[str, Any], user_id: int, *, job_id: str,
-                      title: str, confidence: float, warnings: list[str]) -> str:
+    def _create_draft(self, payload: dict[str, Any], user_id: int, *, kb_id: int = 1,
+                      job_id: str, title: str, confidence: float, warnings: list[str]) -> str:
         draft_id = _kb_id("DR")
+        source_hash, content_hash = _payload_hashes(payload)
         self.db.execute(
-            "INSERT INTO kb_drafts(id,job_id,user_id,title,payload_json,confidence,"
-            "warnings_json,status,created_at) VALUES(?,?,?,?,?,?,?, 'reviewing',?)",
-            (draft_id, job_id, user_id, title[:300],
+            "INSERT INTO kb_drafts(id,kb_id,job_id,user_id,title,payload_json,confidence,"
+            "warnings_json,status,source_sha256,content_sha256,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?, 'reviewing',?,?,?)",
+            (draft_id, int(kb_id), job_id, user_id, title[:300],
              json.dumps(payload, ensure_ascii=False), confidence,
-             json.dumps(warnings, ensure_ascii=False), iso_now()))
+             json.dumps(warnings, ensure_ascii=False), source_hash, content_hash, iso_now()))
         if (self.reviews.enabled()
                 and bool(self.config.get("kb_review_auto_on_import", True))):
             self._queue_review("draft", draft_id, stage="import")
