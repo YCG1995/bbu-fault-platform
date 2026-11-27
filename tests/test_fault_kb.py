@@ -471,8 +471,15 @@ class KBServiceTests(unittest.TestCase):
             cross = svc.search("跨库检索专用", self.admin, kb_ids=[1, expert_id], log=False)
             self.assertTrue(any(int(x.get("kb_id") or 0) == expert_id
                                 for x in cross.get("items") or []))
+            # 归档后仍可备份；管理员可以把归档库恢复为 active。
+            svc.archive_library(expert_id, self.admin)
+            self.assertEqual(svc.get_library(expert_id, include_archived=True)["status"], "archived")
+            self.assertEqual(len(svc.list_libraries()["items"]), 1)
+            self.assertEqual(len(svc.list_libraries(include_archived=True)["items"]), 2)
             filename, data = svc.backup_library(expert_id, self.admin)
             self.assertTrue(filename.endswith(".kbbackup.zip"))
+            svc.update_library(expert_id, {"status": "active"}, self.admin)
+            self.assertEqual(svc.get_library(expert_id)["status"], "active")
             restored = svc.restore_library(self.admin, data, name="恢复专家库")
             self.assertGreaterEqual(restored["documents"], 1)
             self.assertEqual(svc.status(self.admin, kb_id=restored["kb_id"])["documents"], 1)

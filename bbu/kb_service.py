@@ -308,7 +308,8 @@ class KBService:
 
     # ------------------------------------------------------------ 知识库
     def list_libraries(self, *, include_archived: bool = False) -> dict[str, Any]:
-        where = "" if include_archived else " WHERE l.status='active' AND l.deleted_at IS NULL"
+        where = (" WHERE l.status IN ('active','archived')" if include_archived
+                 else " WHERE l.status='active' AND l.deleted_at IS NULL")
         rows = self.db.all(
             "SELECT l.*, "
             "(SELECT COUNT(*) FROM kb_documents d WHERE d.kb_id=l.id AND d.status='active' "
@@ -318,9 +319,9 @@ class KBService:
         return {"items": [dict(r) for r in rows]}
 
     def get_library(self, kb_id: int, *, include_archived: bool = False) -> dict[str, Any]:
-        sql = "SELECT * FROM kb_libraries WHERE id=?"
+        sql = "SELECT * FROM kb_libraries WHERE id=? AND status<>'deleted'"
         if not include_archived:
-            sql += " AND deleted_at IS NULL"
+            sql += " AND status='active' AND deleted_at IS NULL"
         row = self.db.one(sql, (int(kb_id),))
         if not row:
             raise KBError("知识库不存在", 404, "not_found")
@@ -447,7 +448,7 @@ class KBService:
                        user: dict[str, Any]) -> dict[str, Any]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可修改知识库", 403, "forbidden")
-        row = self.get_library(kb_id)
+        row = self.get_library(kb_id, include_archived=True)
         name = str(data.get("name", row.get("name"))).strip()
         if not name or len(name) > 80:
             raise KBError("知识库名称需为 1–80 个字符")

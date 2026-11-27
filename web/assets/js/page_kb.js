@@ -550,6 +550,14 @@ function bindKbTabActions(view) {
         toast('已归档', 'ok'); renderKbDocs();
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
+    'library-unarchive': async (el) => {
+      if (!(await confirmDialog('恢复该知识库？恢复后会重新出现在问答库列表。'))) return;
+      setBusy(el, true, '恢复中…');
+      try {
+        await api(`/api/kb/libraries/${encodeURIComponent(el.dataset.id)}`, { method: 'PUT', body: { status: 'active' } });
+        toast('已恢复', 'ok'); renderKbDocs();
+      } finally { setBusy(el, false); }
+    },
     'library-restore': async (el) => {
       const file = view.querySelector('#kb-lib-file')?.files?.[0];
       if (!file) { toast('请选择备份包', 'error'); return; }
@@ -796,6 +804,7 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
               ${x.is_default ? '<span class="badge">默认</span>' : ''}
               <span style="margin-left:auto" class="inline">
                 <a class="btn btn-sm" href="/api/kb/libraries/${encodeURIComponent(x.id)}/backup">${icon('download')} 备份</a>
+                ${x.status === 'archived' && !x.is_default ? `<button class="btn btn-sm" data-act="library-unarchive" data-id="${esc(x.id)}">恢复</button>` : ''}
                 ${x.status === 'active' && !x.is_default ? `<button class="btn btn-sm btn-danger" data-act="library-archive" data-id="${esc(x.id)}">归档</button>` : ''}
               </span>
               ${x.description ? `<div class="tiny muted" style="flex-basis:100%">${esc(x.description)}</div>` : ''}

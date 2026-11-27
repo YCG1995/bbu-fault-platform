@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
-  "count": 45,
+  "count": 46,
   "scripts": [
     {
       "path": "meta/bbu-fault-skill-builder/scripts/build_child_skill.py",
@@ -121,6 +121,10 @@
     },
     {
       "path": "tools/generate_diagnostic_dataset.py",
+      "kind": "platform-tool"
+    },
+    {
+      "path": "tools/kb_library_purge.py",
       "kind": "platform-tool"
     },
     {

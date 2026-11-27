@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 134,
-    "action_instances": 310,
-    "buttons_all": 276,
-    "buttons_page": 259,
+    "distinct_actions": 135,
+    "action_instances": 311,
+    "buttons_all": 277,
+    "buttons_page": 260,
     "modal_calls": 33,
     "forms": 21
   },
@@ -449,6 +449,13 @@
     },
     {
       "action": "library-restore",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-unarchive",
       "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
