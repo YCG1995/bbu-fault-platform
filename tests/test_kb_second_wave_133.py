@@ -78,8 +78,8 @@ class SecondWaveBase(unittest.TestCase):
 
 
 class SchemaAndEvalTests(SecondWaveBase):
-    def test_schema_27_columns_indexes_and_unique_term(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 27)
+    def test_schema_28_columns_indexes_and_unique_term(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 28)
         doc_cols = {r["name"] for r in self.db.all("PRAGMA table_info(kb_documents)")}
         self.assertTrue({"merged_into", "merged_at", "merge_token"} <= doc_cols)
         eval_cols = {r["name"] for r in self.db.all("PRAGMA table_info(kb_eval_queries)")}

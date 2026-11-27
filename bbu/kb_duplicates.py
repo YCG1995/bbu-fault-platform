@@ -51,6 +51,12 @@ def _jaccard(left: set[str], right: set[str]) -> float:
     return len(left & right) / len(left | right)
 
 
+def _same_value(left: Any, right: Any) -> bool:
+    if isinstance(left, list) or isinstance(right, list):
+        return [str(x) for x in (left or [])] == [str(x) for x in (right or [])]
+    return str(left or "").strip() == str(right or "").strip()
+
+
 def _canonical_score(doc: dict[str, Any]) -> tuple:
     cases = int(doc.get("case_count") or 0)
     return (float(doc.get("quality") or 0), int(doc.get("citation_count") or 0),
@@ -159,7 +165,9 @@ class KBDuplicates:
         return {
             "source": self._doc_public(source), "target": self._doc_public(target),
             "similarity": round(similarity, 4),
-            "fields": self._diff(source, target),
+            "fields": self._diff(source, target, source_cases, target_cases),
+            "source_case_list": [self._case_brief(c) for c in source_cases[:6]],
+            "target_case_list": [self._case_brief(c) for c in target_cases[:6]],
             "source_cases": len(source_cases), "target_cases": len(target_cases),
             "suggested_canonical": self._suggest(source, target),
         }
@@ -266,22 +274,50 @@ class KBDuplicates:
             "versions": _json_list(doc.get("versions_json")),
         }
 
-    def _diff(self, source: dict[str, Any], target: dict[str, Any]) -> list[dict[str, Any]]:
-        cases_a = self._cases(str(source.get("id"))) if "case_count" not in source else []
-        cases_b = self._cases(str(target.get("id"))) if "case_count" not in target else []
-        source_count = int(source.get("case_count") if "case_count" in source else len(cases_a))
-        target_count = int(target.get("case_count") if "case_count" in target else len(cases_b))
+    def _diff(self, source: dict[str, Any], target: dict[str, Any],
+              source_cases: list[dict[str, Any]] | None = None,
+              target_cases: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        if source_cases is None:
+            source_cases = self._cases(str(source.get("id"))) if "case_count" not in source else []
+        if target_cases is None:
+            target_cases = self._cases(str(target.get("id"))) if "case_count" not in target else []
+        source_count = int(source.get("case_count") if "case_count" in source else len(source_cases))
+        target_count = int(target.get("case_count") if "case_count" in target else len(target_cases))
+        first_a = source_cases[0] if source_cases else {}
+        first_b = target_cases[0] if target_cases else {}
         pairs = (
             ("标题", source.get("title"), target.get("title")),
             ("案例数", source_count, target_count),
+            ("现象", first_a.get("symptom"), first_b.get("symptom")),
+            ("原因", first_a.get("cause_detail") or first_a.get("cause"),
+             first_b.get("cause_detail") or first_b.get("cause")),
+            ("处理方案", first_a.get("solution"), first_b.get("solution")),
+            ("预防", first_a.get("prevention"), first_b.get("prevention")),
             ("板卡", _json_list(source.get("boards_json")), _json_list(target.get("boards_json"))),
             ("领域", _json_list(source.get("domains_json")), _json_list(target.get("domains_json")),
              ),
             ("版本", _json_list(source.get("versions_json")), _json_list(target.get("versions_json"))),
             ("质量", round(float(source.get("quality") or 0), 1), round(float(target.get("quality") or 0), 1)),
         )
-        return [{"field": name, "source": left, "target": right}
-                for name, left, right in pairs if left != right]
+        return [{"field": name, "source": left, "target": right,
+                 "same": _same_value(left, right)}
+                for name, left, right in pairs]
+
+    def _case_brief(self, case: dict[str, Any]) -> dict[str, Any]:
+        def cut(value: Any, limit: int = 1600) -> tuple[str, bool]:
+            text = str(value or "")
+            return (text[:limit], len(text) > limit)
+        symptom, s1 = cut(case.get("symptom"))
+        cause, c1 = cut(case.get("cause_detail") or case.get("cause"))
+        solution, s2 = cut(case.get("solution"))
+        prevention, p1 = cut(case.get("prevention"), 600)
+        return {
+            "id": case.get("id"), "title": case.get("title") or "",
+            "status": case.get("status") or "", "quality": float(case.get("quality") or 0),
+            "symptom": symptom, "cause": cause, "solution": solution,
+            "prevention": prevention,
+            "truncated": {"symptom": s1, "cause": c1, "solution": s2, "prevention": p1},
+        }
 
     def _suggest(self, source: dict[str, Any], target: dict[str, Any]) -> str:
         return str(source["id"] if _canonical_score(source) >= _canonical_score(target)

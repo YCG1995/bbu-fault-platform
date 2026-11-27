@@ -238,6 +238,15 @@ EXPECTED_ROUTES = {
     "POST /api/kb/drafts/{id}/approve",
     "POST /api/kb/drafts/{id}/reject",
     "POST /api/kb/chat",
+    "GET /api/kb/chats",
+    "POST /api/kb/chats",
+    "GET /api/kb/chats/{session_id}",
+    "DELETE /api/kb/chats/{session_id}",
+    "POST /api/kb/chats/{session_id}/messages",
+    "GET /api/kb/chats/{session_id}/messages/{message_id}",
+    "POST /api/kb/cases/{case_id}/ai-polish",
+    "GET /api/kb/docs/{id}/revisions",
+    "POST /api/kb/maintenance/repair-symptoms",
     "POST /api/kb/feedback",
     "POST /api/kb/reindex",
     "GET /api/kb/queries",
@@ -485,6 +494,20 @@ def make_update_package(tmp: Path, version: str) -> Path:
     with tarfile.open(out, "w:gz") as tar:
         tar.add(root, arcname="bbu-fault-platform")
     return out
+
+
+def wait_chat(client: Client, session_id: str, message_id: str,
+              timeout: int = 30) -> dict:
+    deadline = time.time() + timeout
+    message: dict = {}
+    while time.time() < deadline:
+        _, payload = client.json(
+            "GET", f"/api/kb/chats/{session_id}/messages/{message_id}")
+        message = payload["message"]
+        if message["status"] in ("done", "error"):
+            return message
+        time.sleep(0.3)
+    raise RuntimeError(f"问答消息未完成：{message}")
 
 
 def main() -> int:
@@ -1625,6 +1648,27 @@ def main() -> int:
             "query_id": kb_chat["query_id"], "helpful": True, "reason": "api-smoke",
         })
         hit("POST /api/kb/feedback")
+        _, chat_session = admin_client.json("POST", "/api/kb/chats", {"kb_id": 1},
+                                            expected=201)
+        chat_sid = chat_session["session"]["id"]
+        hit("POST /api/kb/chats")
+        _, chat_sent = admin_client.json(
+            "POST", f"/api/kb/chats/{chat_sid}/messages",
+            {"query": "看门狗复位", "kb_ids": [1]}, expected=201)
+        chat_mid = chat_sent["assistant_message"]["id"]
+        hit("POST /api/kb/chats/{session_id}/messages")
+        chat_message = wait_chat(admin_client, chat_sid, chat_mid)
+        assert chat_message["status"] == "done", chat_message
+        assert int(chat_message["progress"]["percent"]) == 100, chat_message
+        hit("GET /api/kb/chats/{session_id}/messages/{message_id}")
+        _, chat_list = admin_client.json("GET", "/api/kb/chats?limit=10")
+        assert any(x["id"] == chat_sid for x in chat_list["items"])
+        hit("GET /api/kb/chats")
+        _, chat_detail = admin_client.json("GET", f"/api/kb/chats/{chat_sid}")
+        assert len(chat_detail["messages"]) >= 2
+        hit("GET /api/kb/chats/{session_id}")
+        admin_client.json("DELETE", f"/api/kb/chats/{chat_sid}")
+        hit("DELETE /api/kb/chats/{session_id}")
         admin_client.json("POST", "/api/kb/reindex", {})
         hit("POST /api/kb/reindex")
         admin_client.json("GET", "/api/kb/queries")
@@ -1679,10 +1723,23 @@ def main() -> int:
         admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
                           {"status": "active", "reason": "api-smoke"})
         hit("POST /api/kb/cases/{case_id}/status")
+        status, polish_raw, _ = admin_client.request(
+            "POST", f"/api/kb/cases/{case_created_id}/ai-polish", b"{}",
+            {"Content-Type": "application/json", "X-CSRF": admin_client.csrf})
+        assert status in (200, 502, 503), (status, polish_raw[:200])
+        hit("POST /api/kb/cases/{case_id}/ai-polish")
+        _, doc_revs = admin_client.json(
+            "GET", f"/api/kb/docs/{doc_created_id}/revisions")
+        assert doc_revs["items"]
+        hit("GET /api/kb/docs/{id}/revisions")
 
         _, stats = admin_client.json("GET", "/api/kb/stats?days=30")
         assert "inventory" in stats and "usage" in stats
         hit("GET /api/kb/stats")
+        _, repaired = admin_client.json(
+            "POST", "/api/kb/maintenance/repair-symptoms", {})
+        assert repaired["scanned"] >= 0
+        hit("POST /api/kb/maintenance/repair-symptoms")
         _, audit = admin_client.json("GET", "/api/kb/audit?limit=20")
         assert audit["items"]
         hit("GET /api/kb/audit")

@@ -496,6 +496,19 @@ class App:
         r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/approve", h_kb_draft_approve)
         r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/reject", h_kb_draft_reject)
         r.add("POST", r"/api/kb/chat", h_kb_chat)
+        r.add("GET", r"/api/kb/chats", h_kb_chats)
+        r.add("POST", r"/api/kb/chats", h_kb_chat_create)
+        r.add("GET", r"/api/kb/chats/(?P<session_id>[A-Za-z0-9_-]+)", h_kb_chat_detail)
+        r.add("DELETE", r"/api/kb/chats/(?P<session_id>[A-Za-z0-9_-]+)", h_kb_chat_delete)
+        r.add("POST", r"/api/kb/chats/(?P<session_id>[A-Za-z0-9_-]+)/messages",
+              h_kb_chat_message_create)
+        r.add("GET", r"/api/kb/chats/(?P<session_id>[A-Za-z0-9_-]+)/messages/"
+              r"(?P<message_id>[A-Za-z0-9_-]+)", h_kb_chat_message_get)
+        r.add("POST", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/ai-polish",
+              h_kb_case_polish)
+        r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/revisions",
+              h_kb_doc_revisions)
+        r.add("POST", r"/api/kb/maintenance/repair-symptoms", h_kb_repair_symptoms)
         r.add("POST", r"/api/kb/feedback", h_kb_feedback)
         r.add("POST", r"/api/kb/reindex", h_kb_reindex)
         r.add("GET", r"/api/kb/queries", h_kb_queries)
@@ -5553,6 +5566,108 @@ def h_kb_chat(app: App, req):
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     return response_json(result)
+
+
+def h_kb_chats(app: App, req):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_chats(
+            user, kb_id=_kb_int(req.query.get("kb"), 0) or None,
+            limit=_kb_int(req.query.get("limit"), 30)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_chat_create(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    try:
+        kb_id = _kb_int(data.get("kb_id"), 0)
+        if kb_id > 0:
+            _kb_require_visible(app, user, kb_id)
+        else:
+            kb_id = _kb_default_visible(app, user)
+        return response_json(app.kb.create_chat_session(
+            user, kb_id=kb_id, title=str(data.get("title") or "")), status=201)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_chat_detail(app: App, req, session_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.get_chat(session_id, user,
+                                            limit=_kb_int(req.query.get("limit"), 200)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_chat_delete(app: App, req, session_id: str):
+    user = _auth(app, req)
+    try:
+        result = app.kb.delete_chat(session_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.chat_delete", session_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_chat_message_create(app: App, req, session_id: str):
+    user = _auth(app, req)
+    data = req.json()
+    _kb_rate(app, user)
+    query = str(data.get("query") or data.get("message") or "").strip()
+    if not query:
+        raise HTTPError(400, "请填写故障现象或问题")
+    if len(query) > 2000:
+        raise HTTPError(413, "问题过长（上限 2000 字）")
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    try:
+        kb_ids = [int(x) for x in data.get("kb_ids") or [] if int(x) > 0]
+        result = app.kb.send_chat_message(session_id, user, query=query,
+                                          filters=filters, kb_ids=kb_ids)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(result, status=201)
+
+
+def h_kb_chat_message_get(app: App, req, session_id: str, message_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.get_chat_message(message_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_polish(app: App, req, case_id: str):
+    user = _auth(app, req)
+    _kb_require_case_visible(app, user, case_id)
+    data = req.json()
+    try:
+        result = app.kb.polish_case(case_id, user,
+                                    instruction=str(data.get("instruction") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_polish", case_id,
+                 {"model": result.get("model"), "changed": result.get("changed")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_doc_revisions(app: App, req, doc_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_doc_revisions(
+            doc_id, user, limit=_kb_int(req.query.get("limit"), 100)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_repair_symptoms(app: App, req):
+    user = _admin(app, req)
+    try:
+        return response_json(app.kb.repair_symptom_titles(user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
 
 
 def h_kb_feedback(app: App, req):

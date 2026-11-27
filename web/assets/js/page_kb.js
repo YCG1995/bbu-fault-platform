@@ -188,24 +188,112 @@ function domainOptions(facets) {
     (x) => `<option value="${esc(x.value)}">${esc(x.value)}（${x.count}）</option>`).join('')}`;
 }
 
+const KB_CHAT_STATUS = {
+  pending: '排队中', running: '检索中', done: '已完成', error: '失败',
+};
+const KB_MODEL_STATE = {
+  timeout: '模型调用超时', no_model: '未配置可用模型', error: '模型调用失败',
+  no_answer: '未命中案例',
+};
+const KB_REVIEW_STATUS_LABEL = {
+  pass: '审核通过', reject: '审核驳回', unreviewed: '待审核', pending: '待审核',
+};
+const KB_REV_ACTION_LABEL = {
+  import: '导入', update: '编辑', status: '状态变更', restore: '恢复', delete: '删除',
+  review: '审核', split: '拆分', merge: '合并', derive: '派生',
+};
+
+function kbChatProgressHtml(progress, status = 'running') {
+  const p = progress || {};
+  const failed = status === 'error' || p.failed;
+  const steps = p.steps || [];
+  return `<div class="kb-chat-progress ${failed ? 'failed' : ''}">
+    <div class="inline"><strong>${failed ? '检索中断' : '正在检索'}</strong>
+      <span class="badge ${failed ? 'danger' : 'warn'}">${esc(p.label || '准备中')}</span>
+      <span class="badge info" style="margin-left:auto">${Number(p.percent || 0)}%</span></div>
+    <div class="kb-meter-track" style="margin-top:8px"><div class="kb-meter-fill" style="width:${Math.max(4, Math.min(100, Number(p.percent || 0)))}%"></div></div>
+    <div class="kb-progress-steps">${steps.map((s) => `<span class="kb-step ${esc(s.status || 'waiting')}">
+      ${s.status === 'done' ? '✓' : s.status === 'failed' ? '!' : '·'} ${esc(s.label)}</span>`).join('')}</div>
+    ${p.detail?.error ? `<div class="tiny muted" style="margin-top:6px">${esc(String(p.detail.error).slice(0, 300))}</div>` : ''}
+    ${p.elapsed_ms ? `<div class="tiny muted" style="margin-top:4px">已用时 ${(Number(p.elapsed_ms) / 1000).toFixed(1)}s；刷新页面后会继续显示服务端进度。</div>` : ''}
+  </div>`;
+}
+
+function kbModelNotice(data) {
+  const status = data.model_status || {};
+  if (!status.state || status.state === 'ok' || status.state === 'no_answer') return '';
+  const label = KB_MODEL_STATE[status.state] || '模型降级';
+  const raw = String(status.message || '').trim();
+  // 兼容 1.34 早期写入的历史消息：message 本身重复了标题和降级说明。
+  const detail = raw && !raw.startsWith(label) ? `：${esc(raw.slice(0, 300))}` : '';
+  const cost = status.latency_ms ? `，耗时 ${(Number(status.latency_ms) / 1000).toFixed(1)}s` : '';
+  const trace = data.trace_id && state.user?.role === 'admin'
+    ? ` <a href="#/traces/${encodeURIComponent(data.trace_id)}">查看执行轨迹 →</a>` : '';
+  return `<div class="alert warn kb-model-note">${icon('alert')}<div><strong>${label}</strong>${detail}。
+    已降级为本地检索摘要${cost}。${trace}</div></div>`;
+}
+
+function kbChatMessageHtml(m) {
+  const status = m.status || 'done';
+  if (m.role === 'user') {
+    return `<div class="kb-msg user"><div class="kb-msg-bubble">${esc(m.query || m.content || '').replace(/\n/g, '<br>')}</div>
+      <div class="tiny muted">${esc(m.created_at ? fmtDate(m.created_at) : '')}</div></div>`;
+  }
+  if (status === 'pending' || status === 'running') {
+    return `<div class="kb-msg assistant" data-mid="${esc(m.id)}"><div class="card">
+      <div class="card-body">${kbChatProgressHtml(m.progress, status)}</div></div></div>`;
+  }
+  if (status === 'error') {
+    return `<div class="kb-msg assistant" data-mid="${esc(m.id)}"><div class="alert danger">${icon('alert')}<div>
+      <strong>检索失败：${esc(m.error_message || '未知错误')}</strong>
+      <div class="tiny muted">错误码 ${esc(m.error_code || '—')}${m.latency_ms ? ` · 耗时 ${(Number(m.latency_ms) / 1000).toFixed(1)}s` : ''}</div>
+      <div class="inline" style="margin-top:8px">
+        <button class="btn btn-sm" data-act="chat-retry" data-query="${esc(m.query || '')}">重新检索</button>
+        ${state.user?.role === 'admin' ? `<a class="btn btn-sm" href="#/traces">查看执行轨迹</a>` : ''}
+      </div></div></div></div>`;
+  }
+  const payload = m.payload && Object.keys(m.payload).length
+    ? m.payload : { answer: m.content, query_id: m.query_id, degraded: true, cases: [] };
+  const meta = [m.created_at ? fmtDate(m.created_at) : '', m.model, m.latency_ms ? `${(Number(m.latency_ms) / 1000).toFixed(1)}s` : '']
+    .filter(Boolean).join(' · ');
+  return `<div class="kb-msg assistant" data-mid="${esc(m.id)}">
+    <div class="kb-msg-meta tiny muted">${esc(meta)}</div>
+    ${kbModelNotice(payload)}${renderResult(payload)}</div>`;
+}
+
+function kbChatListHtml(chats, activeId) {
+  if (!chats.length) return '<div class="empty small">还没有历史对话。提问一次就会自动保存。</div>';
+  return chats.map((c) => `<div class="kb-chat-item ${c.id === activeId ? 'active' : ''}" data-session="${esc(c.id)}">
+    <div class="kb-chat-title">${esc(c.title || '新对话')}</div>
+    <div class="inline" style="gap:6px"><span class="tiny muted">${esc(c.updated_at ? fmtDate(c.updated_at) : '')}</span>
+      ${c.running_message_id ? '<span class="badge warn">进行中</span>' : ''}
+      <span class="tiny muted" style="margin-left:auto">${Number(c.message_count || 0)} 条</span></div>
+    ${c.last_message?.content ? `<div class="tiny muted kb-chat-preview">${esc(c.last_message.content)}</div>` : ''}
+    <button class="btn btn-sm btn-ghost kb-chat-del" data-act="del-chat" data-id="${esc(c.id)}" title="删除对话">删除</button>
+  </div>`).join('');
+}
+
 export async function renderKb() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   let kbId = Math.max(0, Number(params.get('kb') || 0));
-  const view = mount('故障问答', '先查现场历史案例；结论必须能回到具体文档和案例', '');
+  const view = mount('故障问答', '历史对话与检索进度保存在服务端；刷新后可继续查看', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   let status;
   let facets;
   let recent = [];
+  let chats = [];
   try {
     const statusResp = await api(`/api/kb/status${kbId ? `?kb=${kbId}` : ''}`);
     status = statusResp.status;
     kbId = kbId || Number(status.kb_id || 1);
-    const [facetData, recentResp] = await Promise.all([
+    const [facetData, recentResp, chatResp] = await Promise.all([
       loadFacets(kbId),
       api(`/api/kb/docs?size=6&status=active&kb=${kbId}`).catch(() => ({ items: [] })),
+      api(`/api/kb/chats?limit=30&kb=${kbId}`).catch(() => ({ items: [] })),
     ]);
     facets = facetData;
     recent = recentResp.items || [];
+    chats = chatResp.items || [];
   } catch (err) {
     view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return;
@@ -227,6 +315,23 @@ export async function renderKb() {
   const libraryOptions = activeLibraries
     .map((x) => `<option value="${esc(x.id)}" ${Number(x.id) === Number(status.kb_id || 1) ? 'selected' : ''}>${esc(x.name)} · ${x.documents || 0} 文档</option>`).join('')
     || '<option value="1">故障知识库</option>';
+
+  let sessionId = String(params.get('session') || '');
+  let session = chats.find((x) => x.id === sessionId) || null;
+  let messages = [];
+  if (!sessionId && chats.length) sessionId = chats[0].id;
+  if (sessionId) {
+    try {
+      const detail = await api(`/api/kb/chats/${encodeURIComponent(sessionId)}`);
+      session = detail.session;
+      messages = detail.messages || [];
+    } catch {
+      sessionId = '';
+      session = null;
+      messages = [];
+    }
+  }
+
   view.innerHTML = `
     <div class="card"><div class="card-body inline" style="gap:12px;flex-wrap:wrap">
       <label class="small" for="kb-library-select">知识库</label>
@@ -248,59 +353,269 @@ export async function renderKb() {
       <div class="card stat"><div><div class="stat-val">${status.top_k || 6}</div>
         <div class="stat-label">默认引用上限</div><div class="stat-note">${status.index?.bytes ? `${Math.round(status.index.bytes / 1024)} KB 索引` : '无模型也可检索'}</div></div></div>
     </div>
-    <div class="card kb-ask-card" style="margin-top:14px">
-      <div class="card-head"><h2>查故障</h2><span class="sub">描述现象即可；越具体越容易命中</span></div>
-      <div class="card-body">
-        ${empty ? `<div class="alert info">${icon('info')}<div>知识库还没有数据。管理员可以到
-          <a href="#/kb/docs?tab=import">导入页</a> 导入 CSV/TXT/MD，或先载入示例数据。</div></div>` : ''}
-        <div class="form-row"><label for="kb-query">故障现象 / 问题</label>
-          <textarea class="input kb-query" id="kb-query" rows="4" maxlength="2000"
-            placeholder="例如：VBPE2 单板每 2~3 分钟复位一次，V4.30.20 升级后出现，网管有看门狗告警"></textarea>
-          <div class="tiny muted">建议写：板卡型号 + 软件/逻辑版本 + 告警码 + 现象 + 已做过的操作。</div></div>
-        <div class="form-row"><label>可选过滤</label>
-          <div class="inline kb-filters">
-            <select class="input" id="kb-board">${boardOptions(facets)}</select>
-            <select class="input" id="kb-domain">${domainOptions(facets)}</select>
-            <button class="btn btn-primary" type="button" data-act="ask">${icon('search')} 检索并回答</button>
-            <button class="btn" type="button" data-act="search">只检索案例</button>
+
+    <div class="kb-chat-layout">
+      <aside class="card kb-chat-side">
+        <div class="card-head"><h2>历史对话</h2>
+          <span class="sub" id="kb-chat-count">${chats.length} 条</span></div>
+        <div class="kb-chat-list" id="kb-chat-list">${kbChatListHtml(chats, sessionId)}</div>
+        <div class="card-body tiny muted kb-chat-tip">对话、进度和回答都保存在服务端。刷新页面或换设备后继续查看，不会丢失。</div>
+      </aside>
+      <section class="kb-chat-main">
+        <div class="card kb-chat-top"><div class="card-body inline" style="gap:10px">
+          <div style="min-width:0"><strong id="kb-chat-title">${esc(session?.title || '新对话')}</strong>
+            <div class="tiny muted" id="kb-chat-meta">${messages.length ? `${messages.length} 条消息` : '提问后自动保存'}</div></div>
+          <span style="margin-left:auto"></span>
+          <button class="btn btn-sm" type="button" data-act="new-chat">＋ 新对话</button>
+        </div></div>
+        <div class="kb-chat-messages" id="kb-chat-messages">${messages.length
+          ? messages.map(kbChatMessageHtml).join('')
+          : emptyState('inbox', '还没有对话', '描述一次现场故障，回答、引用案例和检索进度都会保存在这里。')}</div>
+        <div id="kb-search-result"></div>
+        <div class="card kb-ask-card">
+          <div class="card-head"><h2>描述故障</h2><span class="sub">Enter 发送 · Shift+Enter 换行</span></div>
+          <div class="card-body">
+            ${empty ? `<div class="alert info">${icon('info')}<div>知识库还没有数据。管理员可以到
+              <a href="#/kb/docs?tab=import">导入页</a> 导入 CSV/TXT/MD，或先载入示例数据。</div></div>` : ''}
+            <div class="form-row"><label for="kb-query">故障现象 / 问题</label>
+              <textarea class="input kb-query" id="kb-query" rows="3" maxlength="2000"
+                placeholder="例如：VBPE2 单板每 2~3 分钟复位一次，V4.30.20 升级后出现，网管有看门狗告警"></textarea>
+              <div class="tiny muted">建议写：板卡型号 + 软件/逻辑版本 + 告警码 + 现象 + 已做过的操作。</div></div>
+            <div class="form-row"><label>可选过滤</label>
+              <div class="inline kb-filters">
+                <select class="input" id="kb-board">${boardOptions(facets)}</select>
+                <select class="input" id="kb-domain">${domainOptions(facets)}</select>
+                <button class="btn btn-primary" type="button" data-act="ask">${icon('search')} 检索并回答</button>
+                <button class="btn" type="button" data-act="search">只检索案例</button>
+              </div>
+            </div>
+            <div class="inline kb-examples">
+              <span class="tiny muted">示例：</span>
+              ${['看门狗复位', '1588 时钟失锁', 'SSD 只读', 'SFP 收光低', 'EPLD 升级失败'].map(
+                (x) => `<button class="btn btn-sm btn-ghost" type="button" data-act="example" data-text="${esc(x)}">${esc(x)}</button>`).join('')}
+            </div>
           </div>
         </div>
-        <div class="inline kb-examples">
-          <span class="tiny muted">示例：</span>
-          ${['看门狗复位', '1588 时钟失锁', 'SSD 只读', 'SFP 收光低', 'EPLD 升级失败'].map(
-            (x) => `<button class="btn btn-sm btn-ghost" type="button" data-act="example" data-text="${esc(x)}">${esc(x)}</button>`).join('')}
-        </div>
-      </div>
+      </section>
     </div>
-    <div id="kb-result" class="kb-result">${empty ? emptyState('inbox', '知识库还是空的', '导入现场故障问答后，这里会显示带引用的回答。',
-      state.user?.role === 'admin' ? '<button class="btn btn-sm" data-act="sample">载入示例数据</button>' : '') : ''}</div>
+
     ${recent.length ? `<div class="card" style="margin-top:14px">
       <div class="card-head"><h2>最近入库</h2><a class="tiny" href="#/kb/docs?tab=docs" style="margin-left:auto">查看全部</a></div>
       <div class="card-body kb-recent">${recent.map((d) => `<a class="kb-recent-row" href="#/kb/docs/${encodeURIComponent(d.id)}">
         <span>${esc(d.title)}</span><span class="tiny muted">${esc((d.boards || []).join('、') || '—')} · ${d.case_count || 0} 案例</span>
       </a>`).join('')}</div></div>` : ''}
     <div class="card" style="margin-top:14px"><div class="card-body small muted">
-      <strong>回答边界：</strong>知识库回答只基于检索到的历史案例；无模型时显示本地摘要，有模型时也保留原文引用。
+      <strong>回答边界：</strong>知识库回答只基于检索到的历史案例；无模型或模型超时会明确标注并显示本地摘要。
       历史案例不是厂商正式公告，执行前需结合当前版本、现场日志和变更记录复核。
     </div></div>`;
 
   const crossToggle = view.querySelector('#kb-cross');
   const crossScope = view.querySelector('#kb-cross-scope');
   const crossCount = view.querySelector('#kb-cross-count');
+  const listEl = view.querySelector('#kb-chat-list');
+  const msgEl = view.querySelector('#kb-chat-messages');
+  const titleEl = view.querySelector('#kb-chat-title');
+  const metaEl = view.querySelector('#kb-chat-meta');
+  let pollTimer = null;
+
   const selectedCross = () => [...view.querySelectorAll('.kb-cross-option:checked')]
     .map((x) => Number(x.value)).filter((x) => x > 0);
+  const currentKb = () => Number(view.querySelector('#kb-library-select')?.value || kbId);
   const syncCross = () => {
     if (crossCount) crossCount.textContent = `已选 ${selectedCross().length} / 最多 5 个`;
     try { localStorage.setItem('kb.cross.ids', JSON.stringify(selectedCross())); } catch {}
   };
+  const stopPoll = () => {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+  const renderChatList = () => {
+    if (!listEl) return;
+    listEl.innerHTML = kbChatListHtml(chats, sessionId);
+    const countEl = view.querySelector('#kb-chat-count');
+    if (countEl) countEl.textContent = `${chats.length} 条`;
+  };
+  const renderChatHeader = () => {
+    if (titleEl) titleEl.textContent = session?.title || '新对话';
+    if (metaEl) metaEl.textContent = messages.length
+      ? `${messages.length} 条消息 · ${session?.updated_at ? fmtDate(session.updated_at) : ''}`
+      : '提问后自动保存';
+  };
+  const renderChatMessages = (scroll = false) => {
+    if (!msgEl) return;
+    msgEl.innerHTML = messages.length
+      ? messages.map(kbChatMessageHtml).join('')
+      : emptyState('inbox', '还没有对话', '描述一次现场故障，回答、引用案例和检索进度都会保存在这里。');
+    if (scroll) msgEl.scrollTop = msgEl.scrollHeight;
+  };
+  const syncHash = () => {
+    const parts = [`kb=${currentKb()}`];
+    if (sessionId) parts.push(`session=${encodeURIComponent(sessionId)}`);
+    if (crossToggle?.checked) {
+      parts.push('cross=1', `kb_ids=${selectedCross().join(',')}`);
+    }
+    history.replaceState(null, '', `#/kb?${parts.join('&')}`);
+  };
+  const refreshChats = async () => {
+    try {
+      const r = await api(`/api/kb/chats?limit=30&kb=${currentKb()}`);
+      chats = r.items || [];
+      renderChatList();
+    } catch {}
+  };
+  const pollMessage = (mid) => {
+    stopPoll();
+    const tick = async () => {
+      if (!view.isConnected || !sessionId) return;
+      try {
+        const message = (await api(`/api/kb/chats/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(mid)}`)).message;
+        const index = messages.findIndex((x) => x.id === mid);
+        if (index >= 0) messages[index] = message;
+        renderChatMessages(true);
+        if (['pending', 'running'].includes(message.status)) {
+          pollTimer = setTimeout(tick, 1200);
+        } else {
+          pollTimer = null;
+          refreshChats();
+        }
+      } catch {
+        if (view.isConnected) pollTimer = setTimeout(tick, 2000);
+      }
+    };
+    tick();
+  };
+  const loadSession = async (sid) => {
+    stopPoll();
+    try {
+      const detail = await api(`/api/kb/chats/${encodeURIComponent(sid)}`);
+      sessionId = sid;
+      session = detail.session;
+      messages = detail.messages || [];
+      renderChatList();
+      renderChatHeader();
+      renderChatMessages(true);
+      syncHash();
+      if (detail.running_message_id) pollMessage(detail.running_message_id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  const newChat = async () => {
+    if (sessionId && !messages.length) {
+      view.querySelector('#kb-query')?.focus();
+      return;
+    }
+    try {
+      const r = await api('/api/kb/chats', { method: 'POST', body: { kb_id: currentKb() } });
+      chats.unshift(r.session);
+      sessionId = r.session.id;
+      session = r.session;
+      messages = [];
+      stopPoll();
+      renderChatList();
+      renderChatHeader();
+      renderChatMessages();
+      syncHash();
+      view.querySelector('#kb-query')?.focus();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  const chatPayload = () => {
+    const filters = {};
+    const board = view.querySelector('#kb-board')?.value || '';
+    const domain = view.querySelector('#kb-domain')?.value || '';
+    if (board) filters.board = board;
+    if (domain) filters.domain = domain;
+    let kbIds = [currentKb()];
+    if (crossToggle?.checked) {
+      const checked = selectedCross();
+      if (checked.length > 5) throw new Error('跨库检索最多选择 5 个知识库');
+      kbIds = checked.length ? checked : [currentKb()];
+    }
+    return { filters, kbIds };
+  };
+  const ensureSession = async () => {
+    if (sessionId) return;
+    const r = await api('/api/kb/chats', { method: 'POST', body: { kb_id: currentKb() } });
+    chats.unshift(r.session);
+    sessionId = r.session.id;
+    session = r.session;
+    messages = [];
+    renderChatList();
+    renderChatHeader();
+    syncHash();
+  };
+  const ask = async (button) => {
+    const query = view.querySelector('#kb-query')?.value.trim() || '';
+    if (!query) { toast('请先描述故障现象', 'error'); return; }
+    if (pollTimer) { toast('当前检索仍在进行，进度会继续显示', 'warn'); return; }
+    let payload;
+    try { payload = chatPayload(); } catch (err) { toast(err.message, 'error'); return; }
+    setBusy(button, true, '提交中…');
+    const field = view.querySelector('#kb-query');
+    try {
+      await ensureSession();
+      const res = await api(`/api/kb/chats/${encodeURIComponent(sessionId)}/messages`, {
+        method: 'POST', body: { query, filters: payload.filters, kb_ids: payload.kbIds },
+      });
+      messages.push(res.user_message, res.assistant_message);
+      session = res.session || session;
+      const index = chats.findIndex((x) => x.id === sessionId);
+      if (index >= 0) {
+        chats[index] = { ...chats[index], ...session, message_count: messages.length, running_message_id: res.assistant_message.id };
+      }
+      renderChatList();
+      renderChatHeader();
+      renderChatMessages(true);
+      if (field) field.value = '';
+      syncHash();
+      pollMessage(res.assistant_message.id);
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  };
+  const searchOnly = async (button) => {
+    const query = view.querySelector('#kb-query')?.value.trim() || '';
+    if (!query) { toast('请先描述故障现象', 'error'); return; }
+    let payload;
+    try { payload = chatPayload(); } catch (err) { toast(err.message, 'error'); return; }
+    const board = payload.filters.board || '';
+    const domain = payload.filters.domain || '';
+    setBusy(button, true, '检索中…');
+    try {
+      const data = await api(`/api/kb/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}&domain=${encodeURIComponent(domain)}&limit=10&kb_ids=${payload.kbIds.join(',')}`);
+      const items = data.items || [];
+      const multi = payload.kbIds.length > 1;
+      const box = view.querySelector('#kb-search-result');
+      box.innerHTML = items.length ? `<div class="card" style="margin-top:12px">
+        <div class="card-head"><h2>只检索结果</h2><span class="sub">${data.no_answer ? '低于拒答阈值，仅供参考' : `${items.length} 个案例`}${multi ? ` · ${payload.kbIds.length} 个库` : ''} · 未写入对话</span></div>
+        <div class="card-body kb-case-list">${items.map((c, i) => `<a class="kb-case-card" href="#/kb/docs/${encodeURIComponent(c.doc_id)}">
+          <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>
+            <span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
+          <div class="kb-snippet"><span>现象</span>${esc(c.symptom || '—')}</div>
+          <div class="kb-snippet"><span>原因</span>${esc(c.cause || '—')}</div>
+          <div class="kb-snippet"><span>方案</span>${esc(c.solution || '—')}</div></a>`).join('')}</div></div>`
+        : `<div class="alert warn" style="margin-top:12px">${icon('alert')}<div>${esc(data.reason || '没有命中案例')}</div></div>`;
+      box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  };
+
   crossToggle?.addEventListener('change', () => {
     if (crossScope) crossScope.style.display = crossToggle.checked ? 'flex' : 'none';
     if (crossToggle.checked && !selectedCross().length) {
-      const current = view.querySelector('#kb-library-select')?.value;
+      const current = String(currentKb());
       const cb = [...view.querySelectorAll('.kb-cross-option')].find((x) => x.value === current);
       if (cb) cb.checked = true;
     }
     syncCross();
+    syncHash();
   });
   view.querySelectorAll('.kb-cross-option').forEach((cb) => cb.addEventListener('change', () => {
     if (selectedCross().length > 5) {
@@ -308,75 +623,59 @@ export async function renderKb() {
       toast('跨库检索最多选择 5 个知识库', 'error');
     }
     syncCross();
+    syncHash();
   }));
   syncCross();
 
-  let running = false;
-  let progress = null;
-  const run = async (endpoint, button) => {
-    const query = view.querySelector('#kb-query').value.trim();
-    if (!query) { toast('请先描述故障现象', 'error'); return; }
-    if (running) { toast('当前检索仍在进行，请等待本次结果', 'warn'); return; }
-    const selectedKb = Number(view.querySelector('#kb-library-select')?.value || kbId);
-    const cross = !!view.querySelector('#kb-cross')?.checked;
-    const filters = {};
-    const board = view.querySelector('#kb-board').value;
-    const domain = view.querySelector('#kb-domain').value;
-    let kbIds = [selectedKb];
-    if (cross) {
-      const checked = [...view.querySelectorAll('.kb-cross-option:checked')].map((x) => Number(x.value)).filter((x) => x > 0);
-      if (checked.length > 5) { toast('跨库检索最多选择 5 个知识库', 'error'); return; }
-      kbIds = checked.length ? checked : [selectedKb];
-      if (kbIds.length > 5) { toast('跨库检索最多选择 5 个知识库', 'error'); return; }
-      try { localStorage.setItem('kb.cross.ids', JSON.stringify(kbIds)); } catch {}
-      history.replaceState(null, '', `#/kb?kb=${selectedKb}&cross=1&kb_ids=${kbIds.join(',')}`);
-    }
-    if (board) filters.board = board;
-    if (domain) filters.domain = domain;
-    running = true;
-    progress = startKbProgress(view, endpoint, query, filters);
-    setBusy(button, true, '检索中…');
-    try {
-      const data = endpoint === 'chat'
-        ? await api('/api/kb/chat', { method: 'POST', body: { query, filters, kb_id: selectedKb, kb_ids: kbIds }, timeoutMs: 90000 })
-        : await api(`/api/kb/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}&domain=${encodeURIComponent(domain)}&limit=10&kb_ids=${kbIds.join(',')}`);
-      if (!view.isConnected) return;
-      progress.finish();
-      const libNames = data.library_names || Object.fromEntries(activeLibraries.map((lib) => [String(lib.id), lib.name]));
-      const multiLibrary = kbIds.length > 1;
-      const scopeText = multiLibrary ? ` · 检索范围 ${kbIds.length} 个库` : '';
-      if (endpoint === 'search') {
-        const items = data.items || [];
-        view.querySelector('#kb-result').innerHTML = items.length
-          ? `<div class="card"><div class="card-head"><h2>检索结果</h2><span class="sub">${data.no_answer ? '低于拒答阈值，仅供参考' : `${items.length} 个案例`}${scopeText} · ${data.latency_ms || 0} ms</span></div>
-            <div class="card-body kb-case-list">${items.map((c, i) => `<a class="kb-case-card" href="#/kb/docs/${encodeURIComponent(c.doc_id)}">
-              <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>${multiLibrary ? `<span class="badge">${esc(libNames[c.kb_id] || `库 ${c.kb_id || '—'}`)}</span>` : ''}<span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
-              <div class="kb-snippet"><span>现象</span>${esc(c.symptom || '—')}</div>
-              <div class="kb-snippet"><span>原因</span>${esc(c.cause || '—')}</div>
-              <div class="kb-snippet"><span>方案</span>${esc(c.solution || '—')}</div></a>`).join('')}</div></div>${kbRecordFooter(data)}`
-          : `<div class="alert warn">${icon('alert')}<div>${esc(data.reason || '没有命中案例')}</div></div>${kbRecordFooter(data)}`;
-      } else {
-        view.querySelector('#kb-result').innerHTML = renderResult(data);
-      }
-    } catch (err) {
-      if (progress) progress.fail();
-      if (view.isConnected) {
-        view.querySelector('#kb-result').innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>${kbRecordFooter({ query_id: '' })}`;
-      }
-    } finally {
-      running = false;
-      progress = null;
-      setBusy(button, false);
-    }
-  };
-
+  listEl?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-act="del-chat"]')) return;
+    const item = event.target.closest('[data-session]');
+    if (item) loadSession(item.dataset.session);
+  });
   view.querySelector('#kb-library-select')?.addEventListener('change', (e) => {
     location.hash = `#/kb?kb=${encodeURIComponent(e.target.value)}`;
   });
+  view.querySelector('#kb-query')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      view.querySelector('[data-act="ask"]')?.click();
+    }
+  });
+
   bindActions(view, {
-    ask: (el) => run('chat', el),
-    search: (el) => run('search', el),
+    ask: (el) => ask(el),
+    search: (el) => searchOnly(el),
     example: (el) => { view.querySelector('#kb-query').value = el.dataset.text; view.querySelector('#kb-query').focus(); },
+    'new-chat': () => newChat(),
+    'chat-retry': (el) => {
+      const field = view.querySelector('#kb-query');
+      if (field) field.value = el.dataset.query || '';
+      ask(view.querySelector('[data-act="ask"]'));
+    },
+    'del-chat': async (el) => {
+      const id = el.dataset.id;
+      const chat = chats.find((x) => x.id === id);
+      if (!(await confirmDialog(`删除对话“${chat?.title || id}”？消息记录会一并隐藏，无法恢复。`, { danger: true, okText: '删除' }))) return;
+      setBusy(el, true, '删除中…');
+      try {
+        await api(`/api/kb/chats/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        chats = chats.filter((x) => x.id !== id);
+        if (sessionId === id) {
+          stopPoll();
+          sessionId = '';
+          session = null;
+          messages = [];
+          renderChatHeader();
+          renderChatMessages();
+          syncHash();
+        }
+        renderChatList();
+        toast('对话已删除', 'ok');
+      } catch (err) {
+        toast(err.message, 'error');
+        setBusy(el, false);
+      }
+    },
     sample: async (el) => {
       if (!(await confirmDialog('载入 20 条脱敏示例案例？示例只用于演示检索，不代表现场结论。'))) return;
       setBusy(el, true, '载入中…');
@@ -387,6 +686,12 @@ export async function renderKb() {
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
   });
+
+  renderChatList();
+  renderChatHeader();
+  const running = messages.find((m) => m.role === 'assistant'
+    && ['pending', 'running'].includes(m.status));
+  if (running) pollMessage(running.id);
   return view;
 }
 
@@ -446,6 +751,18 @@ function kbReloadTab(tab) {
   location.hash = `#/kb/docs?tab=${encodeURIComponent(tab)}&_=${Date.now()}`;
 }
 
+function kbDiffText(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) return value.map((x) => String(x)).join('、') || '—';
+  return String(value);
+}
+
+function kbPreviewField(label, value) {
+  if (!value) return '';
+  const text = String(value);
+  return `<div class="kb-snippet"><span>${label}</span>${esc(text.length > 300 ? `${text.slice(0, 300)}…` : text)}</div>`;
+}
+
 async function openDuplicateWizard(source, target, kbId) {
   let preview;
   try { preview = await api(`/api/kb/duplicates/preview?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}&kb=${kbId}`); }
@@ -461,9 +778,24 @@ async function openDuplicateWizard(source, target, kbId) {
         <div class="tiny muted">${preview.source.case_count} 案例 · ${esc(preview.source.doc_id)}</div></div></div>
         <div class="card"><div class="card-body"><strong>目标：${esc(preview.target.title)}</strong>
         <div class="tiny muted">${preview.target.case_count} 案例 · ${esc(preview.target.doc_id)}</div></div></div></div>
-      <div class="kb-subhead">逐字段差异</div><div class="table-wrap"><table class="data"><thead><tr><th>字段</th><th>源</th><th>目标</th></tr></thead><tbody>
-      ${fields.map((f) => `<tr><td>${esc(f.field)}</td><td class="tiny">${esc(JSON.stringify(f.source))}</td><td class="tiny">${esc(JSON.stringify(f.target))}</td></tr>`).join('') || '<tr><td colspan="3" class="empty small">关键字段一致</td></tr>'}
+      <div class="kb-subhead">逐字段对照（相同字段也保留，便于判断合并是否安全）</div>
+      <div class="table-wrap kb-diff-table"><table class="data"><thead><tr><th>字段</th><th>源文档</th><th>目标文档</th><th>结论</th></tr></thead><tbody>
+      ${fields.map((f) => `<tr><td><strong>${esc(f.field)}</strong></td>
+        <td><pre class="kb-diff-text">${esc(kbDiffText(f.source))}</pre></td>
+        <td><pre class="kb-diff-text">${esc(kbDiffText(f.target))}</pre></td>
+        <td><span class="badge ${f.same ? 'ok' : 'warn'}">${f.same ? '一致' : '不同'}</span></td></tr>`).join('')
+        || '<tr><td colspan="4" class="empty small">没有可对照字段</td></tr>'}
       </tbody></table></div>
+      ${(preview.source_case_list || []).length ? `<div class="kb-subhead">源文档案例内容</div>
+        <div class="kb-case-list">${preview.source_case_list.map((c) => `<div class="kb-case-card" style="cursor:default">
+          <div class="inline"><strong>${esc(c.title)}</strong><span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${esc(c.status)}</span></div>
+          ${kbPreviewField('现象', c.symptom)}${kbPreviewField('原因', c.cause)}${kbPreviewField('方案', c.solution)}${kbPreviewField('预防', c.prevention)}
+        </div>`).join('')}</div>` : ''}
+      ${(preview.target_case_list || []).length ? `<div class="kb-subhead">目标文档案例内容（合并后保留）</div>
+        <div class="kb-case-list">${preview.target_case_list.map((c) => `<div class="kb-case-card" style="cursor:default">
+          <div class="inline"><strong>${esc(c.title)}</strong><span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${esc(c.status)}</span></div>
+          ${kbPreviewField('现象', c.symptom)}${kbPreviewField('原因', c.cause)}${kbPreviewField('方案', c.solution)}${kbPreviewField('预防', c.prevention)}
+        </div>`).join('')}</div>` : ''}
       <div class="alert warn" style="margin-top:12px">${icon('alert')}<div>合并会迁移 ${preview.source.case_count} 个案例并追加 merge 修订；目标文档已有案例不会被覆盖。</div></div>`,
     footer: `<button class="btn" data-act="close">取消</button>
       <button class="btn btn-primary" data-act="merge">${icon('check')} 确认合并</button>`,
@@ -1289,7 +1621,7 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
           <div class="table-wrap" style="margin-top:10px"><table class="data responsive"><thead><tr><th>时间</th><th>动作</th><th>对象</th><th>操作人</th><th>原因</th></tr></thead><tbody>
             ${(audit.items || []).map((x) => `<tr><td data-label="时间" class="tiny">${esc(x.created_at ? fmtDate(x.created_at) : '—')}</td>
               <td data-label="动作"><span class="mono tiny">${esc(x.action)}</span></td>
-              <td data-label="对象"><div>${esc(x.target_title || x.target || '')}</div><div class="tiny muted mono">${esc(x.target || '')}</div></td>
+              <td data-label="对象"><div>${x.href ? `<a href="${esc(x.href)}">${esc(x.target_title || x.target || '')}</a>` : esc(x.target_title || x.target || '')}</div><div class="tiny muted mono">${esc(x.target || '')}</div></td>
               <td data-label="操作人">${esc(x.actor || '—')}</td>
               <td data-label="原因" class="tiny">${esc(x.message || (Array.isArray(x.detail) ? x.detail.map((d) => d.field).join('、') : ''))}</td></tr>`).join('') || '<tr><td colspan="5" class="empty small">暂无审计记录</td></tr>'}
           </tbody></table></div>
@@ -1585,44 +1917,160 @@ async function openCaseRevisions(caseId, docId, caseTitle) {
   });
 }
 
+const KB_CASE_EDIT_TABS = [
+  ['basic', '标题与现象'],
+  ['cause', '原因与方案'],
+  ['more', '预防与变更'],
+];
+
 function openCaseEdit(caseData, docId) {
+  let suggestion = null;
   const m = modal({
-    title: `编辑案例：${caseData.title}`,
+    title: `编辑案例 · ${caseData.title}`,
     wide: true,
-    body: `<div class="alert warn">${icon('alert')}<div>保存会新增修订并重建索引；必须填写变更原因。</div></div>
-      <div class="form-row"><label>标题</label><input class="input" id="kb-case-title" value="${esc(caseData.title)}"></div>
-      <div class="form-row"><label>现象</label><textarea class="input" id="kb-case-symptom" rows="2">${esc(caseData.symptom || '')}</textarea></div>
-      <div class="form-row"><label>原因</label><textarea class="input" id="kb-case-cause" rows="3">${esc(caseData.cause_detail || caseData.cause || '')}</textarea></div>
-      <div class="form-row"><label>处理方案</label><textarea class="input" id="kb-case-solution" rows="4">${esc(caseData.solution || '')}</textarea></div>
-      <div class="form-row"><label>预防</label><textarea class="input" id="kb-case-prevention" rows="2">${esc(caseData.prevention || '')}</textarea></div>
-      <div class="form-row"><label>变更原因 <span class="badge warn">必填</span></label><input class="input" id="kb-case-reason" placeholder="例如：补充现场验证结果"></div>`,
+    body: `<div class="alert warn">${icon('alert')}<div>保存会新增一条修订、重建索引，并出现在“修订记录”标签页；必须填写变更原因。</div></div>
+      <details class="kb-guide"><summary>字段填写指引</summary>
+        <ul class="tiny muted">
+          <li><strong>现象</strong>：触发条件 + 可观测表现 + 影响范围；不要重复标题。</li>
+          <li><strong>原因</strong>：直接根因和证据（日志/告警/版本差异），不确定就写“待确认”。</li>
+          <li><strong>处理方案</strong>：按步骤编号，写清版本、命令和验证方法。</li>
+          <li><strong>预防</strong>：如何避免复发，可关联到巡检或升级规范。</li>
+        </ul>
+      </details>
+      <nav class="tabs detail-tabs" id="kb-case-tabs">${KB_CASE_EDIT_TABS.map(
+        ([key, label], index) => `<button type="button" class="${index === 0 ? 'active' : ''}" data-case-tab="${key}">${label}</button>`).join('')}</nav>
+      <div class="kb-ai-panel" id="kb-ai-panel" hidden></div>
+      <div class="kb-case-pane" data-pane="basic">
+        <div class="form-row"><label>标题</label><input class="input" id="kb-case-title" value="${esc(caseData.title)}">
+          <div class="tiny muted">标题用于检索命中，保留板卡/告警码等关键词。</div></div>
+        <div class="form-row"><label>现象</label><textarea class="input" id="kb-case-symptom" rows="6">${esc(caseData.symptom || '')}</textarea>
+          <div class="tiny muted">已自动去掉开头重复的标题；如果仍重复可手动删除。</div></div>
+      </div>
+      <div class="kb-case-pane" data-pane="cause" hidden>
+        <div class="form-row"><label>原因</label><textarea class="input" id="kb-case-cause" rows="6">${esc(caseData.cause_detail || caseData.cause || '')}</textarea>
+          <div class="tiny muted">写直接根因与证据；多条独立原因用换行分条。</div></div>
+        <div class="form-row"><label>处理方案</label><textarea class="input" id="kb-case-solution" rows="7">${esc(caseData.solution || '')}</textarea>
+          <div class="tiny muted">建议按 1/2/3 步骤组织，并写明验证方式。</div></div>
+      </div>
+      <div class="kb-case-pane" data-pane="more" hidden>
+        <div class="form-row"><label>预防</label><textarea class="input" id="kb-case-prevention" rows="4">${esc(caseData.prevention || '')}</textarea></div>
+        <div class="form-row"><label>变更原因 <span class="badge warn">必填</span></label>
+          <input class="input" id="kb-case-reason" placeholder="例如：补充现场验证结果 / 修正根因描述"></div>
+        <div class="alert info tiny">${icon('info')}<div>AI 优化只生成建议稿，不会直接写入；应用后仍需核对事实、补全变更原因再保存。</div></div>
+      </div>`,
     footer: `<button class="btn" data-act="cancel">取消</button>
+      <button class="btn" data-act="ai-polish">✦ AI 优化</button>
       <button class="btn btn-primary" data-act="save">保存并生成修订</button>`,
   });
-  m.mask.addEventListener('click', async (e) => {
+
+  const mask = m.mask;
+  const switchTab = (key) => {
+    mask.querySelectorAll('[data-case-tab]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.caseTab === key);
+    });
+    mask.querySelectorAll('.kb-case-pane').forEach((pane) => {
+      pane.hidden = pane.dataset.pane !== key;
+    });
+  };
+  mask.querySelectorAll('[data-case-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.caseTab));
+  });
+
+  const renderAiPanel = () => {
+    const panel = mask.querySelector('#kb-ai-panel');
+    if (!panel || !suggestion) return;
+    panel.hidden = false;
+    const rows = [
+      ['symptom', '现象'], ['cause', '原因'], ['solution', '处理方案'], ['prevention', '预防'],
+    ].filter(([key]) => suggestion.suggestions[key]);
+    panel.innerHTML = `<div class="inline"><strong>AI 优化建议</strong>
+      <span class="badge ok">${esc(suggestion.model || '模型')}</span>
+      <span class="tiny muted">${Number(suggestion.latency_ms || 0)} ms · 仅建议，未写入</span></div>
+      ${suggestion.suggestions.notes ? `<div class="tiny muted" style="margin-top:6px">${esc(suggestion.suggestions.notes)}</div>` : ''}
+      <div class="kb-ai-suggest">${rows.map(([key, label]) => `<details ${suggestion.changed[key] ? 'open' : ''}>
+        <summary><strong>${label}</strong> <span class="badge ${suggestion.changed[key] ? 'warn' : 'info'}">${suggestion.changed[key] ? '有改动' : '与原文一致'}</span></summary>
+        <div class="kb-ai-text">${esc(suggestion.suggestions[key])}</div></details>`).join('')}</div>
+      <div class="inline" style="margin-top:10px"><button class="btn btn-sm btn-primary" data-act="ai-apply">应用建议到表单</button>
+        <button class="btn btn-sm" data-act="ai-ignore">忽略</button></div>`;
+  };
+
+  mask.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
-    if (btn.dataset.act === 'cancel') { m.close(); return; }
-    if (btn.dataset.act !== 'save') return;
+    const act = btn.dataset.act;
+    if (act === 'cancel') { m.close(); return; }
+    if (act === 'ai-ignore') {
+      suggestion = null;
+      const panel = mask.querySelector('#kb-ai-panel');
+      if (panel) panel.hidden = true;
+      return;
+    }
+    if (act === 'ai-apply') {
+      if (!suggestion) return;
+      const s = suggestion.suggestions;
+      const changed = suggestion.changed || {};
+      const fields = [['kb-case-symptom', 'symptom'], ['kb-case-cause', 'cause'],
+        ['kb-case-solution', 'solution'], ['kb-case-prevention', 'prevention']];
+      for (const [id, key] of fields) {
+        if (changed[key] && s[key]) mask.querySelector(`#${id}`).value = s[key];
+      }
+      switchTab('basic');
+      toast('已填入有改动的字段，请核对事实后保存', 'ok');
+      return;
+    }
+    if (act === 'ai-polish') {
+      setBusy(btn, true, 'AI 优化中…');
+      try {
+        suggestion = await api(`/api/kb/cases/${encodeURIComponent(caseData.id)}/ai-polish`, {
+          method: 'POST', body: {},
+        });
+        renderAiPanel();
+        toast('AI 已生成建议，请检查后再保存', 'ok');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        setBusy(btn, false);
+      }
+      return;
+    }
+    if (act !== 'save') return;
     const body = {
-      title: m.mask.querySelector('#kb-case-title').value.trim(),
-      symptom: m.mask.querySelector('#kb-case-symptom').value.trim(),
-      cause_detail: m.mask.querySelector('#kb-case-cause').value.trim(),
-      solution: m.mask.querySelector('#kb-case-solution').value.trim(),
-      prevention: m.mask.querySelector('#kb-case-prevention').value.trim(),
-      reason: m.mask.querySelector('#kb-case-reason').value.trim(),
+      title: mask.querySelector('#kb-case-title').value.trim(),
+      symptom: mask.querySelector('#kb-case-symptom').value.trim(),
+      cause_detail: mask.querySelector('#kb-case-cause').value.trim(),
+      solution: mask.querySelector('#kb-case-solution').value.trim(),
+      prevention: mask.querySelector('#kb-case-prevention').value.trim(),
+      reason: mask.querySelector('#kb-case-reason').value.trim(),
     };
-    if (!body.reason) { toast('请填写变更原因', 'error'); return; }
+    if (!body.reason) {
+      switchTab('more');
+      mask.querySelector('#kb-case-reason').focus();
+      toast('请填写变更原因', 'error');
+      return;
+    }
     setBusy(btn, true, '保存中…');
     try {
-      await api(`/api/kb/cases/${encodeURIComponent(caseData.id)}`, { method: 'PUT', body });
-      toast('已保存并生成新修订', 'ok'); m.close(); renderKbDoc(docId);
-    } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      const saved = await api(`/api/kb/cases/${encodeURIComponent(caseData.id)}`, { method: 'PUT', body });
+      toast(`已保存，新增修订 r${saved.case?.revision || ''}`, 'ok');
+      m.close();
+      const target = `#/kb/docs/${encodeURIComponent(docId)}?tab=revisions&case=${encodeURIComponent(caseData.id)}`;
+      // 从“修订记录”页再次保存时 hash 完全相同，浏览器不会触发 hashchange，
+      // 会导致表格和计数停留在旧数据；这里主动重新走一次路由。
+      if (location.hash === target) window.dispatchEvent(new Event('hashchange'));
+      else location.hash = target;
+    } catch (err) {
+      toast(err.message, 'error');
+      setBusy(btn, false);
+    }
   });
 }
 
 export async function renderKbDoc(docId) {
-  const view = mount('知识库文档详情', '案例字段、原文和版本；引用可回溯到这里', '');
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const validTabs = ['overview', 'cases', 'edit', 'versions', 'revisions'];
+  const activeTab = validTabs.includes(params.get('tab')) ? params.get('tab') : 'cases';
+  const focusCase = params.get('case') || '';
+  const view = mount('知识库文档详情', '案例、原文与修订记录；引用可回溯到这里', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   let data;
   try { data = (await api(`/api/kb/docs/${encodeURIComponent(docId)}`)).doc; }
@@ -1633,11 +2081,23 @@ export async function renderKbDoc(docId) {
   const admin = state.user?.role === 'admin';
   const doc = data;
   let versionItems = [];
+  let revisionItems = [];
   if (admin) {
-    try { versionItems = (await api(`/api/kb/docs/${encodeURIComponent(docId)}/versions`)).items || []; }
-    catch { versionItems = []; }
+    const [versions, revisions] = await Promise.all([
+      api(`/api/kb/docs/${encodeURIComponent(docId)}/versions`).catch(() => ({ items: [] })),
+      api(`/api/kb/docs/${encodeURIComponent(docId)}/revisions?limit=200`).catch(() => ({ items: [] })),
+    ]);
+    versionItems = versions.items || [];
+    revisionItems = revisions.items || [];
   }
   const versionsText = (doc.versions || []).map(versionLabel).filter(Boolean).join('、') || '—';
+  const activeCases = (doc.cases || []).filter((c) => c.status === 'active');
+  const disabledCases = (doc.cases || []).filter((c) => c.status !== 'active');
+  const tabs = [
+    ['overview', '概览'], ['cases', `案例 ${doc.cases?.length || 0}`],
+    ['edit', '编辑原文'], ['versions', `版本 ${versionItems.length}`],
+    ['revisions', `修订记录 ${revisionItems.length}`],
+  ];
   view.innerHTML = `
     <div class="inline" style="margin-bottom:12px"><a class="btn btn-sm" href="#/kb/docs">← 返回文档库</a>
       <a class="btn btn-sm" href="#/kb">${icon('search')} 去提问</a>
@@ -1647,6 +2107,22 @@ export async function renderKbDoc(docId) {
       <div class="card-head"><h2>${esc(doc.title)}</h2>
         <span class="sub">${esc(doc.id)} · ${esc(doc.source_type)} · ${esc(doc.source_name || '')}</span></div>
       <div class="card-body">
+        <div class="inline" style="gap:8px;flex-wrap:wrap">
+          <span class="badge info">${activeCases.length} 个生效案例</span>
+          ${disabledCases.length ? `<span class="badge warn">${disabledCases.length} 个已停用（可在案例页恢复）</span>` : ''}
+          <span class="badge">${scoreText(doc.quality)} 质量</span>
+          <span class="tiny muted" style="margin-left:auto">更新 ${esc(doc.updated_at ? fmtDate(doc.updated_at) : '—')}</span>
+        </div>
+        <details class="kb-guide" style="margin-top:10px"><summary>这个页面怎么用</summary>
+          <div class="tiny muted" style="margin-top:6px">① 先看“案例”核对现象/原因/方案；② 需要改动就编辑单条案例（支持 AI 优化），保存后到“修订记录”核对；③ 停用的案例不会消失，可在案例页重新启用；④ 原文改动会生成新版本，旧版本仍可恢复；⑤ “变更与审计”里的对象可直接点进本文档。</div>
+        </details>
+      </div>
+    </div>
+    <nav class="tabs detail-tabs" id="kb-doc-tabs" style="margin-top:14px">${tabs.map(
+      ([key, label]) => `<button type="button" class="${activeTab === key ? 'active' : ''}" data-doc-tab="${key}">${label}</button>`).join('')}</nav>
+
+    <div class="kb-doc-pane" data-pane="overview" ${activeTab === 'overview' ? '' : 'hidden'}>
+      <div class="card" style="margin-top:10px"><div class="card-body">
         <div class="kv">
           <div class="k">板卡</div><div class="v">${esc((doc.boards || []).join('、') || '未识别')}</div>
           <div class="k">领域</div><div class="v">${esc((doc.domains || []).join('、') || '未识别')}</div>
@@ -1655,52 +2131,104 @@ export async function renderKbDoc(docId) {
           <div class="k">PII</div><div class="v">${doc.pii_masked ? '已脱敏（原文仅管理员可读）' : '未脱敏'}</div>
           <div class="k">创建 / 更新</div><div class="v tiny">${esc(doc.created_at || '')} / ${esc(doc.updated_at || '')}</div>
         </div>
-        ${admin ? `<div class="inline" style="margin-top:12px">
-          <button class="btn btn-sm" data-act="toggle-status">${doc.status === 'active' ? '停用' : '启用'}</button>
+        ${admin ? `<div class="inline" style="margin-top:12px;flex-wrap:wrap">
+          <button class="btn btn-sm" data-act="toggle-status">${doc.status === 'active' ? '停用文档' : '启用文档'}</button>
           <button class="btn btn-sm" data-act="reindex">重建索引</button>
-          <button class="btn btn-sm btn-danger" data-act="delete">删除文档</button></div>` : ''}
-      </div>
+          <button class="btn btn-sm" data-act="repair-symptoms">修复现象重复标题</button>
+          <button class="btn btn-sm btn-danger" data-act="delete">删除文档</button></div>
+          <div class="tiny muted" style="margin-top:6px">停用只影响检索，不删除数据；“修复现象重复标题”会批量清理历史导入造成的标题重复，并写审计。</div>` : ''}
+      </div></div>
     </div>
-    ${(doc.cases || []).length ? `<div class="card" style="margin-top:14px"><div class="card-head"><h2>案例（${doc.cases.length}）</h2>
-      <span class="sub">${doc.cases.some((c) => c.is_derived) ? '含多原因派生案例' : '单案例'}</span></div>
-      <div class="card-body kb-doc-cases">${doc.cases.map((c, i) => `<div class="kb-doc-case">
-        <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>
-          <span class="badge ${c.review_status === 'pass' ? 'ok' : c.review_status === 'reject' ? 'danger' : 'info'}">${esc(c.review_status || '未审核')}</span>
-          <span class="badge info">r${c.revision || 1}</span>
-          ${admin ? `<span style="margin-left:auto"></span><button class="btn btn-sm" data-act="case-rev" data-id="${esc(c.id)}" data-title="${esc(c.title)}">修订</button>
-            <button class="btn btn-sm" data-act="case-edit" data-id="${esc(c.id)}">编辑</button>
-            <button class="btn btn-sm" data-act="case-status" data-id="${esc(c.id)}" data-status="${esc(c.status || 'active')}">${c.status === 'active' ? '停用' : '启用'}</button>` : ''}
-          <span class="badge info" style="margin-left:${admin ? '0' : 'auto'}">${scoreText(c.quality)}</span></div>
-        <div class="kv" style="margin-top:10px">
-          <div class="k">现象</div><div class="v">${esc(c.symptom || '—')}</div>
-          <div class="k">环境/复现</div><div class="v">${esc(c.environment || '—')} ${esc(c.repro || '')}</div>
-          <div class="k">原因</div><div class="v">${esc(c.cause_detail || c.cause || '—')}</div>
-          <div class="k">处理方案</div><div class="v">${esc(c.solution || '—')}</div>
-          <div class="k">预防</div><div class="v">${esc(c.prevention || '—')}</div>
-        </div>
-        ${(c.sections || []).length ? `<details><summary class="tiny muted">查看分节原文（${c.sections.length}）</summary>
-          ${c.sections.map((s) => `<div class="kb-section"><div class="k">${esc(s.label || s.kind)}</div><div>${esc(s.text)}</div></div>`).join('')}</details>` : ''}
-      </div>`).join('')}</div></div>` : ''}
-    ${admin ? `<div class="card" style="margin-top:14px"><div class="card-head"><h2>编辑与原文</h2><span class="sub">保存后重建索引；旧版本保留</span></div>
-      <div class="card-body"><form id="kb-doc-edit">
-        <div class="form-row"><label>标题</label><input class="input" name="title" value="${esc(doc.title)}"></div>
-        <div class="form-row"><label>正文</label><textarea class="input" name="raw_text" rows="10">${esc(doc.raw_text || '')}</textarea></div>
-        <button class="btn btn-primary" type="button" data-act="save-doc">保存并重建</button>
-      </form></div></div>` : ''}
-    ${admin && versionItems.length ? `<div class="card" style="margin-top:14px">
-      <div class="card-head"><h2>版本历史（${versionItems.length}）</h2>
-        <span class="sub">恢复旧版本会重建案例；当前版本不会丢失</span></div>
-      <div class="card-body tight table-wrap"><table class="data responsive"><thead><tr>
-        <th>版本</th><th>时间</th><th>SHA256</th><th>操作</th></tr></thead><tbody>
-        ${versionItems.map((v) => `<tr><td data-label="版本">v${esc(String(v.version))}</td>
-          <td data-label="时间" class="tiny">${esc(v.created_at ? fmtDate(v.created_at) : '—')}</td>
-          <td data-label="SHA256" class="mono tiny">${esc((v.sha256 || '').slice(0, 12) || '—')}</td>
-          <td data-label="操作"><button class="btn btn-sm" data-act="restore-version" data-id="${esc(v.id)}">恢复</button></td></tr>`).join('')}
-      </tbody></table></div></div>` : ''}
+
+    <div class="kb-doc-pane" data-pane="cases" ${activeTab === 'cases' ? '' : 'hidden'}>
+      ${(doc.cases || []).length ? `<div class="card" style="margin-top:10px"><div class="card-head"><h2>案例（${doc.cases.length}）</h2>
+        <span class="sub">${doc.cases.some((c) => c.is_derived) ? '含多原因派生案例' : '单案例'}${disabledCases.length ? ` · 停用 ${disabledCases.length} 个可恢复` : ''}</span></div>
+        <div class="card-body kb-doc-cases">${doc.cases.map((c, i) => `<div class="kb-doc-case ${c.status !== 'active' ? 'disabled' : ''} ${focusCase === c.id ? 'focus' : ''}" id="case-${esc(c.id)}" data-case-id="${esc(c.id)}">
+          <div class="inline" style="flex-wrap:wrap"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>
+            <span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${c.status === 'active' ? '生效' : c.status === 'disabled' ? '已停用' : esc(c.status)}</span>
+            <span class="badge ${c.review_status === 'pass' ? 'ok' : c.review_status === 'reject' ? 'danger' : 'info'}">${esc(KB_REVIEW_STATUS_LABEL[c.review_status] || c.review_status || '待审核')}</span>
+            <span class="badge info">r${c.revision || 1}</span>
+            ${admin ? `<span style="margin-left:auto"></span><button class="btn btn-sm" data-act="case-rev" data-id="${esc(c.id)}" data-title="${esc(c.title)}">修订</button>
+              <button class="btn btn-sm" data-act="case-edit" data-id="${esc(c.id)}">编辑</button>
+              <button class="btn btn-sm" data-act="case-status" data-id="${esc(c.id)}" data-status="${esc(c.status || 'active')}">${c.status === 'active' ? '停用' : '恢复启用'}</button>` : ''}
+            <span class="badge info" style="margin-left:${admin ? '0' : 'auto'}">${scoreText(c.quality)}</span></div>
+          <div class="kv" style="margin-top:10px">
+            <div class="k">现象</div><div class="v">${esc(c.symptom || '—')}</div>
+            <div class="k">环境/复现</div><div class="v">${esc(c.environment || '—')} ${esc(c.repro || '')}</div>
+            <div class="k">原因</div><div class="v">${esc(c.cause_detail || c.cause || '—')}</div>
+            <div class="k">处理方案</div><div class="v">${esc(c.solution || '—')}</div>
+            <div class="k">预防</div><div class="v">${esc(c.prevention || '—')}</div>
+          </div>
+          ${(c.sections || []).length ? `<details><summary class="tiny muted">查看分节原文（${c.sections.length}）</summary>
+            ${c.sections.map((s) => `<div class="kb-section"><div class="k">${esc(s.label || s.kind)}</div><div>${esc(s.text)}</div></div>`).join('')}</details>` : ''}
+        </div>`).join('')}</div></div>` : `<div class="card" style="margin-top:10px"><div class="card-body small muted">还没有案例。可以编辑原文重新解析。</div></div>`}
+    </div>
+
+    <div class="kb-doc-pane" data-pane="edit" ${activeTab === 'edit' ? '' : 'hidden'}>
+      ${admin ? `<div class="card" style="margin-top:10px"><div class="card-head"><h2>编辑标题与原文</h2>
+        <span class="sub">保存后按【标签】重新解析案例并生成新版本；建议单条修正走“案例”页</span></div>
+        <div class="card-body"><form id="kb-doc-edit">
+          <div class="form-row"><label>标题</label><input class="input" name="title" value="${esc(doc.title)}"></div>
+          <div class="form-row"><label>正文</label><textarea class="input" name="raw_text" rows="14">${esc(doc.raw_text || '')}</textarea>
+            <div class="tiny muted">模板标签示例：【详细描述】【原因分析】【处理方案】【故障建议】。标题不要再写进【详细描述】。</div></div>
+          <div class="inline"><button class="btn btn-primary" type="button" data-act="save-doc">保存并重建</button>
+            <a class="btn btn-sm" href="#/kb/docs?tab=import">去导入页批量更新</a></div>
+        </form></div></div>` : `<div class="alert info">仅管理员可编辑原文。</div>`}
+    </div>
+
+    <div class="kb-doc-pane" data-pane="versions" ${activeTab === 'versions' ? '' : 'hidden'}>
+      ${admin && versionItems.length ? `<div class="card" style="margin-top:10px">
+        <div class="card-head"><h2>版本历史（${versionItems.length}）</h2><span class="sub">恢复旧版本会重建案例；当前版本不会丢失</span></div>
+        <div class="card-body tight table-wrap"><table class="data responsive"><thead><tr>
+          <th>版本</th><th>时间</th><th>SHA256</th><th>操作</th></tr></thead><tbody>
+          ${versionItems.map((v) => `<tr><td data-label="版本">v${esc(String(v.version))}</td>
+            <td data-label="时间" class="tiny">${esc(v.created_at ? fmtDate(v.created_at) : '—')}</td>
+            <td data-label="SHA256" class="mono tiny">${esc((v.sha256 || '').slice(0, 12) || '—')}</td>
+            <td data-label="操作"><button class="btn btn-sm" data-act="restore-version" data-id="${esc(v.id)}">恢复</button></td></tr>`).join('')}
+        </tbody></table></div></div>` : `<div class="card" style="margin-top:10px"><div class="card-body small muted">暂无版本记录。</div></div>`}
+    </div>
+
+    <div class="kb-doc-pane" data-pane="revisions" ${activeTab === 'revisions' ? '' : 'hidden'}>
+      ${revisionItems.length ? `<div class="card" style="margin-top:10px">
+        <div class="card-head"><h2>修订记录（${revisionItems.length}）</h2><span class="sub">每次案例编辑都会追加一条，最新在上；字段 diff 可展开</span></div>
+        <div class="card-body tight table-wrap"><table class="data responsive"><thead><tr>
+          <th>时间</th><th>案例</th><th>动作</th><th>操作人</th><th>原因</th><th>字段变化</th></tr></thead><tbody>
+          ${revisionItems.map((r) => `<tr class="${focusCase && r.case_id === focusCase ? 'focus-row' : ''}">
+            <td data-label="时间" class="tiny">${esc(r.created_at ? fmtDate(r.created_at) : '—')}</td>
+            <td data-label="案例"><a href="#/kb/docs/${encodeURIComponent(doc.id)}?tab=cases&case=${encodeURIComponent(r.case_id || '')}">${esc(r.case_title || r.case_id || '—')}</a>
+              <div class="tiny muted">r${esc(String(r.revision || ''))}</div></td>
+            <td data-label="动作"><span class="badge ${r.action === 'status' ? 'warn' : 'info'}">${esc(KB_REV_ACTION_LABEL[r.action] || r.action || '')}</span></td>
+            <td data-label="操作人" class="tiny">${esc(r.actor_name || '—')}</td>
+            <td data-label="原因" class="tiny">${esc(r.reason || '—')}</td>
+            <td data-label="字段变化" class="tiny">${(r.differences || []).length
+              ? `<details><summary>${(r.differences || []).map((d) => esc(d.field)).slice(0, 4).join('、')}${(r.differences || []).length > 4 ? ' …' : ''}</summary><pre class="kb-raw">${esc(JSON.stringify(r.differences, null, 2))}</pre></details>`
+              : '—'}</td></tr>`).join('')}
+        </tbody></table></div></div>` : `<div class="card" style="margin-top:10px"><div class="card-body small muted">暂无案例修订记录。</div></div>`}
+    </div>
+
     <div class="card" style="margin-top:14px"><div class="card-body small muted">
       <strong>引用：</strong><span class="mono">faultkb://case/&lt;case_id&gt;</span>；页面链接为 <span class="mono">#/kb/docs/${esc(doc.id)}</span>。
       普通用户看不到原始文本，回答和工具也只使用脱敏文本。
     </div></div>`;
+
+  const switchDocTab = (key) => {
+    view.querySelectorAll('[data-doc-tab]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.docTab === key);
+    });
+    view.querySelectorAll('.kb-doc-pane').forEach((pane) => {
+      pane.hidden = pane.dataset.pane !== key;
+    });
+    const url = new URL(location.href);
+    url.hash = `#/kb/docs/${encodeURIComponent(doc.id)}?tab=${key}${focusCase ? `&case=${encodeURIComponent(focusCase)}` : ''}`;
+    history.replaceState(null, '', url.hash);
+  };
+  view.querySelectorAll('[data-doc-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => switchDocTab(btn.dataset.docTab));
+  });
+  if (focusCase) {
+    const target = view.querySelector(`#case-${CSS.escape(focusCase)}`);
+    if (target) setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60);
+  }
 
   bindActions(view, {
     'toggle-status': async (el) => {
@@ -1714,6 +2242,15 @@ export async function renderKbDoc(docId) {
       try { await api('/api/kb/reindex', { method: 'POST', body: {} }); toast('索引已重建', 'ok'); }
       catch (err) { toast(err.message, 'error'); }
       finally { setBusy(el, false); }
+    },
+    'repair-symptoms': async (el) => {
+      if (!(await confirmDialog('批量清理全库“现象以标题开头”的历史数据？只改现象字段并写审计。'))) return;
+      setBusy(el, true, '修复中…');
+      try {
+        const r = await api('/api/kb/maintenance/repair-symptoms', { method: 'POST', body: {} });
+        toast(`扫描 ${r.scanned || 0} 条，修复 ${r.fixed || 0} 条`, 'ok');
+        renderKbDoc(docId);
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
     'restore-version': async (el) => {
       if (!(await confirmDialog('恢复该历史版本？当前版本会保留，可再次恢复。'))) return;
@@ -1740,8 +2277,10 @@ export async function renderKbDoc(docId) {
       setBusy(el, true, '处理中…');
       try {
         await api(`/api/kb/cases/${encodeURIComponent(el.dataset.id)}/status`,
-          { method: 'POST', body: { status: next, reason: next === 'active' ? '管理员启用' : '管理员停用' } });
-        toast('已更新案例状态', 'ok'); renderKbDoc(docId);
+          { method: 'POST', body: { status: next, reason: next === 'active' ? '管理员恢复启用' : '管理员停用' } });
+        toast(next === 'active' ? '案例已恢复启用' : '案例已停用，可在列表中恢复', 'ok');
+        history.replaceState(null, '', `#/kb/docs/${encodeURIComponent(doc.id)}?tab=cases`);
+        renderKbDoc(docId);
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
     'save-doc': async (el) => {
@@ -1749,8 +2288,12 @@ export async function renderKbDoc(docId) {
       const title = form.querySelector('[name="title"]').value.trim();
       const raw = form.querySelector('[name="raw_text"]').value;
       setBusy(el, true, '保存中…');
-      try { await api(`/api/kb/docs/${encodeURIComponent(doc.id)}`, { method: 'PUT', body: { title, raw_text: raw } }); toast('已保存并重建索引', 'ok'); renderKbDoc(docId); }
-      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+      try {
+        await api(`/api/kb/docs/${encodeURIComponent(doc.id)}`, { method: 'PUT', body: { title, raw_text: raw } });
+        toast('已保存并重建索引，可在“版本”页查看新版本', 'ok');
+        history.replaceState(null, '', `#/kb/docs/${encodeURIComponent(doc.id)}?tab=versions`);
+        renderKbDoc(docId);
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
   });
   return view;

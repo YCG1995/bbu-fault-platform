@@ -122,7 +122,7 @@ function updateNav() {
   document.querySelectorAll('#nav a').forEach((a) => {
     const href = a.getAttribute('href');
     const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path))
-      || (href === '#/kb' && path === '#/kb')
+      || (href === '#/kb' && (path === '#/kb' || path.startsWith('#/kb?')))
       || (href.startsWith('#/kb/docs') && path.startsWith('#/kb/docs'));
     a.classList.toggle('active', active);
   });
@@ -783,9 +783,9 @@ function route() {
   if (path === '#/usage') return renderUsage();
   if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();
-  if (path === '#/kb' || path === '#/kb/') return renderKb();
+  if (path === '#/kb' || path === '#/kb/' || path.startsWith('#/kb?')) return renderKb();
   if (path === '#/kb/docs' || path.startsWith('#/kb/docs?')) return renderKbDocs();
-  const kbDocMatch = path.match(/^#\/kb\/docs\/([^/?]+)$/);
+  const kbDocMatch = path.match(/^#\/kb\/docs\/([^/?]+)(?:\?.*)?$/);
   if (kbDocMatch) return renderKbDoc(decodeURIComponent(kbDocMatch[1]));
   const caseMatch = path.match(/^#\/cases\/([^/]+)$/);
   if (caseMatch) return renderCaseDetail(decodeURIComponent(caseMatch[1]));

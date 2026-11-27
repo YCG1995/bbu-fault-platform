@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 154,
-    "action_instances": 331,
-    "buttons_all": 297,
-    "buttons_page": 280,
+    "distinct_actions": 161,
+    "action_instances": 340,
+    "buttons_all": 305,
+    "buttons_page": 288,
     "modal_calls": 34,
     "forms": 21
   },
@@ -14,1113 +14,1162 @@
       "action": "adopt",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
+      ]
+    },
+    {
+      "action": "ai-apply",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
+      ]
+    },
+    {
+      "action": "ai-ignore",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
+      ]
+    },
+    {
+      "action": "ai-polish",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "all-tasks",
       "instances": 1,
       "files": [
-        "web/assets/js/page_dashboard.js"
+        "web\\assets\\js\\page_dashboard.js"
       ]
     },
     {
       "action": "apply",
       "instances": 4,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_traces.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_traces.js"
       ]
     },
     {
       "action": "apply-update",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "approve",
       "instances": 5,
       "files": [
-        "web/assets/js/page_cases.js",
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_cases.js",
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "ask",
-      "instances": 1,
+      "instances": 3,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "assign",
       "instances": 2,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "assign-reviewer",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "audit-filter",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "auto-publish",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "back",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "batch-disable",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "build",
       "instances": 3,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "cancel",
       "instances": 32,
       "files": [
-        "web/assets/js/app.js",
-        "web/assets/js/core.js",
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_kb.js",
-        "web/assets/js/page_skills.js",
-        "web/assets/js/page_task_detail.js",
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\app.js",
+        "web\\assets\\js\\core.js",
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_kb.js",
+        "web\\assets\\js\\page_skills.js",
+        "web\\assets\\js\\page_task_detail.js",
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "cancel-job",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "cancel-modal",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "cancel-review",
       "instances": 2,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "case-edit",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "case-folder",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "case-restore",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "case-rev",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "case-status",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "channel",
       "instances": 1,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
+      ]
+    },
+    {
+      "action": "chat-retry",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "check",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "clear-files",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "close",
       "instances": 19,
       "files": [
-        "web/assets/js/app.js",
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_cases.js",
-        "web/assets/js/page_kb.js",
-        "web/assets/js/page_skills.js",
-        "web/assets/js/personal_model.js"
+        "web\\assets\\js\\app.js",
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_cases.js",
+        "web\\assets\\js\\page_kb.js",
+        "web\\assets\\js\\page_skills.js",
+        "web\\assets\\js\\personal_model.js"
       ]
     },
     {
       "action": "close-modal",
       "instances": 6,
       "files": [
-        "web/assets/js/core.js",
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\core.js",
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "continue-task",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "copy",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "create",
       "instances": 6,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_workshop.js"
+      ]
+    },
+    {
+      "action": "del-chat",
+      "instances": 2,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "delete",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "delete-draft",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "delete-key",
       "instances": 2,
       "files": [
-        "web/assets/js/personal_model.js"
+        "web\\assets\\js\\personal_model.js"
       ]
     },
     {
       "action": "delete-migration",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "detail",
       "instances": 1,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "detail-user",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "diagnose",
       "instances": 1,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "diagnose-skill",
       "instances": 2,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "disable",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "discard-draft",
       "instances": 1,
       "files": [
-        "web/assets/js/page_tasks.js"
+        "web\\assets\\js\\page_tasks.js"
       ]
     },
     {
       "action": "discover",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "do-import",
       "instances": 3,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "done",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "draft-approve",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "draft-bulk-approve",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "draft-bulk-reject",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "draft-reject",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "draft-view",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "dup-preview",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "edit",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "edit-user",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "eval-delete",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "eval-import",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "eval-run",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "eval-view",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "example",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "export",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "export-report",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "filter",
       "instances": 1,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "filter-docs",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "force",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "import",
       "instances": 2,
       "files": [
-        "web/assets/js/page_kb.js",
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_kb.js",
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "job-delete",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "job-retry",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "job-rollback",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-archive",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-create",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-default",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-rename",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-restore",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-unarchive",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "library-visibility",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "lock-provenance",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "login",
       "instances": 3,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "logout",
       "instances": 1,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "merge",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "metric",
       "instances": 2,
       "files": [
-        "web/assets/js/page_usage.js"
+        "web\\assets\\js\\page_usage.js"
       ]
     },
     {
       "action": "model-key",
       "instances": 5,
       "files": [
-        "web/assets/js/app.js",
-        "web/assets/js/page_workshop.js",
-        "web/assets/js/personal_model.js"
+        "web\\assets\\js\\app.js",
+        "web\\assets\\js\\page_workshop.js",
+        "web\\assets\\js\\personal_model.js"
+      ]
+    },
+    {
+      "action": "new-chat",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "new-draft",
       "instances": 3,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "new-model",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "new-task",
       "instances": 3,
       "files": [
-        "web/assets/js/page_dashboard.js",
-        "web/assets/js/page_tasks.js"
+        "web\\assets\\js\\page_dashboard.js",
+        "web\\assets\\js\\page_tasks.js"
       ]
     },
     {
       "action": "new-user",
       "instances": 1,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "next",
       "instances": 3,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_usage.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_usage.js"
       ]
     },
     {
       "action": "notifications",
       "instances": 1,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "ok",
       "instances": 2,
       "files": [
-        "web/assets/js/core.js"
+        "web\\assets\\js\\core.js"
       ]
     },
     {
       "action": "override",
       "instances": 3,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "page-docs",
       "instances": 2,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "password",
       "instances": 3,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "pick-folder",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "prev",
       "instances": 3,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_usage.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_usage.js"
       ]
     },
     {
       "action": "preview-mapping",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "profile",
       "instances": 1,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "publish",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "read-all",
       "instances": 2,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "reanalyze",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "recovery-create",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "recovery-observe",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "recovery-review",
       "instances": 2,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "refine",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "refresh",
       "instances": 4,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_traces.js",
-        "web/assets/js/page_usage.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_traces.js",
+        "web\\assets\\js\\page_usage.js"
       ]
     },
     {
       "action": "reindex",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "reject",
       "instances": 3,
       "files": [
-        "web/assets/js/page_cases.js",
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_cases.js",
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "relay-check",
       "instances": 1,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "reload",
       "instances": 1,
       "files": [
-        "web/assets/js/page_tasks.js"
+        "web\\assets\\js\\page_tasks.js"
       ]
     },
     {
       "action": "reload-after-update",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "reload-kb-ops",
       "instances": 1,
       "files": [
-        "web/assets/js/page_tasks.js"
+        "web\\assets\\js\\page_tasks.js"
       ]
     },
     {
       "action": "relogin",
       "instances": 2,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "renew",
       "instances": 2,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
+      ]
+    },
+    {
+      "action": "repair-symptoms",
+      "instances": 1,
+      "files": [
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "reset",
       "instances": 5,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_traces.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_traces.js"
       ]
     },
     {
       "action": "restore-version",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "retry",
       "instances": 2,
       "files": [
-        "web/assets/js/page_kb.js",
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_kb.js",
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "retry-job",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "review",
       "instances": 4,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "review-batch",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "review-bulk-approve",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "review-bulk-reject",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "review-bulk-retry",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "review-decision",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "review-view",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "revoke-others",
       "instances": 2,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "revoke-session",
       "instances": 2,
       "files": [
-        "web/assets/js/app.js"
+        "web\\assets\\js\\app.js"
       ]
     },
     {
       "action": "rollback",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "rollback-update",
       "instances": 3,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "rules-try",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "run",
       "instances": 1,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "run-eval",
       "instances": 1,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "sample",
-      "instances": 2,
+      "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "save",
       "instances": 20,
       "files": [
-        "web/assets/js/app.js",
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_kb.js",
-        "web/assets/js/page_task_detail.js",
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\app.js",
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_kb.js",
+        "web\\assets\\js\\page_task_detail.js",
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "save-doc",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "save-key",
       "instances": 3,
       "files": [
-        "web/assets/js/personal_model.js"
+        "web\\assets\\js\\personal_model.js"
       ]
     },
     {
       "action": "save-label",
       "instances": 2,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "save-source",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "scan",
       "instances": 1,
       "files": [
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "search",
       "instances": 4,
       "files": [
-        "web/assets/js/app.js",
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\app.js",
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "skills",
       "instances": 1,
       "files": [
-        "web/assets/js/page_dashboard.js"
+        "web\\assets\\js\\page_dashboard.js"
       ]
     },
     {
       "action": "submit",
       "instances": 3,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_cases.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_cases.js"
       ]
     },
     {
       "action": "submit-review",
       "instances": 2,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "supplement",
       "instances": 1,
       "files": [
-        "web/assets/js/page_task_detail.js"
+        "web\\assets\\js\\page_task_detail.js"
       ]
     },
     {
       "action": "term-delete",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "term-edit",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "term-import",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "term-reset",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "term-save",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "test",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "test-key",
       "instances": 3,
       "files": [
-        "web/assets/js/personal_model.js"
+        "web\\assets\\js\\personal_model.js"
       ]
     },
     {
       "action": "toggle",
       "instances": 4,
       "files": [
-        "web/assets/js/page_admin.js",
-        "web/assets/js/page_skills.js"
+        "web\\assets\\js\\page_admin.js",
+        "web\\assets\\js\\page_skills.js"
       ]
     },
     {
       "action": "toggle-status",
       "instances": 1,
       "files": [
-        "web/assets/js/page_kb.js"
+        "web\\assets\\js\\page_kb.js"
       ]
     },
     {
       "action": "upload-logs",
       "instances": 2,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "upload-update",
       "instances": 3,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "user-metric",
       "instances": 2,
       "files": [
-        "web/assets/js/page_usage.js"
+        "web\\assets\\js\\page_usage.js"
       ]
     },
     {
       "action": "verify-rules",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "verify-update",
       "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web\\assets\\js\\page_admin.js"
       ]
     },
     {
       "action": "view-job-trace",
       "instances": 1,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     },
     {
       "action": "workshop-step",
       "instances": 5,
       "files": [
-        "web/assets/js/page_workshop.js"
+        "web\\assets\\js\\page_workshop.js"
       ]
     }
   ],

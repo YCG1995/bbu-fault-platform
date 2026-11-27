@@ -33,7 +33,7 @@ from .kb_revision import (
 )
 from .kb_review import ReviewError, ReviewService
 from .kb_stats import build_stats, stats_csv
-from .kb_text import excerpt, mask_pii, normalize_key
+from .kb_text import excerpt, mask_pii, normalize_key, strip_title_prefix
 from .util import iso_now, new_id, safe_filename, sha256_file
 
 KB_ANSWER_SCHEMA: dict[str, Any] = {
@@ -92,9 +92,55 @@ MAX_BACKUP_FILES = 20000
 MAX_BACKUP_FILE_BYTES = 512 * 1024 * 1024
 MAX_BACKUP_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
+POLISH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symptom": {"type": "string"},
+        "cause": {"type": "string"},
+        "solution": {"type": "string"},
+        "prevention": {"type": "string"},
+        "notes": {"type": "string"},
+    },
+    "required": ["symptom", "cause", "solution", "prevention", "notes"],
+}
+
+POLISH_SYSTEM = """你是 BBU 故障知识库的案例编辑助手。用户会给出案例原文，请在不改变事实的前提下
+重新组织“现象、原因、处理方案、预防措施”，使其便于检索和现场执行。
+
+规则：
+1. 只能使用原文已有的事实、型号、版本、数字和结论；缺信息就写“未提及”，严禁补造。
+2. 现象按“触发条件 → 可观测表现 → 影响范围”组织；原因写直接根因与证据；方案按可执行步骤编号；
+   预防写如何避免复发。
+3. 清理重复的标题、空话和口语；保留告警码、单板名、版本号、命令等原文术语。
+4. 不要输出个人信息、密钥或内部路径；原文中的脱敏占位符保留。
+5. notes 用一句话说明改写了什么、哪些信息仍缺失。
+
+只输出符合 JSON Schema 的对象。"""
+POLISH_TEMPLATE = """案例标题：{title}
+板卡：{boards}
+领域：{domains}
+版本：{versions}
+
+<original>
+现象：{symptom}
+原因：{cause}
+处理方案：{solution}
+预防：{prevention}
+</original>"""
+
 
 def _kb_id(prefix: str) -> str:
     return new_id(prefix, with_time=False, entropy=8)
+
+
+def _emit_progress(progress: Any, step: str, detail: dict[str, Any] | None = None) -> None:
+    """把检索阶段回调给上层（聊天进度、SSE 等）；回调失败不影响检索。"""
+    if progress is None:
+        return
+    try:
+        progress(step, detail or {})
+    except Exception:
+        pass
 
 
 def _payload_hashes(payload: dict[str, Any]) -> tuple[str, str]:
@@ -140,12 +186,18 @@ class KBService:
         self.reviews = ReviewService(db, config, gateway=gateway, traces=traces)
         self._review_queue: queue.Queue[str | None] = queue.Queue()
         self._review_worker: threading.Thread | None = None
+        self._chat_queue: queue.Queue[str | None] = queue.Queue()
+        self._chat_worker: threading.Thread | None = None
         self.last_error = ""
         self._ensure_meta()
         if start_worker:
+            self._recover_chat_messages()
             self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                             name="kb-import-worker")
             self._worker.start()
+            self._chat_worker = threading.Thread(target=self._chat_worker_loop, daemon=True,
+                                                 name="kb-chat-worker")
+            self._chat_worker.start()
             if self.reviews.enabled():
                 self._review_worker = threading.Thread(
                     target=self._review_worker_loop, daemon=True, name="kb-review-worker")
@@ -164,6 +216,9 @@ class KBService:
         self._review_queue.put(None)
         if self._review_worker and self._review_worker.is_alive():
             self._review_worker.join(timeout=3)
+        self._chat_queue.put(None)
+        if self._chat_worker and self._chat_worker.is_alive():
+            self._chat_worker.join(timeout=3)
         if self._rebuild_thread and self._rebuild_thread.is_alive():
             self._rebuild_thread.join(timeout=3)
 
@@ -1433,9 +1488,10 @@ class KBService:
             raise KBError("文档不存在", 404, "not_found")
         result = self._doc_public(row, reveal=reveal)
         cases = self.db.all(
-            "SELECT * FROM kb_cases WHERE doc_id=? AND status='active' ORDER BY ordinal, id",
+            "SELECT * FROM kb_cases WHERE doc_id=? AND status<>'deleted' "
+            "ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, ordinal, id",
             (doc_id,))
-        result["cases"] = [self._case_public(dict(c)) for c in cases]
+        result["cases"] = [self._case_view(dict(c)) for c in cases]
         result["version_history"] = [
             {"id": v["id"], "version": v["version"], "created_at": v["created_at"]}
             for v in self.db.all(
@@ -1455,7 +1511,7 @@ class KBService:
         if user is not None and user.get("role") != "admin":
             if int(row.get("kb_id") or 0) not in set(self._visible_library_ids(user)):
                 raise KBError("案例不存在", 404, "not_found")
-        return {"case": self._case_public(dict(row)),
+        return {"case": self._case_view(dict(row)),
                 "doc": {"id": row["doc_id"], "title": row.get("doc_title") or "",
                         "source_name": row.get("source_name") or ""}}
 
@@ -1488,12 +1544,14 @@ class KBService:
 
     def _case_public(self, row: dict[str, Any]) -> dict[str, Any]:
         sections = _json_list(row.get("sections_json"))
+        title = row.get("title") or ""
         return {
             "id": row.get("id"), "doc_id": row.get("doc_id"),
             "ordinal": int(row.get("ordinal") or 1),
             "is_derived": bool(row.get("is_derived")),
-            "title": row.get("title") or "", "title_clean": row.get("title_clean") or "",
-            "symptom": row.get("symptom") or "", "environment": row.get("environment") or "",
+            "title": title, "title_clean": row.get("title_clean") or "",
+            "symptom": row.get("symptom") or "",
+            "environment": row.get("environment") or "",
             "expected": row.get("expected") or "", "actual": row.get("actual") or "",
             "repro": row.get("repro") or "", "found_date": row.get("found_date") or "",
             "location": row.get("location") or "", "cause": row.get("cause") or "",
@@ -1519,6 +1577,14 @@ class KBService:
             "sections": sections, "created_at": row.get("created_at") or "",
             "uri": f"faultkb://case/{row.get('id')}",
         }
+
+    def _case_view(self, row: dict[str, Any]) -> dict[str, Any]:
+        """展示用案例：去掉历史导入拼进现象的重复标题，不改数据库。"""
+        case = self._case_public(row)
+        case["symptom"] = strip_title_prefix(
+            str(case.get("symptom") or ""), str(case.get("title") or ""),
+            str(case.get("title_clean") or ""))
+        return case
 
     def save_document(self, payload: dict[str, Any], user: dict[str, Any],
                       draft_id: str = "", kb_id: int = 1) -> dict[str, Any]:
@@ -2292,7 +2358,8 @@ class KBService:
     def search(self, query: str, user: dict[str, Any], *,
                filters: dict[str, Any] | None = None, limit: int = 10,
                log: bool = True, kb_id: int = 1,
-               kb_ids: list[int] | None = None) -> dict[str, Any]:
+               kb_ids: list[int] | None = None, query_id: str = "",
+               trace: Any = None, progress: Any = None) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503, "disabled")
         raw_ids = [int(x) for x in (kb_ids or [kb_id]) if int(x or 0) > 0]
@@ -2308,6 +2375,7 @@ class KBService:
         if not ids and not kb_ids:
             ids = [1] if 1 in allowed else []
         threshold = float(self.config.get("kb_no_answer_threshold", 0.18))
+        _emit_progress(progress, "retrieve", {"libraries": ids})
         if len(ids) == 1:
             result = retrieve(self.ensure_index(ids[0]), query, filters=filters, limit=limit,
                               threshold=threshold,
@@ -2360,10 +2428,12 @@ class KBService:
                     "reason": "" if items else "没有找到足够相关的历史案例",
                     "libraries": len(per_library),
                 }
-        query_id = _kb_id("Q")
+        query_id = query_id or _kb_id("Q")
         result["query_id"] = query_id
         result["kb_id"] = ids[0] if len(ids) == 1 else 0
         result["kb_ids"] = ids
+        _emit_progress(progress, "rank", {"hits": len(result.get("items") or []),
+                                         "no_answer": bool(result.get("no_answer"))})
         lib_rows = self.db.all(
             "SELECT id,name FROM kb_libraries WHERE id IN (" +
             ",".join("?" for _ in ids) + ")", tuple(ids)) if ids else []
@@ -2371,16 +2441,21 @@ class KBService:
         if log:
             self._log_query(user, query, filters or {}, result)
             self._record_hits(result.get("items") or [], user)
-            self._trace_query(user, query, result)
+            self._trace_query(user, query, result, trace=trace)
         return result
 
-    def _trace_query(self, user: dict[str, Any], query: str, result: dict[str, Any]) -> None:
+    def _trace_query(self, user: dict[str, Any], query: str, result: dict[str, Any], *,
+                     trace: Any = None) -> None:
         if self.traces is None:
             return
+        owned = False
         try:
-            trace = self.traces.start(
-                kind="kb", ref_id=str(result.get("query_id") or ""), user_id=int(user.get("id") or 0),
-                meta={"action": "search", "kb_ids": result.get("kb_ids") or []})
+            if trace is None:
+                trace = self.traces.start(
+                    kind="kb", ref_id=str(result.get("query_id") or ""),
+                    user_id=int(user.get("id") or 0),
+                    meta={"action": "search", "kb_ids": result.get("kb_ids") or []})
+                owned = True
             trace.append("retrieval", phase="retrieval", status="success",
                          query=str(query)[:500],
                          analysis=result.get("analysis") or {},
@@ -2390,26 +2465,55 @@ class KBService:
                          } for x in (result.get("items") or [])],
                          no_answer=bool(result.get("no_answer")),
                          latency_ms=int(result.get("latency_ms") or 0))
-            trace.finish("success")
+            if owned:
+                trace.finish("success")
         except Exception:
             pass
+
+    @staticmethod
+    def _ai_error_status(exc: Exception) -> dict[str, Any]:
+        text = f"{type(exc).__name__} {exc}".lower()
+        if isinstance(exc, NoModelError):
+            state = "no_model"
+        elif "timeout" in text or "timed out" in text or "超时" in text:
+            state = "timeout"
+        else:
+            state = "error"
+        # no_model 时的界面标题已经写明原因，重复 message 会拼出
+        # “未配置可用模型：未配置可用模型…”，这里只保留真正有用的异常细节。
+        message = "" if state == "no_model" else str(exc)[:300]
+        return {"state": state, "message": message, "model": "", "latency_ms": 0}
 
     def answer(self, query: str, user: dict[str, Any], *,
                filters: dict[str, Any] | None = None,
                limit: int | None = None, kb_id: int = 1,
-               kb_ids: list[int] | None = None) -> dict[str, Any]:
+               kb_ids: list[int] | None = None, progress: Any = None,
+               trace: Any = None, chat_message_id: str = "") -> dict[str, Any]:
         top_k = max(1, min(12, int(limit or self.config.get("kb_top_k", 6))))
+        query_id = _kb_id("Q")
+        trace_obj = trace
+        owned_trace = False
+        if trace_obj is None and self.traces is not None:
+            try:
+                trace_obj = self.traces.start(
+                    kind="kb", ref_id=query_id, user_id=int(user.get("id") or 0),
+                    meta={"action": "answer", "kb_ids": kb_ids or [kb_id],
+                          "source": "chat" if chat_message_id else "api"})
+                owned_trace = True
+            except Exception:
+                trace_obj = None
+        _emit_progress(progress, "parse", {"query": query[:160]})
         result = self.search(query, user, filters=filters, limit=top_k,
-                             kb_id=kb_id, kb_ids=kb_ids)
+                             kb_id=kb_id, kb_ids=kb_ids, query_id=query_id,
+                             trace=trace_obj, progress=progress)
         items = result.get("items") or []
         cases = []
         for index, item in enumerate(items, start=1):
             item = dict(item)
             item["citation"] = f"K{index}"
             cases.append(item)
-        query_id = result.get("query_id") or ""
         if result.get("no_answer") or not cases:
-            return {
+            answer = {
                 "answer": NA_ANSWER, "conclusions": [], "steps": [], "cautions": [],
                 "confidence": 0.0, "no_answer": True, "degraded": True,
                 "cases": cases, "sources": [], "analysis": result.get("analysis") or {},
@@ -2417,14 +2521,30 @@ class KBService:
                 "library_names": result.get("library_names") or {},
                 "kb_ids": result.get("kb_ids") or [],
                 "libraries": result.get("libraries") or 1,
+                "model_status": {"state": "no_answer", "model": "", "latency_ms": 0,
+                                 "message": result.get("reason") or NA_ANSWER},
+                "trace_id": getattr(trace_obj, "run_id", "") if trace_obj else "",
             }
+            if trace_obj is not None:
+                try:
+                    trace_obj.append("answer", phase="answer", status="success",
+                                     no_answer=True, model_status=answer["model_status"])
+                    if owned_trace:
+                        trace_obj.finish("success", meta={"no_answer": True})
+                except Exception:
+                    pass
+            return answer
         role = str(self.config.get("kb_answer_role", "assistant") or "assistant")
         model_text = ""
         model_name = ""
         degraded = True
         parsed: dict[str, Any] | None = None
+        model_status: dict[str, Any] = {"state": "no_model", "model": "", "latency_ms": 0,
+                                        "message": ""}
         if self.gateway is not None and self.gateway.has_real_model(role):
             evidence = _evidence(cases)
+            _emit_progress(progress, "answer", {"model": role, "cases": len(cases)})
+            started = time.monotonic()
             try:
                 response = self.gateway.complete(
                     role, SYSTEM_PROMPT,
@@ -2434,14 +2554,25 @@ class KBService:
                         or "未识别", versions="、".join(result.get("analysis", {}).get("versions") or [])
                         or "未识别", evidence=evidence),
                     json_schema=KB_ANSWER_SCHEMA, max_tokens=1200, temperature=0.15,
-                    purpose="kb.answer")
+                    purpose="kb.answer", trace=trace_obj)
                 model_text = response.text or ""
                 model_name = response.model_name or response.model or ""
                 parsed = response.data if isinstance(response.data, dict) else _json_obj(model_text)
                 degraded = False
-            except (AIError, NoModelError, ValueError, TypeError) as exc:
+                model_status = {"state": "ok", "model": model_name,
+                                "latency_ms": int((time.monotonic() - started) * 1000),
+                                "message": ""}
+            except Exception as exc:  # noqa: BLE001 - 模型失败必须降级为本地摘要
                 parsed = None
                 model_name = ""
+                model_status = self._ai_error_status(exc)
+                model_status["latency_ms"] = int((time.monotonic() - started) * 1000)
+                if trace_obj is not None:
+                    try:
+                        trace_obj.error(phase="answer", code=f"kb_{model_status['state']}",
+                                        message=str(exc)[:500], exc=exc)
+                    except Exception:
+                        pass
         if not parsed:
             parsed = _fallback_answer(cases)
         answer = _sanitize_answer(parsed, cases)
@@ -2454,9 +2585,295 @@ class KBService:
             "library_names": result.get("library_names") or {},
             "kb_ids": result.get("kb_ids") or [],
             "libraries": result.get("libraries") or 1,
+            "model_status": model_status,
+            "trace_id": getattr(trace_obj, "run_id", "") if trace_obj else "",
         })
+        if trace_obj is not None:
+            try:
+                trace_obj.append("answer", phase="answer",
+                                 status="success" if not degraded else "degraded",
+                                 model=model_name, model_status=model_status,
+                                 cases=[c.get("citation") for c in cases],
+                                 answer_chars=len(answer.get("answer") or ""))
+                if owned_trace:
+                    trace_obj.finish("success", meta={"degraded": degraded})
+            except Exception:
+                pass
         self._record_citations(cases)
         return answer
+
+    # ------------------------------------------------------------ 问答会话
+    CHAT_STEPS: tuple[tuple[str, str], ...] = (
+        ("parse", "解析问题"), ("retrieve", "检索索引"), ("rank", "排序与筛选"),
+        ("answer", "生成回答"),
+    )
+
+    def _chat_progress(self, step: str, detail: dict[str, Any] | None,
+                       started: str, *, failed: bool = False) -> dict[str, Any]:
+        labels = self.CHAT_STEPS
+        index = next((i for i, (key, _) in enumerate(labels) if key == step), len(labels) - 1)
+        steps = []
+        for i, (key, label) in enumerate(labels):
+            if i < index:
+                status = "done"
+            elif i == index:
+                status = "failed" if failed else "running"
+            else:
+                status = "waiting"
+            steps.append({"key": key, "label": label, "status": status,
+                          "at": iso_now() if i <= index else ""})
+        percent = int((index / len(labels)) * 100) + (8 if not failed else 0)
+        return {"step": step, "label": labels[index][1],
+                "percent": max(4, min(100 if not failed else 96, percent)), "steps": steps,
+                "detail": detail or {}, "started_at": started,
+                "updated_at": iso_now(), "failed": bool(failed)}
+
+    def _chat_session(self, session_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        row = self.db.one("SELECT * FROM kb_chat_sessions WHERE id=?", (session_id,))
+        if not row or row.get("deleted_at") or int(row.get("user_id") or 0) != int(user.get("id") or 0):
+            raise KBError("对话不存在", 404, "chat_not_found")
+        return row
+
+    def _chat_message_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row.get("id"), "session_id": row.get("session_id"),
+            "role": row.get("role") or "assistant",
+            "content": row.get("content") or "", "query": row.get("query") or "",
+            "status": row.get("status") or "done",
+            "progress": _json_obj(row.get("progress_json")),
+            "payload": _json_obj(row.get("payload_json")),
+            "query_id": row.get("query_id") or "",
+            "error_code": row.get("error_code") or "",
+            "error_message": row.get("error_message") or "",
+            "model": row.get("model") or "",
+            "latency_ms": int(row.get("latency_ms") or 0),
+            "created_at": row.get("created_at") or "",
+            "finished_at": row.get("finished_at") or "",
+        }
+
+    def create_chat_session(self, user: dict[str, Any], *, kb_id: int = 1,
+                            title: str = "") -> dict[str, Any]:
+        kb_id = int(kb_id or 1)
+        if kb_id not in set(self._visible_library_ids(user)):
+            raise KBError("知识库不存在或不可见", 404, "not_found")
+        sid = _kb_id("CH")
+        now = iso_now()
+        self.db.execute(
+            "INSERT INTO kb_chat_sessions(id,kb_id,user_id,title,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (sid, kb_id, int(user["id"]), str(title or "新对话")[:80], now, now))
+        return {"session": self._chat_session_public(self._chat_session(sid, user))}
+
+    def _chat_session_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {"id": row.get("id"), "kb_id": int(row.get("kb_id") or 1),
+                "title": row.get("title") or "新对话",
+                "created_at": row.get("created_at") or "",
+                "updated_at": row.get("updated_at") or ""}
+
+    def list_chats(self, user: dict[str, Any], *, kb_id: int | None = None,
+                   limit: int = 30) -> dict[str, Any]:
+        limit = max(1, min(100, int(limit or 30)))
+        sql = ("SELECT s.*, (SELECT COUNT(*) FROM kb_chat_messages m "
+               "WHERE m.session_id=s.id) AS message_count "
+               "FROM kb_chat_sessions s WHERE s.user_id=? AND s.deleted_at IS NULL")
+        args: list[Any] = [int(user["id"])]
+        if kb_id:
+            sql += " AND s.kb_id=?"
+            args.append(int(kb_id))
+        sql += " ORDER BY s.updated_at DESC LIMIT ?"
+        args.append(limit)
+        items = []
+        for row in self.db.all(sql, tuple(args)):
+            session = self._chat_session_public(dict(row))
+            session["message_count"] = int(row.get("message_count") or 0)
+            last = self.db.one(
+                "SELECT role,content,status,created_at FROM kb_chat_messages "
+                "WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (session["id"],))
+            session["last_message"] = {
+                "role": (last or {}).get("role") or "",
+                "content": str((last or {}).get("content") or "")[:160],
+                "status": (last or {}).get("status") or "",
+                "created_at": (last or {}).get("created_at") or "",
+            } if last else {}
+            running = self.db.one(
+                "SELECT id FROM kb_chat_messages WHERE session_id=? AND role='assistant' "
+                "AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1",
+                (session["id"],))
+            session["running_message_id"] = (running or {}).get("id") or ""
+            items.append(session)
+        return {"items": items, "total": len(items)}
+
+    def get_chat(self, session_id: str, user: dict[str, Any], *,
+                 limit: int = 200) -> dict[str, Any]:
+        session = self._chat_session(session_id, user)
+        rows = self.db.all(
+            "SELECT * FROM kb_chat_messages WHERE session_id=? "
+            "ORDER BY created_at, rowid LIMIT ?", (session_id, max(1, min(500, int(limit)))))
+        messages = [self._chat_message_public(dict(r)) for r in rows]
+        running = next((m["id"] for m in messages
+                        if m["role"] == "assistant" and m["status"] in ("pending", "running")), "")
+        return {"session": self._chat_session_public(session), "messages": messages,
+                "running_message_id": running}
+
+    def delete_chat(self, session_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        session = self._chat_session(session_id, user)
+        now = iso_now()
+        self.db.execute("UPDATE kb_chat_sessions SET deleted_at=?,updated_at=? WHERE id=?",
+                        (now, now, session["id"]))
+        self.db.execute(
+            "UPDATE kb_chat_messages SET status='error',error_code='cancelled',"
+            "error_message='对话已删除',updated_at=?,finished_at=? "
+            "WHERE session_id=? AND status IN ('pending','running')",
+            (now, now, session["id"]))
+        return {"ok": True, "id": session["id"]}
+
+    def send_chat_message(self, session_id: str, user: dict[str, Any], *,
+                          query: str, filters: dict[str, Any] | None = None,
+                          kb_ids: list[int] | None = None) -> dict[str, Any]:
+        session = self._chat_session(session_id, user)
+        query = str(query or "").strip()
+        if not query:
+            raise KBError("请填写故障现象或问题", 400, "query_required")
+        if len(query) > 2000:
+            raise KBError("问题过长（上限 2000 字）", 413, "query_too_long")
+        now = iso_now()
+        user_msg_id = _kb_id("CM")
+        answer_msg_id = _kb_id("CM")
+        kb_id = int(session.get("kb_id") or 1)
+        ids = [int(x) for x in (kb_ids or [kb_id]) if int(x or 0) > 0] or [kb_id]
+        progress = self._chat_progress("parse", {"query": query[:160]}, now)
+        with self.db.tx() as conn:
+            conn.execute(
+                "INSERT INTO kb_chat_messages(id,session_id,user_id,role,query,content,status,"
+                "progress_json,payload_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (user_msg_id, session_id, int(user["id"]), "user", query, query, "done",
+                 "{}", "{}", now, now))
+            conn.execute(
+                "INSERT INTO kb_chat_messages(id,session_id,user_id,role,query,content,status,"
+                "progress_json,payload_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (answer_msg_id, session_id, int(user["id"]), "assistant", query, "",
+                 "pending", json.dumps(progress, ensure_ascii=False), "{}", now, now))
+            title = str(session.get("title") or "")
+            if not title or title == "新对话":
+                title = query[:60]
+            conn.execute(
+                "UPDATE kb_chat_sessions SET title=?,updated_at=? WHERE id=?",
+                (title, now, session_id))
+        if self._chat_worker is not None and self._chat_worker.is_alive():
+            self._chat_queue.put(answer_msg_id)
+        else:
+            self._process_chat_message(answer_msg_id)
+        return {"session": self.get_chat(session_id, user)["session"],
+                "user_message": self._chat_message_public(
+                    self.db.one("SELECT * FROM kb_chat_messages WHERE id=?", (user_msg_id,)) or {}),
+                "assistant_message": self.get_chat_message(answer_msg_id, user)["message"]}
+
+    def get_chat_message(self, message_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        row = self.db.one("SELECT * FROM kb_chat_messages WHERE id=?", (message_id,))
+        if not row or int(row.get("user_id") or 0) != int(user.get("id") or 0):
+            raise KBError("消息不存在", 404, "message_not_found")
+        return {"message": self._chat_message_public(dict(row))}
+
+    def _update_chat_message(self, message_id: str, **values: Any) -> None:
+        if not values:
+            return
+        values.setdefault("updated_at", iso_now())
+        cols = ",".join(f"{key}=?" for key in values)
+        self.db.execute(f"UPDATE kb_chat_messages SET {cols} WHERE id=?",
+                        tuple(values.values()) + (message_id,))
+
+    def _recover_chat_messages(self) -> None:
+        try:
+            now = iso_now()
+            self.db.execute(
+                "UPDATE kb_chat_messages SET status='error',error_code='interrupted',"
+                "error_message='服务重启或进程退出，上次检索已中断，请重新提问',"
+                "updated_at=?,finished_at=? WHERE status IN ('pending','running')",
+                (now, now))
+        except Exception:
+            pass
+
+    def _chat_worker_loop(self) -> None:
+        while not self._stop.is_set():
+            message_id = self._chat_queue.get()
+            if message_id is None:
+                return
+            try:
+                self._process_chat_message(message_id)
+            except Exception:
+                pass
+
+    def _process_chat_message(self, message_id: str) -> None:
+        row = self.db.one("SELECT * FROM kb_chat_messages WHERE id=?", (message_id,))
+        if not row or row.get("status") not in ("pending", "running"):
+            return
+        started_at = str(row.get("created_at") or iso_now())
+        started = time.monotonic()
+        self._update_chat_message(message_id, status="running",
+                                  progress_json=json.dumps(
+                                      self._chat_progress("parse", {}, started_at),
+                                      ensure_ascii=False))
+        session = self.db.one("SELECT * FROM kb_chat_sessions WHERE id=?", (row["session_id"],))
+        user_row = self.db.one("SELECT * FROM users WHERE id=?", (row["user_id"],))
+        if not session or not user_row:
+            self._update_chat_message(
+                message_id, status="error", error_code="chat_not_found",
+                error_message="对话或用户不存在", finished_at=iso_now())
+            return
+        user = {"id": user_row["id"], "role": user_row.get("role") or "engineer",
+                "username": user_row.get("username") or ""}
+        kb_id = int(session.get("kb_id") or 1)
+        progress_map: dict[str, dict[str, Any]] = {}
+
+        def progress(step: str, detail: dict[str, Any]) -> None:
+            payload = self._chat_progress(step, detail, started_at)
+            payload["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            progress_map.clear()
+            progress_map.update(payload)
+            try:
+                self._update_chat_message(
+                    message_id, progress_json=json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                pass
+
+        try:
+            answer = self.answer(
+                str(row.get("query") or ""), user, filters=None,
+                kb_id=kb_id, kb_ids=[kb_id], progress=progress,
+                chat_message_id=message_id)
+            latency = int((time.monotonic() - started) * 1000)
+            done = self._chat_progress("answer", {"model": answer.get("model") or ""},
+                                       started_at)
+            done["percent"] = 100
+            done["steps"] = [{"key": key, "label": label, "status": "done", "at": iso_now()}
+                             for key, label in self.CHAT_STEPS]
+            done["elapsed_ms"] = latency
+            self._update_chat_message(
+                message_id, status="done", content=str(answer.get("answer") or ""),
+                payload_json=json.dumps(answer, ensure_ascii=False, default=str),
+                progress_json=json.dumps(done, ensure_ascii=False),
+                query_id=str(answer.get("query_id") or ""),
+                model=str(answer.get("model") or ""), latency_ms=latency,
+                finished_at=iso_now())
+        except Exception as exc:  # noqa: BLE001 - 失败原因必须写回消息，刷新后可见
+            status = self._ai_error_status(exc)
+            failed = self._chat_progress(progress_map.get("step") or "parse",
+                                         {"error": str(exc)[:300]}, started_at, failed=True)
+            failed["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            self._update_chat_message(
+                message_id, status="error", error_code=str(status.get("state") or "error"),
+                error_message=str(exc)[:500], progress_json=json.dumps(failed, ensure_ascii=False),
+                latency_ms=failed["elapsed_ms"], finished_at=iso_now())
+        finally:
+            now = iso_now()
+            try:
+                self.db.execute("UPDATE kb_chat_sessions SET updated_at=? WHERE id=?",
+                                (now, row["session_id"]))
+            except Exception:
+                pass
 
     def feedback(self, user: dict[str, Any], *, query_id: str, helpful: bool,
                  reason: str = "") -> dict[str, Any]:
@@ -2637,6 +3054,14 @@ class KBService:
                 changed = True
         if "title" in data and "title_clean" not in data:
             case["title_clean"] = self._title_clean(str(case.get("title") or ""))
+        # 现象字段不允许以标题开头（历史导入模板会拼出“标题+描述”重复）。
+        # 只有用户改动了现象或标题时才清洗；否则保留库内原文，避免无意义修订。
+        if "symptom" in data or "title" in data:
+            case["symptom"] = strip_title_prefix(
+                str(case.get("symptom") or ""), str(case.get("title") or ""),
+                str(case.get("title_clean") or ""))
+        else:
+            case["symptom"] = str(row.get("symptom") or "")
         if not changed:
             raise KBError("没有要修改的字段", 400, "no_change")
         doc = {"title": row.get("doc_title") or "", "title_clean": row.get("title_clean") or "",
@@ -2644,11 +3069,14 @@ class KBService:
                "domains": _json_list(row.get("domains_json")),
                "versions": _json_list(row.get("versions_json"))}
         with self.db.tx() as conn:
+            recorded = {"value": True}
             self._update_case_row(
                 conn, case_id, case, doc, int(case.get("ordinal") or 1), iso_now(),
                 int(user.get("id") or 0), action="update", actor_type=actor_type,
                 source=source, reason=reason,
-                review_id=str(data.get("review_id") or ""))
+                review_id=str(data.get("review_id") or ""), recorded_out=recorded)
+        if not recorded["value"]:
+            raise KBError("内容没有变化，未生成修订", 400, "no_change")
         if (self.reviews.enabled()
                 and bool(self.config.get("kb_review_auto_on_edit", False))):
             self._queue_review("case", case_id, stage="edit")
@@ -2671,8 +3099,144 @@ class KBService:
             self._step_revision(conn, case_id, str(row.get("doc_id") or ""),
                                 int(row.get("revision") or 1) + 1, "status", before, after,
                                 int(user.get("id") or 0), reason=reason or f"状态改为 {status}")
+            if row.get("doc_id"):
+                conn.execute("UPDATE kb_documents SET updated_at=? WHERE id=?",
+                             (now, row.get("doc_id")))
         self._schedule_rebuild()
         return self.get_case(case_id)
+
+    def polish_case(self, case_id: str, user: dict[str, Any], *,
+                    instruction: str = "") -> dict[str, Any]:
+        """用模型重写案例字段，返回建议稿；不落库，由用户确认后保存。"""
+        row = self._case_access(case_id, user)
+        if bool(user.get("role") != "admin") and int(row.get("doc_created_by") or 0) != int(
+                user.get("id") or 0):
+            raise KBError("无权优化该案例", 403, "forbidden")
+        role = str(self.config.get("kb_answer_role", "assistant") or "assistant")
+        if self.gateway is None or not self.gateway.has_real_model(role):
+            raise KBError("未配置可用模型，无法执行 AI 优化", 503, "no_model")
+        case = self._case_view(row)
+        trace = None
+        if self.traces is not None:
+            try:
+                trace = self.traces.start(
+                    kind="kb", ref_id=f"polish:{case_id}",
+                    user_id=int(user.get("id") or 0),
+                    meta={"action": "polish", "case_id": case_id, "doc_id": row.get("doc_id")})
+            except Exception:
+                trace = None
+        prompt = POLISH_TEMPLATE.format(
+            title=str(case.get("title") or "")[:200],
+            boards="、".join(case.get("boards") or []) or "未识别",
+            domains="、".join(case.get("domains") or []) or "未识别",
+            versions="、".join(case.get("versions") or []) or "未识别",
+            symptom=str(case.get("symptom") or "")[:3000],
+            cause=str(case.get("cause_detail") or case.get("cause") or "")[:3000],
+            solution=str(case.get("solution") or "")[:3000],
+            prevention=str(case.get("prevention") or "")[:1500],
+        )
+        if instruction.strip():
+            prompt += f"\n\n补充要求（仍需遵守事实约束）：{instruction.strip()[:600]}"
+        started = time.monotonic()
+        try:
+            response = self.gateway.complete(
+                role, POLISH_SYSTEM, prompt, json_schema=POLISH_SCHEMA,
+                max_tokens=1600, temperature=0.2, purpose="kb.case.polish", trace=trace)
+            data = response.data if isinstance(response.data, dict) else _json_obj(response.text)
+            if not isinstance(data, dict) or not data:
+                raise ValueError("模型未返回有效 JSON")
+        except NoModelError as exc:
+            if trace is not None:
+                try:
+                    trace.error(phase="polish", code="no_model", message=str(exc), exc=exc)
+                except Exception:
+                    pass
+            raise KBError("未配置可用模型，无法执行 AI 优化", 503, "no_model")
+        except Exception as exc:  # noqa: BLE001
+            if trace is not None:
+                try:
+                    trace.error(phase="polish", code="kb_polish_failed", message=str(exc), exc=exc)
+                except Exception:
+                    pass
+            raise KBError(f"AI 优化失败：{str(exc)[:200]}", 502, "model_error")
+        suggestions = {
+            key: str(data.get(key) or "").strip()[:4000]
+            for key in ("symptom", "cause", "solution", "prevention", "notes")}
+        if not any(suggestions.get(k) for k in ("symptom", "cause", "solution")):
+            raise KBError("模型没有给出可用的改写内容", 502, "empty_suggestion")
+        if suggestions["symptom"]:
+            suggestions["symptom"] = strip_title_prefix(
+                suggestions["symptom"], str(case.get("title") or ""),
+                str(case.get("title_clean") or ""))
+        current = {"symptom": case.get("symptom") or "",
+                   "cause": case.get("cause_detail") or case.get("cause") or "",
+                   "solution": case.get("solution") or "",
+                   "prevention": case.get("prevention") or ""}
+        change_map = {key: bool(suggestions.get(key)
+                                and suggestions[key].strip() != str(current[key]).strip())
+                     for key in current}
+        result = {"suggestions": suggestions, "changed": change_map,
+                  "model": response.model_name or response.model or "",
+                  "latency_ms": int((time.monotonic() - started) * 1000),
+                  "trace_id": getattr(trace, "run_id", "") if trace else "",
+                  "case_id": case_id}
+        if trace is not None:
+            try:
+                trace.append("polish", phase="polish", status="success",
+                             changed=change_map, model=result["model"],
+                             latency_ms=result["latency_ms"])
+                trace.finish("success")
+            except Exception:
+                pass
+        return result
+
+    def repair_symptom_titles(self, user: dict[str, Any]) -> dict[str, Any]:
+        """一次性清理历史数据中“现象以标题开头”的重复，并记录审计。"""
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可执行数据修复", 403, "forbidden")
+        rows = self.db.all(
+            "SELECT id,title,title_clean,symptom FROM kb_cases "
+            "WHERE status<>'deleted' AND symptom<>''")
+        changes: list[tuple[str, str]] = []
+        for row in rows:
+            cleaned = strip_title_prefix(str(row.get("symptom") or ""),
+                                         str(row.get("title") or ""),
+                                         str(row.get("title_clean") or ""))
+            if cleaned != (row.get("symptom") or "") and cleaned:
+                changes.append((cleaned, str(row.get("id") or "")))
+        if changes:
+            now = iso_now()
+            with self.db.tx() as conn:
+                for cleaned, case_id in changes:
+                    conn.execute(
+                        "UPDATE kb_cases SET symptom=?,updated_at=?,updated_by=? WHERE id=?",
+                        (cleaned, now, int(user.get("id") or 0), case_id))
+            self.db.audit(int(user.get("id") or 0), str(user.get("username") or "admin"),
+                          "kb.case.repair_symptom", "kb",
+                          {"fixed": len(changes), "scanned": len(rows)})
+            self._schedule_rebuild()
+        return {"fixed": len(changes), "scanned": len(rows)}
+
+    def list_doc_revisions(self, doc_id: str, user: dict[str, Any], *,
+                           limit: int = 100) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看文档修订记录", 403, "forbidden")
+        doc = self.db.one("SELECT id,title FROM kb_documents WHERE id=?", (doc_id,))
+        if not doc:
+            raise KBError("文档不存在", 404, "not_found")
+        rows = self.db.all(
+            "SELECT r.*, c.title AS case_title FROM kb_case_revisions r "
+            "LEFT JOIN kb_cases c ON c.id=r.case_id WHERE r.doc_id=? "
+            "ORDER BY r.created_at DESC, r.revision DESC LIMIT ?",
+            (doc_id, max(1, min(500, int(limit or 100)))))
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["differences"] = _json_list(item.pop("diff_json"))
+            item["href"] = self._kb_doc_href(doc_id, str(item.get("case_id") or ""))
+            items.append(item)
+        return {"doc_id": doc_id, "doc_title": doc.get("title") or "",
+                "items": items, "total": len(items)}
 
     def _case_tags_db_for(self, case_id: str) -> dict[str, list[str]]:
         # 非事务读取使用连接；与 _case_tags_db 的同构结果。
@@ -2747,6 +3311,31 @@ class KBService:
             return str(draft.get("title") or "")
         return ""
 
+    def _kb_doc_href(self, doc_id: str, case_id: str = "") -> str:
+        if not doc_id:
+            return ""
+        href = f"#/kb/docs/{doc_id}"
+        return f"{href}?case={case_id}" if case_id else href
+
+    def _target_ids(self, target: str) -> tuple[str, str]:
+        """把审计目标（D/K/DR/...）解析成可跳转的 doc_id / case_id。"""
+        target = str(target or "").strip()
+        if not target:
+            return "", ""
+        if target.startswith("K"):
+            row = self.db.one("SELECT id,doc_id FROM kb_cases WHERE id=?", (target,))
+            if row:
+                return str(row.get("doc_id") or ""), str(row.get("id") or "")
+        if target.startswith("D") and not target.startswith("DR"):
+            row = self.db.one("SELECT id FROM kb_documents WHERE id=?", (target,))
+            if row:
+                return str(row.get("id") or ""), ""
+        if target.startswith("DR"):
+            row = self.db.one("SELECT doc_id FROM kb_drafts WHERE id=?", (target,))
+            if row and row.get("doc_id"):
+                return str(row["doc_id"]), ""
+        return "", ""
+
     def list_audit(self, user: dict[str, Any], *, actor: str = "", action: str = "",
                    target: str = "", since: str = "", until: str = "", limit: int = 100,
                    kb_id: int | None = None) -> dict[str, Any]:
@@ -2778,11 +3367,15 @@ class KBService:
         items: list[dict[str, Any]] = []
         for row in self.db.all(rev_sql, tuple(rev_args)):
             item = dict(row)
+            case_id = str(item.get("case_id") or "")
+            doc_id = str(item.get("doc_id") or "")
             item.update({"kind": "revision", "action": f"case.{item.get('action')}",
                          "target": item.get("case_id"), "object_type": "case",
                          "target_title": self._target_title(str(item.get("case_id") or "")),
                          "detail": _json_list(item.pop("diff_json")),
                          "actor": item.get("actor_name") or "",
+                         "case_id": case_id, "doc_id": doc_id,
+                         "href": self._kb_doc_href(doc_id, case_id),
                          "message": item.get("reason") or ""})
             items.append(item)
         log_sql = "SELECT * FROM audit_logs WHERE action LIKE 'kb.%'"
@@ -2814,10 +3407,17 @@ class KBService:
         log_args.append(limit)
         for row in self.db.all(log_sql, tuple(log_args)):
             item = dict(row)
+            target = str(item.get("target") or "")
+            doc_id, case_id = self._target_ids(target)
+            detail_obj = _json_obj(item.get("detail_json"))
+            doc_id = doc_id or str(detail_obj.get("doc_id") or "")
+            case_id = case_id or str(detail_obj.get("case_id") or "")
             item.update({"kind": "audit", "actor": item.get("username") or "",
                          "created_at": item.get("ts") or "", "object_type": "kb",
-                         "detail": _json_obj(item.get("detail_json")),
-                         "target_title": self._target_title(str(item.get("target") or "")),
+                         "detail": detail_obj,
+                         "target_title": self._target_title(target),
+                         "doc_id": doc_id, "case_id": case_id,
+                         "href": self._kb_doc_href(doc_id, case_id),
                          "message": ""})
             items.append(item)
         items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
@@ -3242,7 +3842,8 @@ class KBService:
     def _update_case_row(self, conn, case_id: str, case: dict[str, Any], doc: dict[str, Any],
                          ordinal: int, now: str, user_id: int, *, action: str = "update",
                          actor_type: str = "human", source: str = "web", reason: str = "",
-                         review_id: str = "", model: str = "", prompt_version: str = "") -> dict[str, Any]:
+                         review_id: str = "", model: str = "", prompt_version: str = "",
+                         recorded_out: dict[str, Any] | None = None) -> dict[str, Any]:
         values = self._case_values(case, doc, ordinal)
         old = self._case_row(conn, case_id)
         before = case_snapshot(old, self._case_tags_db(conn, case_id))
@@ -3264,7 +3865,8 @@ class KBService:
              new_status, int(old.get("revision") or 1) + 1, now, user_id, case_id))
         self._replace_case_tags(conn, case_id, values)
         after = case_snapshot(self._case_row(conn, case_id), self._case_tags_db(conn, case_id))
-        if not case_diff(before, after):
+        changed_fields = case_diff(before, after)
+        if not changed_fields:
             # 仅文档标题等非案例字段变化时，不制造空修订，也不清掉已有审核结论。
             conn.execute(
                 "UPDATE kb_cases SET revision=?,review_status=?,last_review_id=?,status=?,"
@@ -3277,6 +3879,11 @@ class KBService:
                                 int(old.get("revision") or 1) + 1, action, before, after, user_id,
                                 actor_type=actor_type, source=source, reason=reason,
                                 review_id=review_id, model=model, prompt_version=prompt_version)
+            if old.get("doc_id"):
+                conn.execute("UPDATE kb_documents SET updated_at=? WHERE id=?",
+                             (now, old.get("doc_id")))
+        if recorded_out is not None:
+            recorded_out["value"] = bool(changed_fields)
         result = dict(case)
         result["id"] = case_id
         return result

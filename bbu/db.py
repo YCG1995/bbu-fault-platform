@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -1026,6 +1026,37 @@ CREATE TABLE IF NOT EXISTS kb_eval_runs (
   created_at TEXT NOT NULL,
   finished_at TEXT
 );
+CREATE TABLE IF NOT EXISTS kb_chat_sessions (
+  id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
+  user_id INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_chat_sessions_user ON kb_chat_sessions(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS kb_chat_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  query TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'done',
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  query_id TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_chat_messages_session
+  ON kb_chat_messages(session_id, created_at);
 
 """
 

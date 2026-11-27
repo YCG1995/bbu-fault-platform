@@ -1325,3 +1325,51 @@ a.kb-cite:hover { background: #dbeafe; }
 .kb-rev-row details { margin: 7px 0; }
 .kb-rev-row .kb-raw { max-height: 220px; overflow: auto; background: #f8fafc;
   border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+
+/* 1.34.0 知识库：问答历史、进度与文档库多标签 */
+.kb-chat-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px; margin-top: 14px; align-items: start; }
+.kb-chat-side { position: sticky; top: 12px; max-height: calc(100vh - 120px); display: flex; flex-direction: column; }
+.kb-chat-side .card-head h2 { font-size: 15px; }
+.kb-chat-list { overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.kb-chat-item { position: relative; border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; background: var(--panel); cursor: pointer; }
+.kb-chat-item:hover { border-color: var(--brand); }
+.kb-chat-item.active { border-color: var(--brand); box-shadow: inset 3px 0 0 var(--brand); background: var(--panel-2); }
+.kb-chat-title { font-weight: 600; font-size: 13px; line-height: 1.35; padding-right: 44px; word-break: break-all; }
+.kb-chat-preview { margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.kb-chat-del { position: absolute; right: 6px; top: 6px; padding: 2px 6px; opacity: .55; font-size: 11px; }
+.kb-chat-item:hover .kb-chat-del { opacity: 1; }
+.kb-chat-tip { border-top: 1px solid var(--line); padding: 10px 12px; }
+.kb-chat-main { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.kb-chat-top { margin: 0; }
+.kb-chat-messages { min-height: 260px; max-height: 58vh; overflow: auto; padding: 4px 2px; display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
+.kb-msg { display: flex; flex-direction: column; gap: 4px; }
+.kb-msg.user { align-items: flex-end; }
+.kb-msg.assistant { align-items: stretch; }
+.kb-msg-bubble { max-width: 88%; background: #eef4ff; border: 1px solid #d7e4ff; color: var(--ink); border-radius: 12px 12px 2px 12px; padding: 9px 12px; font-size: 13px; line-height: 1.6; word-break: break-word; }
+.kb-msg-meta { padding: 0 2px; }
+.kb-chat-progress { border: 1px dashed var(--line); border-radius: 10px; padding: 12px; background: var(--panel-2); }
+.kb-chat-progress.failed { border-color: rgba(220, 38, 38, .45); background: #fff5f5; }
+.kb-progress-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.kb-step { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); background: #fff; }
+.kb-step.done { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+.kb-step.running { color: #92400e; border-color: #fde68a; background: #fffbeb; }
+.kb-step.failed { color: #991b1b; border-color: #fecaca; background: #fef2f2; }
+.kb-model-note { margin-bottom: 8px; }
+.kb-case-pane { padding-top: 2px; }
+.kb-ai-panel { border: 1px solid #c7d2fe; background: #f5f7ff; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+.kb-ai-suggest { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.kb-ai-suggest details { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.kb-ai-text { white-space: pre-wrap; font-size: 12px; line-height: 1.65; color: var(--ink); margin-top: 6px; max-height: 180px; overflow: auto; }
+.kb-guide { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel-2); }
+.kb-guide summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); }
+.kb-guide ul { margin: 8px 0 2px; padding-left: 18px; line-height: 1.7; }
+.kb-doc-case.disabled { opacity: .82; border-left: 3px solid #f59e0b; }
+.kb-doc-case.focus { box-shadow: 0 0 0 2px rgba(59, 130, 246, .35); }
+.focus-row td { background: #eff6ff; }
+.kb-diff-table .kb-diff-text { margin: 0; padding: 6px 8px; background: #f8fafc; border-radius: 6px; max-height: 150px; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.55; font-family: inherit; }
+
+@media (max-width: 900px) {
+  .kb-chat-layout { grid-template-columns: 1fr; }
+  .kb-chat-side { position: static; max-height: 220px; order: 2; }
+  .kb-chat-messages { max-height: none; }
+}

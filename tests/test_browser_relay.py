@@ -147,10 +147,13 @@ class BrowserRelayTests(unittest.TestCase):
         return self.window_id
 
     # ---------- 核心 ----------
-    def test_schema_24_has_transport_column(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 27)
-        with sqlite3.connect(self.db.path) as conn:
+    def test_schema_28_has_transport_column(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 28)
+        conn = sqlite3.connect(self.db.path)
+        try:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_usage_events)")}
+        finally:
+            conn.close()
         self.assertIn("transport", columns)
         # 同一路径再次初始化必须幂等，不能因列已存在而失败。
         Database(self.db.path)

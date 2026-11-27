@@ -55,6 +55,7 @@ DOMAIN_WORDS: dict[str, tuple[str, ...]] = {
 
 SECTION_ALIASES: dict[str, str] = {
     "详细描述": "symptom", "测试输入": "symptom", "问题描述": "symptom",
+    "故障现象": "symptom", "故障描述": "symptom", "问题现象": "symptom",
     "测试环境": "environment", "环境": "environment", "组网": "environment",
     "预期结果": "expected", "期望结果": "expected",
     "实际结果": "actual", "实际现象": "actual",
@@ -207,6 +208,44 @@ def clean_title(title: str) -> str:
     value = TITLE_NOISE_RE.sub("", value).strip()
     value = re.sub(r"^\s*\[[^\]]+\]\s*", "", value).strip()
     return value or normalize_text(title).strip()
+
+
+TITLE_PREFIX_TRIM_RE = re.compile(r"^[\s:;,.，。、\-—|/\\()\[\]【】\"'“”]+")
+TITLE_BOUNDARY = set(" \n\t\r:：,，。;；、-—|/\\()（）[]【】\"'“”")
+
+
+def strip_title_prefix(text: str, title: str, title_clean: str = "") -> str:
+    """去掉现象开头重复的标题。
+
+    导入模板把“标题 + 详细描述”拼进 symptom，导致编辑页和回答里标题重复。
+    这里只在开头命中完整标题（或清洗后的标题）时裁剪，并清理紧跟的标点；
+    不删除正文中再次出现的标题词。
+    """
+    raw = normalize_text(text or "")
+    if not raw:
+        return ""
+    candidates = [c for c in (normalize_text(title or ""), normalize_text(title_clean or "")) if c]
+    candidates.sort(key=len, reverse=True)
+    for _ in range(2):
+        matched = False
+        for cand in candidates:
+            if len(cand) < 4 or not raw.startswith(cand):
+                continue
+            tail = raw[len(cand):]
+            # 只有标题后面紧跟分隔符时才裁剪，避免把“标题+正文”粘连的正常句子切掉。
+            if tail and tail[0] not in TITLE_BOUNDARY:
+                continue
+            tail = re.sub(r"^\s*[（(][^）)\n]{0,60}(?:详细描述|附件)[^）)\n]{0,60}[）)]",
+                          "", tail)
+            rest = TITLE_PREFIX_TRIM_RE.sub("", tail, count=1).strip()
+            if normalize_text(rest).startswith(cand) and len(rest) <= len(cand) + 2:
+                rest = ""
+            raw = rest
+            matched = True
+            break
+        if not matched:
+            break
+    return raw.strip()
 
 
 def detect_boards(text: str) -> list[str]:
@@ -428,9 +467,10 @@ def build_cases(title: str, answer: str, *, source_confidence: float = 0.9,
     warnings: list[str] = []
     base = _section_map(sections)
     cause_matches = [sec for sec in sections if sec.kind == "cause"]
-    base_symptom = " ".join(x for x in (
-        title_clean, base.get("symptom", ""), base.get("actual", ""), preamble[:300]
+    symptom_body = " ".join(x for x in (
+        base.get("symptom", ""), base.get("actual", ""), preamble[:300]
     ) if x).strip()
+    base_symptom = strip_title_prefix(symptom_body, title_raw, title_clean)
     boards = detect_boards(title_raw + "\n" + answer)
     domains = detect_domains(title_raw + "\n" + answer)
     versions = detect_versions(title_raw + "\n" + answer)
