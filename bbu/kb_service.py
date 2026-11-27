@@ -317,9 +317,11 @@ class KBService:
             "FROM kb_libraries l" + where + " ORDER BY l.is_default DESC,l.created_at ASC")
         return {"items": [dict(r) for r in rows]}
 
-    def get_library(self, kb_id: int) -> dict[str, Any]:
-        row = self.db.one(
-            "SELECT * FROM kb_libraries WHERE id=? AND deleted_at IS NULL", (int(kb_id),))
+    def get_library(self, kb_id: int, *, include_archived: bool = False) -> dict[str, Any]:
+        sql = "SELECT * FROM kb_libraries WHERE id=?"
+        if not include_archived:
+            sql += " AND deleted_at IS NULL"
+        row = self.db.one(sql, (int(kb_id),))
         if not row:
             raise KBError("知识库不存在", 404, "not_found")
         return dict(row)
@@ -350,7 +352,7 @@ class KBService:
     def backup_library(self, kb_id: int, user: dict[str, Any]) -> tuple[str, bytes]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可备份知识库", 403, "forbidden")
-        lib = self.get_library(kb_id)
+        lib = self.get_library(kb_id, include_archived=True)
         docs = [dict(r) for r in self.db.all(
             "SELECT * FROM kb_documents WHERE kb_id=? AND deleted_at IS NULL ORDER BY created_at",
             (int(kb_id),))]
