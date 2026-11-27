@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -722,6 +722,16 @@ CREATE TABLE IF NOT EXISTS kb_cases (
   quality REAL NOT NULL DEFAULT 0,
   confidence REAL NOT NULL DEFAULT 0.9,
   status TEXT NOT NULL DEFAULT 'active',
+  revision INTEGER NOT NULL DEFAULT 1,
+  review_status TEXT NOT NULL DEFAULT 'unreviewed',
+  review_score REAL NOT NULL DEFAULT 0,
+  last_review_id TEXT,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  citation_count INTEGER NOT NULL DEFAULT 0,
+  last_hit_at TEXT,
+  helpful_count INTEGER NOT NULL DEFAULT 0,
+  unhelpful_count INTEGER NOT NULL DEFAULT 0,
+  updated_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -844,6 +854,125 @@ CREATE TABLE IF NOT EXISTS kb_terms (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_terms_kind ON kb_terms(kind, term);
+
+
+-- 案例级追加式修订台账。snapshot_z 为 zlib 压缩的完整案例快照，diff_json 为字段级差异。
+CREATE TABLE IF NOT EXISTS kb_case_revisions (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL,
+  action TEXT NOT NULL DEFAULT 'update',
+  actor_type TEXT NOT NULL DEFAULT 'human',
+  actor_id INTEGER,
+  actor_name TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'web',
+  reason TEXT NOT NULL DEFAULT '',
+  diff_json TEXT NOT NULL DEFAULT '[]',
+  snapshot_z BLOB,
+  request_id TEXT NOT NULL DEFAULT '',
+  review_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  prev_hash TEXT NOT NULL DEFAULT '',
+  entry_hash TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(case_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_case_revisions_case ON kb_case_revisions(case_id, revision DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_case_revisions_time ON kb_case_revisions(created_at DESC);
+CREATE TRIGGER IF NOT EXISTS trg_kb_case_revisions_no_update
+BEFORE UPDATE ON kb_case_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'kb_case_revisions is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_kb_case_revisions_no_delete
+BEFORE DELETE ON kb_case_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'kb_case_revisions is append-only');
+END;
+
+CREATE TABLE IF NOT EXISTS kb_reviews (
+  id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'import',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  decision TEXT NOT NULL DEFAULT '',
+  score REAL NOT NULL DEFAULT 0,
+  dimensions_json TEXT NOT NULL DEFAULT '[]',
+  issues_json TEXT NOT NULL DEFAULT '[]',
+  suggested_patch_json TEXT NOT NULL DEFAULT '{}',
+  confidence REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'queued',
+  human_decision TEXT NOT NULL DEFAULT '',
+  human_note TEXT NOT NULL DEFAULT '',
+  reviewed_by INTEGER,
+  reviewed_at TEXT,
+  applied_patch_json TEXT NOT NULL DEFAULT '{}',
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  tokens_in INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_reviews_status ON kb_reviews(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_reviews_target ON kb_reviews(target_type, target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_reviews_hash ON kb_reviews(content_hash, prompt_version);
+
+CREATE TABLE IF NOT EXISTS kb_case_usage_daily (
+  day TEXT NOT NULL,
+  case_id TEXT NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0,
+  citations INTEGER NOT NULL DEFAULT 0,
+  helpful INTEGER NOT NULL DEFAULT 0,
+  unhelpful INTEGER NOT NULL DEFAULT 0,
+  unique_users INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(day, case_id)
+);
+
+CREATE TABLE IF NOT EXISTS kb_stats_daily (
+  day TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  dim_key TEXT NOT NULL DEFAULT '',
+  dim_json TEXT NOT NULL DEFAULT '{}',
+  value INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  UNIQUE(day, metric, dim_key)
+);
+
+-- 评测表先随 schema 建好；1.31.0 再开放评测台，不影响 1.30.x 的检索与治理。
+CREATE TABLE IF NOT EXISTS kb_eval_sets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'retrieval',
+  description TEXT NOT NULL DEFAULT '',
+  created_by INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kb_eval_queries (
+  id TEXT PRIMARY KEY,
+  set_id TEXT NOT NULL REFERENCES kb_eval_sets(id) ON DELETE CASCADE,
+  query TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'open',
+  qrels_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_eval_queries_set ON kb_eval_queries(set_id, id);
+CREATE TABLE IF NOT EXISTS kb_eval_runs (
+  id TEXT PRIMARY KEY,
+  set_id TEXT NOT NULL REFERENCES kb_eval_sets(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  failures_json TEXT NOT NULL DEFAULT '[]',
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
 
 """
 
@@ -1014,6 +1143,22 @@ class Database:
             usage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_usage_events)")}
             if "transport" not in usage_cols:
                 conn.execute("ALTER TABLE llm_usage_events ADD COLUMN transport TEXT NOT NULL DEFAULT 'server'")
+            # schema 25：案例修订/审核/统计字段。只新增列，旧库幂等升级。
+            kb_case_cols = {r["name"] for r in conn.execute("PRAGMA table_info(kb_cases)")}
+            for name, ddl in (
+                ("revision", "ALTER TABLE kb_cases ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"),
+                ("review_status", "ALTER TABLE kb_cases ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unreviewed'"),
+                ("review_score", "ALTER TABLE kb_cases ADD COLUMN review_score REAL NOT NULL DEFAULT 0"),
+                ("last_review_id", "ALTER TABLE kb_cases ADD COLUMN last_review_id TEXT"),
+                ("hit_count", "ALTER TABLE kb_cases ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0"),
+                ("citation_count", "ALTER TABLE kb_cases ADD COLUMN citation_count INTEGER NOT NULL DEFAULT 0"),
+                ("last_hit_at", "ALTER TABLE kb_cases ADD COLUMN last_hit_at TEXT"),
+                ("helpful_count", "ALTER TABLE kb_cases ADD COLUMN helpful_count INTEGER NOT NULL DEFAULT 0"),
+                ("unhelpful_count", "ALTER TABLE kb_cases ADD COLUMN unhelpful_count INTEGER NOT NULL DEFAULT 0"),
+                ("updated_by", "ALTER TABLE kb_cases ADD COLUMN updated_by INTEGER"),
+            ):
+                if name not in kb_case_cols:
+                    conn.execute(ddl)
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),))

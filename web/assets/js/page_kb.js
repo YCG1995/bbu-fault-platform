@@ -223,19 +223,340 @@ export async function renderKb() {
   return view;
 }
 
+const KB_TABS = [
+  ['overview', '概览'], ['stats', '统计'], ['docs', '文档'], ['import', '导入'],
+  ['review', '审核'], ['audit', '变更与审计'], ['terms', '词典'],
+  ['eval', '评测'], ['settings', '设置'],
+];
+
+const REVIEW_STATUS = {
+  queued: '排队中', running: '审核中', done: '已完成', manual: '转人工',
+  failed: '失败', decided: '已终审',
+};
+const REVIEW_STATUS_BADGE = { queued: 'warn', running: 'warn', done: 'ok', manual: 'warn',
+  failed: 'danger', decided: 'ok' };
+
+function kbTabNav(active) {
+  return `<div class="kb-tabbar">${KB_TABS.map(([key, label]) =>
+    `<a class="kb-tab ${key === active ? 'active' : ''}" href="#/kb/docs?tab=${key}">${label}</a>`).join('')}</div>`;
+}
+
+function reviewBadge(status) {
+  return `<span class="badge ${REVIEW_STATUS_BADGE[status] || ''}">${esc(REVIEW_STATUS[status] || status || '—')}</span>`;
+}
+
+function trendBars(trend, days = 30) {
+  const rows = (trend || []).slice(-Math.max(1, Number(days || 30)));
+  const max = Math.max(1, ...rows.map((x) => Number(x.queries || 0)));
+  return `<div class="kb-trend">${rows.map((x) => `<div class="kb-trend-col" title="${esc(x.day)} 查询 ${x.queries}">
+    <div class="kb-trend-bar" style="height:${Math.max(2, Math.round((Number(x.queries || 0) / max) * 100))}%"></div>
+    <span class="tiny muted">${esc(String(x.day).slice(5))}</span></div>`).join('')}</div>`;
+}
+
+function miniBars(items, key = 'n') {
+  const rows = items || [];
+  const max = Math.max(1, ...rows.map((x) => Number(x[key] || 0)));
+  return rows.slice(0, 10).map((x) => `<div class="kb-meter"><span class="tiny">${esc(x.query || x.title || x.day || '')}</span>
+    <div class="kb-meter-track"><div class="kb-meter-fill" style="width:${Math.round((Number(x[key] || 0) / max) * 100)}%"></div></div>
+    <span class="mono tiny">${x[key] || 0}</span></div>`).join('');
+}
+
+function kbReloadTab(tab) {
+  location.hash = `#/kb/docs?tab=${encodeURIComponent(tab)}&_=${Date.now()}`;
+}
+
+async function openReviewModal(id) {
+  let review;
+  try { review = (await api(`/api/kb/reviews/${encodeURIComponent(id)}`)).review; }
+  catch (err) { toast(err.message, 'error'); return; }
+  const dims = review.dimensions || [];
+  const issues = review.issues || [];
+  const patchText = Object.keys(review.suggested_patch || {}).length
+    ? JSON.stringify(review.suggested_patch, null, 2) : '';
+  const m = modal({
+    title: `审核：${review.target_title || review.target_id}`,
+    wide: true,
+    body: `<div class="inline"><span class="badge ${review.status === 'done' ? 'ok' : 'warn'}">${esc(REVIEW_STATUS[review.status] || review.status)}</span>
+      <span class="badge ${review.decision === 'pass' ? 'ok' : review.decision === 'reject' ? 'danger' : 'warn'}">${esc(review.decision || '待模型')}</span>
+      <span class="mono tiny">${esc(review.model || '')}</span><span class="tiny muted" style="margin-left:auto">${review.score ? Math.round(review.score) + ' 分' : ''} · 置信度 ${Math.round((review.confidence || 0) * 100)}%</span></div>
+      <div class="kb-subhead">六维评分</div>
+      ${dims.map((d) => `<div class="kb-meter"><span class="tiny">${esc(d.label || d.key)}</span>
+        <div class="kb-meter-track"><div class="kb-meter-fill" style="width:${Math.round((Number(d.score || 0) / Number(d.max || 1)) * 100)}%"></div></div>
+        <span class="mono tiny">${d.score}/${d.max}</span></div>
+        <div class="tiny muted">${esc(d.comment || '')}</div>`).join('') || '<div class="muted small">模型未返回评分</div>'}
+      <div class="kb-subhead">问题</div>
+      ${issues.length ? `<div class="kb-issues">${issues.map((i) => `<div class="kb-issue ${i.severity === 'blocker' ? 'danger' : ''}">
+        <span class="badge ${i.severity === 'blocker' ? 'danger' : i.severity === 'warn' ? 'warn' : 'info'}">${esc(i.severity)}</span>
+        <strong>${esc(i.code)}</strong> ${esc(i.field || '')}<div class="tiny muted">${esc(i.message)}${i.suggestion ? ` · 建议：${esc(i.suggestion)}` : ''}</div></div>`).join('')}</div>` : '<div class="muted small">未发现问题</div>'}
+      ${patchText ? `<div class="kb-subhead">建议 patch（人工采纳后才写入）</div><pre class="kb-raw">${esc(patchText)}</pre>` : ''}
+      ${review.error ? `<div class="alert warn" style="margin-top:10px">${esc(review.error)}</div>` : ''}`,
+    footer: `<button class="btn" data-act="close">关闭</button>
+      ${review.status !== 'decided' ? `<button class="btn" data-act="retry">${icon('refresh')} 重新审核</button>
+      <button class="btn btn-danger" data-act="reject">驳回</button>
+      ${patchText ? '<button class="btn" data-act="adopt">采纳 patch</button>' : ''}
+      <button class="btn btn-primary" data-act="approve">通过并生效</button>` : ''}`,
+  });
+  m.mask.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || btn.dataset.act === 'close') { if (btn) m.close(); return; }
+    const act = btn.dataset.act;
+    if (act === 'retry') {
+      setBusy(btn, true, '审核中…');
+      try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+        toast('审核已重试', 'ok'); m.close(); kbReloadTab('review');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      return;
+    }
+    if (act === 'reject') {
+      const note = prompt('驳回原因（会写入审计）') ?? null;
+      if (note === null) return;
+      setBusy(btn, true, '驳回中…');
+      try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`,
+        { method: 'POST', body: { decision: 'reject', note } });
+        toast('已驳回', 'ok'); m.close(); kbReloadTab('review');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      return;
+    }
+    if (act === 'adopt') {
+      if (!(await confirmDialog('采纳建议 patch？会先写入目标案例/草稿，再等待人工发布。'))) return;
+      setBusy(btn, true, '应用中…');
+      try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`,
+        { method: 'POST', body: { decision: 'adopt_patch', apply_patch: true } });
+        toast('patch 已采纳', 'ok'); m.close(); kbReloadTab('review');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+      return;
+    }
+    if (act === 'approve') {
+      const note = prompt('终审备注（可留空）') ?? '';
+      setBusy(btn, true, '发布中…');
+      try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`,
+        { method: 'POST', body: { decision: 'approve', note } });
+        toast('已通过', 'ok'); m.close(); kbReloadTab('review');
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    }
+  });
+}
+
+function bindKbTabActions(view) {
+  bindActions(view, {
+    'review-view': (el) => openReviewModal(el.dataset.id),
+    'review-decision': (el) => openReviewModal(el.dataset.id),
+    'review-batch': async (el) => {
+      setBusy(el, true, '批量审核中…');
+      try { const r = await api('/api/kb/reviews/run', { method: 'POST', body: { limit: 20 } });
+        toast(`处理 ${r.processed} 条`, 'ok'); kbReloadTab('review');
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'audit-filter': () => {
+      const actor = view.querySelector('#kb-audit-actor')?.value.trim() || '';
+      const action = view.querySelector('#kb-audit-action')?.value.trim() || '';
+      location.hash = `#/kb/docs?tab=audit&actor=${encodeURIComponent(actor)}&action=${encodeURIComponent(action)}`;
+    },
+  });
+}
+
+async function renderKbTab(tab, view, status, facets) {
+  const admin = state.user?.role === 'admin';
+  bindKbTabActions(view);
+  const tabs = kbTabNav(tab);
+  const header = `<div class="inline" style="margin-bottom:12px"><a class="btn" href="#/kb">${icon('search')} 返回问答</a>
+    <span class="tiny muted">知识库管理：导入、审核、修订与审计统一入口</span></div>${tabs}`;
+  if (!admin) {
+    view.innerHTML = `${header}<div class="alert warn">${icon('alert')}<div>仅管理员可进入知识库管理。</div></div>`;
+    return;
+  }
+  const statsDays = Math.max(1, Math.min(365, Number(
+    new URLSearchParams(location.hash.split('?')[1] || '').get('days') || 30)));
+  let stats;
+  try { stats = await api(`/api/kb/stats?days=${statsDays}`); }
+  catch (err) { view.innerHTML = `${header}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
+  if (tab === 'overview') {
+    let reviews = { items: [] };
+    let jobs = { items: [] };
+    try { reviews = await api('/api/kb/reviews?status=pending&limit=6'); } catch { /* optional */ }
+    try { jobs = await api('/api/kb/import/jobs'); } catch { /* optional */ }
+    const attention = [];
+    if (reviews.items?.length) attention.push(`<div class="kb-attention"><strong>${reviews.items.length} 条审核待处理</strong>
+      <a href="#/kb/docs?tab=review">去审核</a></div>`);
+    if (Number(stats.review?.pending || 0)) attention.push(`<div class="kb-attention"><strong>${stats.review.pending} 条 AI/人工审核未完成</strong>
+      <a href="#/kb/docs?tab=review">查看</a></div>`);
+    if (Number(stats.inventory?.drafts || 0)) attention.push(`<div class="kb-attention"><strong>${stats.inventory.drafts} 个草稿待入库</strong>
+      <a href="#/kb/docs?tab=review">处理</a></div>`);
+    if (!attention.length) attention.push(`<div class="kb-attention ok">当前没有待处理事项</div>`);
+    view.innerHTML = `${header}
+      <div class="grid grid-4 kb-stats">
+        <div class="card stat"><div><div class="stat-val">${stats.cards.documents}</div><div class="stat-label">生效文档</div><div class="stat-note">${stats.cards.cases} 个可引用案例</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.cards.queries}</div><div class="stat-label">30 天查询</div><div class="stat-note">零结果 ${stats.cards.zero_result_rate}%</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.cards.pending_reviews}</div><div class="stat-label">待审核</div><div class="stat-note">AI 预审 + 人工终审</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.cards.revisions}</div><div class="stat-label">30 天修订</div><div class="stat-note">哈希链可校验</div></div></div>
+      </div>
+      <div class="grid grid-2" style="margin-top:14px">
+        <div class="card"><div class="card-head"><h2>需要关注</h2></div><div class="card-body">${attention.join('')}</div></div>
+        <div class="card"><div class="card-head"><h2>最近导入</h2><a class="tiny" href="#/kb/docs?tab=import" style="margin-left:auto">全部</a></div>
+          <div class="card-body tight">${(jobs.items || []).slice(0, 5).map((j) => `<div class="kb-job-row">
+            <span class="mono tiny">${esc(j.id)}</span>${jobBadge(j.status)}<span class="tiny muted">${j.done_files || 0}/${j.total_files || 0} 文件</span></div>`).join('') || emptyState('inbox', '还没有导入', '导入 CSV/文档或载入示例。')}</div></div>
+      </div>
+      <div class="grid grid-2" style="margin-top:14px">
+        <div class="card"><div class="card-head"><h2>索引状态</h2></div><div class="card-body small">
+          <div class="kv"><div class="k">状态</div><div class="v">${esc(stats.index.status)}</div>
+          <div class="k">文档 / 案例</div><div class="v">${stats.index.documents} / ${stats.index.cases}</div>
+          <div class="k">词项 / 体积</div><div class="v">${stats.index.terms} / ${Math.round((stats.index.bytes || 0) / 1024)} KB</div>
+          <div class="k">最近构建</div><div class="v tiny">${esc(stats.index.built_at || '—')} · ${stats.index.build_ms} ms</div></div></div></div>
+        <div class="card"><div class="card-head"><h2>最近变更</h2><a class="tiny" href="#/kb/docs?tab=audit" style="margin-left:auto">审计</a></div>
+          <div class="card-body tight">${stats.changes.top_cases.slice(0, 6).map((x) => `<div class="kb-job-row">
+            <span class="mono tiny">${esc(x.case_id)}</span><span class="tiny muted">${x.revisions} 次修订</span></div>`).join('') || '<div class="empty small">暂无修订</div>'}</div></div>
+      </div>`;
+    return;
+  }
+  if (tab === 'stats') {
+    view.innerHTML = `${header}
+      <div class="inline" style="margin-bottom:10px"><span class="tiny muted">统计范围：最近 ${stats.days} 天；库存与索引为当前真值</span>
+        <span class="kb-range">${[7, 30, 90].map((d) => `<a class="btn btn-sm ${stats.days === d ? 'btn-primary' : ''}"
+          href="#/kb/docs?tab=stats&days=${d}">${d} 天</a>`).join('')}</span>
+        <a class="btn btn-sm" href="/api/kb/stats?format=csv&days=${stats.days}" style="margin-left:auto">${icon('download')} 导出 CSV</a></div>
+      <div class="grid grid-4 kb-stats">
+        <div class="card stat"><div><div class="stat-val">${stats.inventory.active_documents}</div><div class="stat-label">生效文档</div><div class="stat-note">${stats.inventory.active_cases} 案例 · ${stats.inventory.drafts} 待审草稿</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.usage.queries}</div><div class="stat-label">查询次数</div><div class="stat-note">零结果率 ${stats.usage.zero_result_rate}% · P95 ${stats.usage.p95_latency_ms} ms</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.usage.feedback.helpful_rate}%</div><div class="stat-label">有帮助率</div><div class="stat-note">${stats.usage.feedback.helpful} 有帮助 / ${stats.usage.feedback.unhelpful} 无帮助</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.review.pending}</div><div class="stat-label">审核待处理</div><div class="stat-note">AI 覆盖 ${stats.review.ai_coverage}% · 人工通过 ${stats.review.human_approval_rate}%</div></div></div>
+      </div>
+      <div class="card" style="margin-top:14px"><div class="card-head"><h2>${stats.days} 天查询趋势</h2><span class="sub">柱高按当日查询量归一化</span></div><div class="card-body">${trendBars(stats.trend, stats.days)}</div></div>
+      <div class="grid grid-2" style="margin-top:14px">
+        <div class="card"><div class="card-head"><h2>高频问题</h2></div><div class="card-body">${miniBars(stats.usage.top_queries) || '<div class="empty small">暂无查询</div>'}</div></div>
+        <div class="card"><div class="card-head"><h2>被引用案例</h2></div><div class="card-body">${miniBars(stats.usage.cited_cases, 'citation_count') || '<div class="empty small">暂无引用</div>'}</div></div>
+      </div>
+      <div class="grid grid-2" style="margin-top:14px">
+        <div class="card"><div class="card-head"><h2>覆盖</h2></div><div class="card-body small">
+          <div class="kv"><div class="k">原因覆盖</div><div class="v">${stats.coverage.cause_coverage}%</div>
+          <div class="k">方案覆盖</div><div class="v">${stats.coverage.solution_coverage}%</div>
+          <div class="k">低质量</div><div class="v">${stats.coverage.low_quality}</div></div>
+          <div class="kb-subhead">板卡 × 领域</div>
+          <div class="kb-matrix">${(stats.coverage.board_domain_matrix || []).slice(0, 12).map((x) =>
+            `<span class="badge info">${esc(x.board)} / ${esc(x.domain)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无标签</span>'}</div></div></div>
+        <div class="card"><div class="card-head"><h2>审核与变更</h2></div><div class="card-body small">
+          <div class="kv"><div class="k">AI 覆盖</div><div class="v">${stats.review.ai_coverage}%</div>
+          <div class="k">AI 结论</div><div class="v">通过 ${stats.review.ai_pass} · 转人工 ${stats.review.ai_needs_review + stats.review.fallback_manual} · 驳回 ${stats.review.ai_reject}</div>
+          <div class="k">人工推翻 AI</div><div class="v">${stats.review.human_overrides}</div>
+          <div class="k">修订 / 恢复</div><div class="v">${stats.changes.revisions} / ${stats.changes.restores}</div>
+          <div class="k">导入成功率</div><div class="v">${stats.imports.success_rate}%</div></div>
+          <div class="kb-subhead">最近变更人</div>
+          ${(stats.changes.actors || []).slice(0, 5).map((x) => `<div class="kb-meter"><span class="tiny">${esc(x.actor)}</span><span class="mono tiny">${x.count}</span></div>`).join('') || '<span class="muted tiny">暂无</span>'}
+        </div></div>
+      </div>`;
+    return;
+  }
+  if (tab === 'review') {
+    let drafts = { items: [] };
+    let reviews = { items: [] };
+    try { drafts = await api('/api/kb/drafts'); } catch { /* optional */ }
+    try { reviews = await api('/api/kb/reviews?status=pending&limit=100'); } catch { /* optional */ }
+    view.innerHTML = `${header}
+      <div class="grid grid-2">
+        <div class="card"><div class="card-head"><h2>待入库草稿（${drafts.items?.length || 0}）</h2><span class="sub">人工确认字段与原文</span></div>
+          <div class="card-body tight table-wrap">${(drafts.items || []).length ? `<table class="data responsive"><thead><tr><th>标题</th><th>案例</th><th>操作</th></tr></thead><tbody>
+            ${drafts.items.map((d) => `<tr><td data-label="标题"><strong>${esc(d.title)}</strong><div class="tiny muted">${esc((d.warnings || []).join('；') || '无警告')}</div></td>
+            <td data-label="案例">${d.case_count || 0}</td>
+            <td data-label="操作"><button class="btn btn-sm" data-act="draft-view" data-id="${esc(d.id)}">查看</button>
+            <button class="btn btn-sm btn-primary" data-act="draft-approve" data-id="${esc(d.id)}">批准</button>
+            <button class="btn btn-sm btn-danger" data-act="draft-reject" data-id="${esc(d.id)}">退回</button></td></tr>`).join('')}</tbody></table>` : emptyState('check', '没有待审草稿', '工程师导入的文档会先进入这里。')}</div></div>
+        <div class="card"><div class="card-head"><h2>AI / 人工审核（${reviews.items?.length || 0}）</h2><span class="sub">默认只预审，人工终审后才发布</span></div>
+          <div class="card-body tight table-wrap">${(reviews.items || []).length ? `<table class="data responsive"><thead><tr><th>对象</th><th>结论</th><th>状态</th><th>操作</th></tr></thead><tbody>
+            ${reviews.items.map((r) => `<tr><td data-label="对象"><strong>${esc(r.target_title || r.target_id)}</strong><div class="tiny muted">${esc(r.target_type)} · ${esc(r.target_id)}</div></td>
+            <td data-label="结论">${r.decision ? `<span class="badge ${r.decision === 'pass' ? 'ok' : r.decision === 'reject' ? 'danger' : 'warn'}">${esc(r.decision)}</span> <span class="tiny">${r.score ? Math.round(r.score) + ' 分' : ''}</span>` : '—'}</td>
+            <td data-label="状态">${reviewBadge(r.status)}</td>
+            <td data-label="操作"><button class="btn btn-sm" data-act="review-view" data-id="${esc(r.id)}">详情</button>
+            ${r.status !== 'decided' ? `<button class="btn btn-sm" data-act="review-decision" data-id="${esc(r.id)}">终审</button>` : ''}</td></tr>`).join('')}</tbody></table>` : emptyState('check', '没有待处理审核', '导入或编辑后会生成审核记录。')}</div></div>
+      </div>
+      <div class="card" style="margin-top:14px"><div class="card-body inline"><span class="small muted">也可对存量案例发起单条审核：</span>
+        <button class="btn btn-sm" data-act="review-batch">${icon('refresh')} 处理排队中的审核</button></div></div>`;
+    return;
+  }
+  if (tab === 'audit') {
+    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    const actor = params.get('actor') || '';
+    const action = params.get('action') || '';
+    let audit = { items: [] };
+    try { audit = await api(`/api/kb/audit?limit=100&actor=${encodeURIComponent(actor)}&action=${encodeURIComponent(action)}`); }
+    catch (err) { view.innerHTML = `${header}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
+    view.innerHTML = `${header}
+      <div class="card"><div class="card-head"><h2>变更与审计</h2><span class="sub">案例字段级 diff、文档操作与审核决策</span>
+        <a class="btn btn-sm" style="margin-left:auto" href="/api/kb/audit?format=csv&limit=500">${icon('download')} 导出 CSV</a></div>
+        <div class="card-body">
+          <div class="inline"><input class="input" id="kb-audit-actor" placeholder="操作人" value="${esc(actor)}" style="max-width:160px">
+            <input class="input" id="kb-audit-action" placeholder="动作，如 case.update" value="${esc(action)}" style="max-width:220px">
+            <button class="btn btn-sm" data-act="audit-filter">筛选</button></div>
+          <div class="table-wrap" style="margin-top:10px"><table class="data responsive"><thead><tr><th>时间</th><th>动作</th><th>对象</th><th>操作人</th><th>原因</th></tr></thead><tbody>
+            ${(audit.items || []).map((x) => `<tr><td data-label="时间" class="tiny">${esc(x.created_at ? fmtDate(x.created_at) : '—')}</td>
+              <td data-label="动作"><span class="mono tiny">${esc(x.action)}</span></td>
+              <td data-label="对象" class="mono tiny">${esc(x.target || '')}</td>
+              <td data-label="操作人">${esc(x.actor || '—')}</td>
+              <td data-label="原因" class="tiny">${esc(x.message || (Array.isArray(x.detail) ? x.detail.map((d) => d.field).join('、') : ''))}</td></tr>`).join('') || '<tr><td colspan="5" class="empty small">暂无审计记录</td></tr>'}
+          </tbody></table></div>
+        </div></div>`;
+    return;
+  }
+  if (tab === 'terms') {
+    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>术语与词典</h2><span class="sub">当前从已入库标签抽取；同义词/停用词编辑将在 1.31.0 开放</span></div>
+      <div class="card-body"><div class="kb-subhead">板卡</div><div class="kb-matrix">${(facets.boards || []).map((x) => `<span class="badge info">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div>
+      <div class="kb-subhead">领域</div><div class="kb-matrix">${(facets.domains || []).map((x) => `<span class="badge">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div></div></div>`;
+    return;
+  }
+  if (tab === 'eval') {
+    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>评测</h2><span class="sub">示例集结果；真实 2268 条语料与 300 条专家金标准仍待验收</span></div>
+      <div class="card-body"><div class="grid grid-4 kb-stats">
+        <div class="card stat"><div><div class="stat-val">12/12</div><div class="stat-label">示例 Top1/Top5</div><div class="stat-note">20 文档 / 21 案例</div></div></div>
+        <div class="card stat"><div><div class="stat-val">3.5 ms</div><div class="stat-label">平均检索</div><div class="stat-note">P95 3.7 ms</div></div></div>
+        <div class="card stat"><div><div class="stat-val">2/2</div><div class="stat-label">库外拒答</div><div class="stat-note">不生成推测根因</div></div></div>
+        <div class="card stat"><div><div class="stat-val">${stats.coverage.duplicate_candidates.length}</div><div class="stat-label">近重复候选</div><div class="stat-note">标题归一化后重复</div></div></div>
+      </div><div class="alert info" style="margin-top:12px">${icon('info')}<div>评测台、Recall/MRR 页面和专家金标准导入在 1.31.0 开放；当前报告见 docs/故障知识库评测报告-1.30.0.md。</div></div></div></div>`;
+    return;
+  }
+  if (tab === 'settings') {
+    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>知识库设置</h2><span class="sub">运行时配置在“系统管理 → 运行时配置”修改</span></div>
+      <div class="card-body"><div class="kv">
+        <div class="k">审核开关</div><div class="v">${status.config.review_enabled ? '开启' : '关闭'}</div>
+        <div class="k">导入自动预审</div><div class="v">${status.config.review_auto_on_import ? '开启' : '关闭'}</div>
+        <div class="k">AI 自动发布</div><div class="v">${status.config.review_auto_publish ? '开启' : '关闭'}（默认关闭）</div>
+        <div class="k">PII 脱敏</div><div class="v">${status.config.mask_pii ? '开启' : '关闭'}</div>
+        <div class="k">单文件 / 单批</div><div class="v">${status.config.max_file_mb} MB / ${status.config.max_batch_mb} MB</div>
+        <div class="k">问答引用上限</div><div class="v">${status.top_k}</div></div>
+        <div class="inline" style="margin-top:12px"><a class="btn" href="#/admin">${icon('settings')} 去系统管理</a></div></div></div>`;
+    return;
+  }
+  if (tab === 'import') {
+    view.innerHTML = `${header}<div class="alert info">${icon('info')}<div>导入入口已放在“文档”页顶部；导入任务、文件状态和取消入口也在该页。</div></div>`;
+    return;
+  }
+  // docs 之外的兜底
+  view.innerHTML = `${header}<div class="alert warn">未知分区</div>`;
+}
+
+
 export async function renderKbDocs() {
   const admin = state.user?.role === 'admin';
   const params = new URLSearchParams((location.hash.split('?')[1] || ''));
   const docStatus = params.get('status') || 'all';
   const docQ = params.get('q') || '';
-  const view = mount('知识库文档', '导入、审核和停用都会重建索引；原始文本仅管理员可见',
-    `<a class="btn" href="#/kb">${icon('search')} 返回问答</a>`);
-  view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
+  const tab = params.get('tab') || 'docs';
   let status;
   let facets;
   let docs;
   let jobs = { items: [] };
   let drafts = { items: [] };
+  const view = mount(tab === 'docs' ? '知识库文档' : '知识库管理',
+    tab === 'docs' ? '导入、审核和停用都会重建索引；原始文本仅管理员可见' : '概览、统计、审核、变更与审计',
+    `<a class="btn" href="#/kb">${icon('search')} 返回问答</a>`);
+  view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
+  if (tab !== 'docs') {
+    try {
+      status = (await api('/api/kb/status')).status;
+      facets = await loadFacets();
+      await renderKbTab(tab, view, status, facets);
+    } catch (err) {
+      view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
+    }
+    return view;
+  }
   try {
     status = (await api('/api/kb/status')).status;
     facets = await loadFacets();
@@ -248,6 +569,7 @@ export async function renderKbDocs() {
   }
   const items = docs.items || [];
   view.innerHTML = `
+    ${kbTabNav('docs')}
     <div class="grid grid-4 kb-stats">
       <div class="card stat"><div><div class="stat-val">${status.documents || 0}</div>
         <div class="stat-label">生效文档</div><div class="stat-note">${status.cases || 0} 个案例</div></div></div>
@@ -445,6 +767,84 @@ export async function renderKbDocs() {
   return view;
 }
 
+async function openCaseRevisions(caseId, docId, caseTitle) {
+  let data;
+  let verify;
+  try {
+    data = await api(`/api/kb/cases/${encodeURIComponent(caseId)}/revisions?size=50`);
+    verify = await api(`/api/kb/cases/${encodeURIComponent(caseId)}/revisions/verify`);
+  } catch (err) { toast(err.message, 'error'); return; }
+  const items = data.items || [];
+  const diffText = (diff) => (diff || []).map((d) => `${d.field}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`).join('\n') || '字段无变化';
+  const m = modal({
+    title: `修订链：${caseTitle || caseId}`,
+    wide: true,
+    body: `<div class="alert ${verify.ok ? 'info' : 'danger'}">${icon(verify.ok ? 'check' : 'alert')}
+      <div>${verify.ok ? `哈希链校验通过（${verify.checked} 条）` : `校验失败：r${verify.broken?.revision} ${verify.broken?.reason}`}</div></div>
+      <div class="tiny muted" style="margin:8px 0">每次人工变更都追加一条修订；快照和哈希不可改写。恢复会生成新修订，不删除历史。</div>
+      <div class="kb-rev-list">${items.map((r) => `<div class="kb-rev-row">
+        <div class="inline"><strong>r${r.revision}</strong><span class="badge info">${esc(r.action)}</span>
+          <span class="tiny muted">${esc(r.actor_name || '')} · ${esc(r.created_at ? fmtDate(r.created_at) : '')}</span>
+          <span class="mono tiny" style="margin-left:auto">${esc((r.entry_hash || '').slice(0, 12))}</span></div>
+        <div class="tiny">${esc(r.reason || '')}</div>
+        <details><summary class="tiny muted">查看 diff</summary><pre class="kb-raw">${esc(diffText(r.diff))}</pre></details>
+        <div class="inline"><button class="btn btn-sm" data-act="case-restore" data-id="${esc(r.revision)}">恢复此修订</button></div>
+      </div>`).join('') || '<div class="empty small">暂无修订</div>'}</div>`,
+    footer: `<button class="btn" data-act="close">关闭</button>`,
+  });
+  m.mask.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'close') { m.close(); return; }
+    if (btn.dataset.act === 'case-restore') {
+      const reason = prompt('恢复原因（写入审计）') ?? null;
+      if (reason === null) return;
+      setBusy(btn, true, '恢复中…');
+      try {
+        await api(`/api/kb/cases/${encodeURIComponent(caseId)}/revisions/${encodeURIComponent(btn.dataset.id)}/restore`,
+          { method: 'POST', body: { reason } });
+        toast('已恢复该修订', 'ok'); m.close(); renderKbDoc(docId);
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    }
+  });
+}
+
+function openCaseEdit(caseData, docId) {
+  const m = modal({
+    title: `编辑案例：${caseData.title}`,
+    wide: true,
+    body: `<div class="alert warn">${icon('alert')}<div>保存会新增修订并重建索引；必须填写变更原因。</div></div>
+      <div class="form-row"><label>标题</label><input class="input" id="kb-case-title" value="${esc(caseData.title)}"></div>
+      <div class="form-row"><label>现象</label><textarea class="input" id="kb-case-symptom" rows="2">${esc(caseData.symptom || '')}</textarea></div>
+      <div class="form-row"><label>原因</label><textarea class="input" id="kb-case-cause" rows="3">${esc(caseData.cause_detail || caseData.cause || '')}</textarea></div>
+      <div class="form-row"><label>处理方案</label><textarea class="input" id="kb-case-solution" rows="4">${esc(caseData.solution || '')}</textarea></div>
+      <div class="form-row"><label>预防</label><textarea class="input" id="kb-case-prevention" rows="2">${esc(caseData.prevention || '')}</textarea></div>
+      <div class="form-row"><label>变更原因 <span class="badge warn">必填</span></label><input class="input" id="kb-case-reason" placeholder="例如：补充现场验证结果"></div>`,
+    footer: `<button class="btn" data-act="cancel">取消</button>
+      <button class="btn btn-primary" data-act="save">保存并生成修订</button>`,
+  });
+  m.mask.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'cancel') { m.close(); return; }
+    if (btn.dataset.act !== 'save') return;
+    const body = {
+      title: m.mask.querySelector('#kb-case-title').value.trim(),
+      symptom: m.mask.querySelector('#kb-case-symptom').value.trim(),
+      cause_detail: m.mask.querySelector('#kb-case-cause').value.trim(),
+      solution: m.mask.querySelector('#kb-case-solution').value.trim(),
+      prevention: m.mask.querySelector('#kb-case-prevention').value.trim(),
+      reason: m.mask.querySelector('#kb-case-reason').value.trim(),
+    };
+    if (!body.reason) { toast('请填写变更原因', 'error'); return; }
+    setBusy(btn, true, '保存中…');
+    try {
+      await api(`/api/kb/cases/${encodeURIComponent(caseData.id)}`, { method: 'PUT', body });
+      toast('已保存并生成新修订', 'ok'); m.close(); renderKbDoc(docId);
+    } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+  });
+}
+
 export async function renderKbDoc(docId) {
   const view = mount('知识库文档详情', '案例字段、原文和版本；引用可回溯到这里', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
@@ -489,7 +889,12 @@ export async function renderKbDoc(docId) {
       <span class="sub">${doc.cases.some((c) => c.is_derived) ? '含多原因派生案例' : '单案例'}</span></div>
       <div class="card-body kb-doc-cases">${doc.cases.map((c, i) => `<div class="kb-doc-case">
         <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>
-          <span class="badge info" style="margin-left:auto">${scoreText(c.quality)}</span></div>
+          <span class="badge ${c.review_status === 'pass' ? 'ok' : c.review_status === 'reject' ? 'danger' : 'info'}">${esc(c.review_status || '未审核')}</span>
+          <span class="badge info">r${c.revision || 1}</span>
+          ${admin ? `<span style="margin-left:auto"></span><button class="btn btn-sm" data-act="case-rev" data-id="${esc(c.id)}" data-title="${esc(c.title)}">修订</button>
+            <button class="btn btn-sm" data-act="case-edit" data-id="${esc(c.id)}">编辑</button>
+            <button class="btn btn-sm" data-act="case-status" data-id="${esc(c.id)}" data-status="${esc(c.status || 'active')}">${c.status === 'active' ? '停用' : '启用'}</button>` : ''}
+          <span class="badge info" style="margin-left:${admin ? '0' : 'auto'}">${scoreText(c.quality)}</span></div>
         <div class="kv" style="margin-top:10px">
           <div class="k">现象</div><div class="v">${esc(c.symptom || '—')}</div>
           <div class="k">环境/复现</div><div class="v">${esc(c.environment || '—')} ${esc(c.repro || '')}</div>
@@ -548,6 +953,20 @@ export async function renderKbDoc(docId) {
       setBusy(el, true, '删除中…');
       try { await api(`/api/kb/docs/${encodeURIComponent(doc.id)}`, { method: 'DELETE' }); toast('已删除', 'ok'); location.hash = '#/kb/docs'; }
       catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'case-rev': (el) => openCaseRevisions(el.dataset.id, doc.id, el.dataset.title),
+    'case-edit': (el) => {
+      const c = (doc.cases || []).find((x) => x.id === el.dataset.id);
+      if (c) openCaseEdit(c, doc.id);
+    },
+    'case-status': async (el) => {
+      const next = el.dataset.status === 'active' ? 'disabled' : 'active';
+      setBusy(el, true, '处理中…');
+      try {
+        await api(`/api/kb/cases/${encodeURIComponent(el.dataset.id)}/status`,
+          { method: 'POST', body: { status: next, reason: next === 'active' ? '管理员启用' : '管理员停用' } });
+        toast('已更新案例状态', 'ok'); renderKbDoc(docId);
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
     'save-doc': async (el) => {
       const form = view.querySelector('#kb-doc-edit');

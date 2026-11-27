@@ -449,9 +449,17 @@ class App:
         r.add("GET", r"/api/kb/docs", h_kb_docs)
         r.add("POST", r"/api/kb/docs", h_kb_doc_create)
         r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_detail)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)", h_kb_case_detail)
+        r.add("PUT", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)", h_kb_case_update)
+        r.add("POST", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/status", h_kb_case_status)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions", h_kb_case_revisions)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/verify", h_kb_case_verify)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)", h_kb_case_revision)
+        r.add("POST", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)/restore", h_kb_case_restore)
         r.add("GET", r"/api/kb/search", h_kb_search)
         r.add("PUT", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_update)
         r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/status", h_kb_doc_status)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/restore", h_kb_doc_restore_alias)
         r.add("DELETE", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_delete)
         r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions", h_kb_doc_versions)
         r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions/"
@@ -471,6 +479,14 @@ class App:
         r.add("POST", r"/api/kb/reindex", h_kb_reindex)
         r.add("GET", r"/api/kb/queries", h_kb_queries)
         r.add("POST", r"/api/kb/sample", h_kb_sample)
+        r.add("GET", r"/api/kb/audit", h_kb_audit)
+        r.add("GET", r"/api/kb/stats", h_kb_stats)
+        r.add("GET", r"/api/kb/reviews", h_kb_reviews)
+        r.add("GET", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)", h_kb_review)
+        r.add("POST", r"/api/kb/reviews", h_kb_review_create)
+        r.add("POST", r"/api/kb/reviews/run", h_kb_reviews_run)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/decision", h_kb_review_decision)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/retry", h_kb_review_retry)
         r.add("GET", r"/api/mcp/info", h_mcp_info)
         r.add("POST", r"/api/mcp/token", h_mcp_token_create)
         r.add("DELETE", r"/api/mcp/token", h_mcp_token_delete)
@@ -4418,6 +4434,211 @@ def h_kb_doc_detail(app: App, req, doc_id: str):
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     return response_json({"doc": data})
+
+
+def _kb_csv(text: str, name: str) -> tuple[int, dict[str, str], bytes]:
+    return 200, {"Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
+                 "Content-Disposition": f'attachment; filename="{name}"'}, text.encode("utf-8")
+
+
+def h_kb_case_detail(app: App, req, case_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.get_case(case_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_update(app: App, req, case_id: str):
+    user = _auth(app, req)
+    data = req.json()
+    try:
+        result = app.kb.update_case(case_id, data, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_update", case_id,
+                 {"revision": result.get("case", {}).get("revision")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_status(app: App, req, case_id: str):
+    user = _auth(app, req)
+    data = req.json()
+    status = str(data.get("status") or "")
+    try:
+        result = app.kb.set_case_status(case_id, status, user, str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_status", case_id,
+                 {"status": status}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_revisions(app: App, req, case_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_case_revisions(
+            case_id, user, page=_kb_int(req.query.get("page"), 1),
+            size=_kb_int(req.query.get("size"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_revision(app: App, req, case_id: str, revision: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json({"revision": app.kb.get_case_revision(case_id, revision, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_restore(app: App, req, case_id: str, revision: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.restore_case_revision(case_id, revision, user,
+                                              reason=str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_restore", case_id,
+                 {"revision": revision}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_verify(app: App, req, case_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.verify_case_revisions(case_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_doc_restore_alias(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    version_id = str(data.get("version_id") or data.get("version") or "")
+    if not version_id:
+        raise HTTPError(400, "缺少 version_id")
+    try:
+        return response_json({"doc": app.kb.restore_version(doc_id, version_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_audit(app: App, req):
+    user = _admin(app, req, csrf=False)
+    filters = {
+        "actor": str(req.query.get("actor") or ""),
+        "action": str(req.query.get("action") or ""),
+        "target": str(req.query.get("target") or ""),
+        "since": str(req.query.get("since") or ""),
+        "until": str(req.query.get("until") or ""),
+        "limit": _kb_int(req.query.get("limit"), 100),
+    }
+    try:
+        if str(req.query.get("format") or "") == "csv":
+            return _kb_csv(app.kb.audit_csv(user, **filters), "kb-audit.csv")
+        return response_json(app.kb.list_audit(user, **filters))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_stats(app: App, req):
+    user = _admin(app, req, csrf=False)
+    days = _kb_int(req.query.get("days"), 90)
+    try:
+        if str(req.query.get("format") or "") == "csv":
+            return _kb_csv(app.kb.stats_csv(user, days=days), "kb-stats.csv")
+        return response_json(app.kb.stats(user, days=days))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_reviews(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_reviews(
+            user, status=str(req.query.get("status") or ""),
+            target_type=str(req.query.get("target_type") or ""),
+            limit=_kb_int(req.query.get("limit"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_review(app: App, req, review_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json({"review": app.kb.get_review(review_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_review_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    targets = data.get("targets")
+    try:
+        if isinstance(targets, list) and targets:
+            reviews = []
+            for raw in targets[:50]:
+                if isinstance(raw, str):
+                    target_type, target_id = str(data.get("target_type") or ""), raw
+                elif isinstance(raw, dict):
+                    target_type = str(raw.get("target_type") or data.get("target_type") or "")
+                    target_id = str(raw.get("target_id") or "")
+                else:
+                    continue
+                if not target_type or not target_id:
+                    continue
+                reviews.append(app.kb.create_review(
+                    user, target_type=target_type, target_id=target_id,
+                    stage=str(data.get("stage") or "manual"), run=bool(data.get("run"))))
+            if not reviews:
+                raise ValueError("targets 中没有有效的 target_type/target_id")
+            app.db.audit(user["id"], user["username"], "kb.review_create_batch", "",
+                         {"count": len(reviews), "stage": data.get("stage")}, req.ip)
+            return response_json({"reviews": reviews, "count": len(reviews)}, status=201)
+        review = app.kb.create_review(
+            user, target_type=str(data.get("target_type") or ""),
+            target_id=str(data.get("target_id") or ""),
+            stage=str(data.get("stage") or "manual"), run=bool(data.get("run")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.review_create", review.get("id") or "",
+                 {"target_type": data.get("target_type"), "target_id": data.get("target_id")},
+                 req.ip)
+    return response_json({"review": review}, status=201)
+
+
+def h_kb_reviews_run(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        return response_json(app.kb.run_reviews(user, limit=_kb_int(data.get("limit"), 20)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_review_decision(app: App, req, review_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.decide_review(
+            review_id, user, decision=str(data.get("decision") or ""),
+            note=str(data.get("note") or ""), apply_patch=bool(data.get("apply_patch")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.review_decision", review_id,
+                 {"decision": data.get("decision")}, req.ip)
+    return response_json({"review": result})
+
+
+def h_kb_review_retry(app: App, req, review_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"review": app.kb.run_review(review_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
 
 
 def h_kb_doc_update(app: App, req, doc_id: str):

@@ -75,12 +75,12 @@ def api_routes() -> list[tuple[str, str, str, int]]:
 def test_rest_manifest_covers_every_route():
     manifest = load("rest_routes.json")
     actual = api_routes()
-    assert len(actual) == 194, f"源码路由数量变化：{len(actual)}"
-    assert manifest["total"] == len(manifest["routes"]) == 194
+    assert len(actual) == 210, f"源码路由数量变化：{len(actual)}"
+    assert manifest["total"] == len(manifest["routes"]) == 210
     assert {(r["method"], r["path"]) for r in manifest["routes"]} == {
         (m, path) for m, path, _, _ in actual
     }
-    assert len({(r["method"], r["path"]) for r in manifest["routes"]}) == 194
+    assert len({(r["method"], r["path"]) for r in manifest["routes"]}) == 210
 
 
 def test_rest_manifest_params_and_cases():
@@ -115,7 +115,7 @@ def test_api_smoke_expected_routes_match_manifest():
     norm = lambda p: re.sub(r"\{[^}]+\}", "{id}", p)
     routes = {(r["method"], norm(r["path"])) for r in manifest["routes"]}
     expected = {(m, norm(p)) for m, p in (item.split(" ", 1) for item in api_full_smoke.EXPECTED_ROUTES)}
-    assert len(expected) == 194
+    assert len(expected) == 210
     assert expected == routes, sorted(expected ^ routes)[:10]
 
 
@@ -187,7 +187,7 @@ def test_ui_manifest_matches_static_source():
     assert set(manifest["forms"]) == set(forms)
 
 
-def test_version_is_1_30_0():
+def test_version_is_1_30_1():
     from bbu import __version__
 
-    assert __version__ == "1.30.0"
+    assert __version__ == "1.30.1"

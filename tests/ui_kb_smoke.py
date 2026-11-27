@@ -68,6 +68,11 @@ def main() -> int:
         assert sample["documents"] >= 1, sample
         _, docs = admin.json("GET", "/api/kb/docs?size=5&status=active")
         doc_id = docs["items"][0]["id"]
+        _, detail0 = admin.json("GET", f"/api/kb/docs/{doc_id}")
+        case_id = detail0["doc"]["cases"][0]["id"]
+        _, review0 = admin.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": case_id, "stage": "manual",
+        }, expected=201)
         cookie = admin.cookie.split("=", 1)[1]
 
         with sync_playwright() as p:
@@ -139,6 +144,40 @@ def main() -> int:
                 if token not in detail:
                     errors.append(f"详情页缺少：{token}")
             page.screenshot(path=str(out / "kb-detail.png"), full_page=True)
+            page.click('[data-act="case-rev"] >> nth=0')
+            page.wait_for_selector(".kb-rev-row", timeout=15000)
+            page.screenshot(path=str(out / "kb-revisions.png"), full_page=True)
+            page.click('.modal [data-act="close"] >> nth=0')
+
+            # 管理端九个分区：概览、统计、审核、审计至少要有真实数据。
+            for tab, selector, token in (
+                ("overview", ".kb-tabbar", "需要关注"),
+                ("stats", ".kb-trend", "30 天查询趋势"),
+                ("audit", "table.data", "变更与审计"),
+                ("review", "table.data", "AI / 人工审核"),
+            ):
+                page.goto(f"http://{host}:{port}/#/kb/docs?tab={tab}", wait_until="domcontentloaded")
+                page.wait_for_selector(selector, timeout=15000)
+                page.wait_for_timeout(300)
+                tab_body = page.locator("#view").inner_text()
+                if token not in tab_body:
+                    errors.append(f"管理分区 {tab} 缺少：{token}")
+                page.screenshot(path=str(out / f"kb-admin-{tab}.png"), full_page=True)
+                if tab == "review":
+                    page.click('[data-act="review-view"] >> nth=0')
+                    page.wait_for_selector(".modal", timeout=10000)
+                    modal_body = page.locator(".modal").inner_text()
+                    if "审核" not in modal_body:
+                        errors.append("审核详情弹窗缺少标题")
+                    page.click('.modal [data-act="close-modal"]')
+                if tab == "stats":
+                    page.locator(".kb-range a").nth(0).click()
+                    page.wait_for_selector(".kb-trend", timeout=15000)
+                    page.wait_for_timeout(300)
+                    seven_body = page.locator("#view").inner_text()
+                    if "7 天查询趋势" not in seven_body:
+                        errors.append("统计 7 天范围没有生效")
+                    page.screenshot(path=str(out / "kb-admin-stats-7.png"), full_page=True)
 
             page.set_viewport_size({"width": 390, "height": 844})
             page.goto(f"http://{host}:{port}/#/kb", wait_until="domcontentloaded")
@@ -153,6 +192,13 @@ def main() -> int:
             if mobile_width["scroll"] > mobile_width["inner"] + 8:
                 errors.append(f"移动端横向溢出：{mobile_width}")
             page.screenshot(path=str(out / "kb-mobile.png"), full_page=True)
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=stats", wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-trend", timeout=15000)
+            stats_width = page.evaluate("() => ({scroll: document.documentElement.scrollWidth, "
+                                         "inner: window.innerWidth})")
+            if stats_width["scroll"] > stats_width["inner"] + 8:
+                errors.append(f"移动端统计页横向溢出：{stats_width}")
+            page.screenshot(path=str(out / "kb-mobile-stats.png"), full_page=True)
             browser.close()
     finally:
         proc.terminate()
@@ -166,7 +212,7 @@ def main() -> int:
         for item in errors:
             print(" -", item)
         return 1
-    print("[PASS] 知识库问答/引用/文档/页面导入/详情/移动端")
+    print("[PASS] 知识库问答/引用/文档/页面导入/详情/修订/管理分区/移动端")
     print(f"[INFO] 截图: {out}")
     return 0
 

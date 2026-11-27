@@ -204,6 +204,14 @@ EXPECTED_ROUTES = {
     "GET /api/kb/docs",
     "POST /api/kb/docs",
     "GET /api/kb/docs/{id}",
+    "POST /api/kb/docs/{id}/restore",
+    "GET /api/kb/cases/{case_id}",
+    "PUT /api/kb/cases/{case_id}",
+    "POST /api/kb/cases/{case_id}/status",
+    "GET /api/kb/cases/{case_id}/revisions",
+    "GET /api/kb/cases/{case_id}/revisions/{revision}",
+    "POST /api/kb/cases/{case_id}/revisions/{revision}/restore",
+    "GET /api/kb/cases/{case_id}/revisions/verify",
     "PUT /api/kb/docs/{id}",
     "POST /api/kb/docs/{id}/status",
     "DELETE /api/kb/docs/{id}",
@@ -224,6 +232,14 @@ EXPECTED_ROUTES = {
     "POST /api/kb/reindex",
     "GET /api/kb/queries",
     "POST /api/kb/sample",
+    "GET /api/kb/audit",
+    "GET /api/kb/stats",
+    "GET /api/kb/reviews",
+    "GET /api/kb/reviews/{review_id}",
+    "POST /api/kb/reviews",
+    "POST /api/kb/reviews/run",
+    "POST /api/kb/reviews/{review_id}/decision",
+    "POST /api/kb/reviews/{review_id}/retry",
     "GET /api/kb/search",
     "GET /api/mcp/info",
     "POST /api/mcp/token",
@@ -1581,6 +1597,7 @@ def main() -> int:
             "text": "【详细描述:单板复位】\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
         }, expected=201)
         doc_created_id = created_doc["doc_id"]
+        case_created_id = created_doc["cases"][0]["id"]
         hit("POST /api/kb/docs")
         admin_client.json("PUT", f"/api/kb/docs/{doc_created_id}",
                           {"title": "API 粘贴案例-改名"})
@@ -1592,9 +1609,70 @@ def main() -> int:
                           f"/api/kb/docs/{doc_created_id}/versions/{versions['items'][0]['id']}/restore",
                           {})
         hit("POST /api/kb/docs/{id}/versions/{version_id}/restore")
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/restore",
+                          {"version_id": versions["items"][0]["id"]})
+        hit("POST /api/kb/docs/{id}/restore")
         admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "disabled"})
         admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "active"})
         hit("POST /api/kb/docs/{id}/status")
+
+        # 案例级修订、哈希链、恢复与审计
+        _, case_detail = admin_client.json("GET", f"/api/kb/cases/{case_created_id}")
+        assert case_detail["case"]["id"] == case_created_id
+        hit("GET /api/kb/cases/{case_id}")
+        _, case_updated = admin_client.json("PUT", f"/api/kb/cases/{case_created_id}", {
+            "solution": "升级逻辑并复盘", "reason": "api-smoke 修订",
+        })
+        assert case_updated["case"]["revision"] >= 2
+        hit("PUT /api/kb/cases/{case_id}")
+        _, revisions = admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions")
+        assert revisions["items"] and revisions["total"] >= 2
+        hit("GET /api/kb/cases/{case_id}/revisions")
+        admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions/1")
+        hit("GET /api/kb/cases/{case_id}/revisions/{revision}")
+        _, verified = admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions/verify")
+        assert verified["ok"] is True and verified["checked"] >= 1
+        hit("GET /api/kb/cases/{case_id}/revisions/verify")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/revisions/1/restore",
+                          {"reason": "api-smoke 恢复"})
+        hit("POST /api/kb/cases/{case_id}/revisions/{revision}/restore")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "disabled", "reason": "api-smoke"})
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "active", "reason": "api-smoke"})
+        hit("POST /api/kb/cases/{case_id}/status")
+
+        _, stats = admin_client.json("GET", "/api/kb/stats?days=30")
+        assert "inventory" in stats and "usage" in stats
+        hit("GET /api/kb/stats")
+        _, audit = admin_client.json("GET", "/api/kb/audit?limit=20")
+        assert audit["items"]
+        hit("GET /api/kb/audit")
+        status, body, headers = admin_client.request("GET", "/api/kb/audit?format=csv")
+        assert status == 200 and b"created_at" in body
+        status, body, headers = admin_client.request("GET", "/api/kb/stats?format=csv")
+        assert status == 200 and b"group,metric" in body
+
+        _, review = admin_client.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": case_created_id, "stage": "manual", "run": True,
+        }, expected=201)
+        review_id = review["review"]["id"]
+        hit("POST /api/kb/reviews")
+        _, reviews = admin_client.json("GET", "/api/kb/reviews?limit=10")
+        assert reviews["items"]
+        hit("GET /api/kb/reviews")
+        admin_client.json("GET", f"/api/kb/reviews/{review_id}")
+        hit("GET /api/kb/reviews/{review_id}")
+        admin_client.json("POST", f"/api/kb/reviews/{review_id}/retry", {})
+        hit("POST /api/kb/reviews/{review_id}/retry")
+        admin_client.json("POST", f"/api/kb/reviews/{review_id}/decision",
+                          {"decision": "reject", "note": "api-smoke 终审"})
+        hit("POST /api/kb/reviews/{review_id}/decision")
+        admin_client.json("POST", "/api/kb/reviews/run", {"limit": 5})
+        hit("POST /api/kb/reviews/run")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "active", "reason": "api-smoke 复核通过"})
+
         admin_client.json("DELETE", f"/api/kb/docs/{doc_created_id}")
         hit("DELETE /api/kb/docs/{id}")
 

@@ -237,7 +237,7 @@ class KBServiceTests(unittest.TestCase):
             svc.shutdown()
 
     def test_schema_and_sample_import(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 24)
+        self.assertEqual(SCHEMA_VERSION, 25)
         for table in ("kb_documents", "kb_cases", "kb_import_jobs", "kb_drafts",
                       "kb_doc_versions", "kb_query_logs", "kb_feedback", "kb_index_meta"):
             row = self.db.one("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -386,6 +386,119 @@ class KBServiceTests(unittest.TestCase):
             self.assertEqual(svc2.status(self.admin)["documents"], before + 1)
         finally:
             svc2.shutdown()
+
+    def test_revision_ledger_restore_and_append_only(self) -> None:
+        svc = self.service()
+        try:
+            svc.import_sample(self.admin)
+            svc.rebuild_index()
+            doc = svc.list_documents(size=1)["items"][0]
+            case = svc.get_document(doc["id"], reveal=True)["cases"][0]
+            old_solution = case["solution"]
+            self.assertEqual(svc.list_case_revisions(case["id"], self.admin)["total"], 1)
+            svc.update_case(case["id"], {"solution": "补丁后的处理方案", "reason": "修正方案"},
+                            self.admin)
+            revisions = svc.list_case_revisions(case["id"], self.admin)
+            self.assertEqual(revisions["total"], 2)
+            self.assertEqual(revisions["items"][0]["diff"][0]["field"], "solution")
+            self.assertTrue(svc.verify_case_revisions(case["id"], self.admin)["ok"])
+            svc.restore_case_revision(case["id"], "1", self.admin, reason="回滚测试")
+            self.assertEqual(svc.get_case(case["id"])["case"]["solution"], old_solution)
+            self.assertTrue(svc.verify_case_revisions(case["id"], self.admin)["ok"])
+            # 台账触发器不可更新/删除
+            row = svc.list_case_revisions(case["id"], self.admin)["items"][0]
+            with self.assertRaises(Exception):
+                self.db.execute("UPDATE kb_case_revisions SET reason='x' WHERE id=?", (row["id"],))
+        finally:
+            svc.shutdown()
+
+    def test_case_revision_permissions_and_no_empty_revision(self) -> None:
+        svc = self.service()
+        try:
+            svc.import_sample(self.admin)
+            doc = svc.list_documents(size=1)["items"][0]
+            case = svc.get_document(doc["id"], reveal=True)["cases"][0]
+            with self.assertRaises(Exception) as ctx:
+                svc.list_case_revisions(case["id"], self.engineer)
+            self.assertEqual(getattr(ctx.exception, "status", 0), 403)
+            with self.assertRaises(Exception) as ctx:
+                svc.update_case(case["id"], {"solution": "x"}, self.admin)
+            self.assertEqual(getattr(ctx.exception, "status", 0), 400)
+            before = case["revision"]
+            svc.update_document(doc["id"], {"title": "只改标题"}, self.admin)
+            after = svc.get_case(case["id"])["case"]
+            self.assertEqual(after["revision"], before)
+        finally:
+            svc.shutdown()
+
+    def test_stats_groups_usage_and_csv(self) -> None:
+        svc = self.service()
+        try:
+            svc.import_sample(self.admin)
+            svc.rebuild_index()
+            svc.search("看门狗复位", self.engineer)
+            data = svc.stats(self.admin, days=30)
+            for key in ("inventory", "coverage", "usage", "review", "changes",
+                        "imports", "index", "knowledge", "trend"):
+                self.assertIn(key, data)
+            self.assertEqual(data["inventory"]["active_documents"], 20)
+            self.assertGreaterEqual(data["usage"]["queries"], 1)
+            self.assertTrue(any(x["query"] == "看门狗复位" for x in data["usage"]["top_queries"]))
+            self.assertGreaterEqual(data["changes"]["revisions"], 21)
+            self.assertTrue(svc.stats_csv(self.admin, days=7).startswith("group,metric"))
+        finally:
+            svc.shutdown()
+
+    def test_review_fallback_and_draft_reject(self) -> None:
+        svc = self.service()
+        try:
+            created = svc.create_paste(self.engineer, title="待审 SSD",
+                                       text="【详细描述:SSD 只读】\n【原因分析】写保护\n【处理方案】更换 SSD")
+            draft_id = created["draft_id"]
+            review = self.db.one("SELECT * FROM kb_reviews WHERE target_id=? ORDER BY created_at DESC",
+                                 (draft_id,))
+            self.assertIsNotNone(review)
+            result = svc.run_review(review["id"], self.admin)
+            self.assertEqual(result["status"], "manual")
+            stats = svc.stats(self.admin, days=30)
+            self.assertGreaterEqual(stats["review"]["pending"], 1)
+            self.assertEqual(stats["review"]["ai_coverage"], 0)
+            self.assertGreaterEqual(stats["review"]["fallback_manual"], 1)
+            decided = svc.decide_review(review["id"], self.admin, decision="reject", note="资料不足")
+            self.assertLessEqual(svc.stats(self.admin, days=30)["review"]["pending"], 0)
+            self.assertEqual(decided["human_decision"], "reject")
+            draft = svc.get_draft(draft_id, self.admin)
+            self.assertEqual(draft["status"], "rejected")
+        finally:
+            svc.shutdown()
+
+    def test_review_model_and_patch(self) -> None:
+        fake = _FakeGateway({
+            "decision": "pass", "score": 90,
+            "dimensions": [
+                {"key": "answer_match", "score": 25, "max": 25},
+                {"key": "cause_complete", "score": 18, "max": 20},
+                {"key": "solution_actionable", "score": 18, "max": 20},
+                {"key": "entity_consistency", "score": 14, "max": 15},
+                {"key": "source_fidelity", "score": 9, "max": 10},
+                {"key": "safety_privacy", "score": 10, "max": 10},
+            ],
+            "issues": [], "suggested_patch": {"prevention": "补充预防措施"},
+            "confidence": 0.9,
+        })
+        svc = self.service(fake)
+        try:
+            svc.import_sample(self.admin)
+            doc = svc.list_documents(size=1)["items"][0]
+            case = svc.get_document(doc["id"], reveal=True)["cases"][0]
+            review = svc.create_review(self.admin, target_type="case", target_id=case["id"],
+                                       stage="manual", run=True)
+            self.assertEqual(review["decision"], "pass")
+            self.assertIn("prevention", review["suggested_patch"])
+            svc.decide_review(review["id"], self.admin, decision="adopt_patch", note="采纳")
+            self.assertEqual(svc.get_case(case["id"])["case"]["prevention"], "补充预防措施")
+        finally:
+            svc.shutdown()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,11 @@ from .ai import AIError, NoModelError
 from .kb_index import IndexCase, KBIndex
 from .kb_ingest import DocumentDraft, parse_file, parse_paste
 from .kb_retrieve import search as retrieve
+from .kb_revision import (
+    case_diff, case_snapshot, decode_snapshot, verify_chain, write_revision,
+)
+from .kb_review import ReviewError, ReviewService
+from .kb_stats import build_stats, stats_csv
 from .kb_text import excerpt, mask_pii, normalize_key
 from .util import iso_now, new_id, safe_filename, sha256_file
 
@@ -102,12 +107,19 @@ class KBService:
         self._rebuild_thread: threading.Thread | None = None
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._worker: threading.Thread | None = None
+        self.reviews = ReviewService(db, config, gateway=gateway)
+        self._review_queue: queue.Queue[str | None] = queue.Queue()
+        self._review_worker: threading.Thread | None = None
         self.last_error = ""
         self._ensure_meta()
         if start_worker:
             self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                             name="kb-import-worker")
             self._worker.start()
+            if self.reviews.enabled():
+                self._review_worker = threading.Thread(
+                    target=self._review_worker_loop, daemon=True, name="kb-review-worker")
+                self._review_worker.start()
             self._schedule_rebuild()
         else:
             # 测试/只读进程可显式构建，不启动后台线程。
@@ -119,6 +131,9 @@ class KBService:
         self._queue.put(None)
         if self._worker and self._worker.is_alive():
             self._worker.join(timeout=3)
+        self._review_queue.put(None)
+        if self._review_worker and self._review_worker.is_alive():
+            self._review_worker.join(timeout=3)
         if self._rebuild_thread and self._rebuild_thread.is_alive():
             self._rebuild_thread.join(timeout=3)
 
@@ -269,12 +284,23 @@ class KBService:
             },
             "supported_formats": ["csv", "txt", "md", "html", "docx", "xlsx", "pdf",
                                   "png", "jpg", "webp"],
+            "review_pending": int(self.db.one(
+                "SELECT COUNT(*) AS n FROM kb_reviews WHERE status IN "
+                "('queued','running','manual','failed')")["n"]),
+            "revisions": int(self.db.one(
+                "SELECT COUNT(*) AS n FROM kb_case_revisions")["n"]),
             "top_k": int(self.config.get("kb_top_k", 6)),
             "config": {
                 "auto_approve_admin": bool(self.config.get("kb_auto_approve_admin", True)),
                 "mask_pii": bool(self.config.get("kb_mask_pii", True)),
                 "max_file_mb": int(self.config.get("kb_max_file_mb", 50)),
                 "max_batch_mb": int(self.config.get("kb_max_batch_mb", 200)),
+                "review_enabled": bool(self.config.get("kb_review_enabled", True)),
+                "review_auto_on_import": bool(self.config.get("kb_review_auto_on_import", True)),
+                "review_auto_publish": bool(self.config.get("kb_review_auto_publish", False)),
+                "review_pending": int(self.db.one(
+                    "SELECT COUNT(*) AS n FROM kb_reviews WHERE status IN "
+                    "('queued','running','manual','failed')")["n"]),
             },
         }
 
@@ -395,11 +421,23 @@ class KBService:
             "location": row.get("location") or "", "cause": row.get("cause") or "",
             "cause_detail": row.get("cause_detail") or "", "solution": row.get("solution") or "",
             "prevention": row.get("prevention") or "",
+            "root_cause_key": row.get("root_cause_key") or "",
             "boards": _json_list(row.get("boards_json")),
             "domains": _json_list(row.get("domains_json")),
             "versions": _json_list(row.get("versions_json")),
             "quality": float(row.get("quality") or 0),
             "confidence": float(row.get("confidence") or 0),
+            "revision": int(row.get("revision") or 1),
+            "review_status": row.get("review_status") or "unreviewed",
+            "review_score": float(row.get("review_score") or 0),
+            "last_review_id": row.get("last_review_id") or "",
+            "hit_count": int(row.get("hit_count") or 0),
+            "citation_count": int(row.get("citation_count") or 0),
+            "helpful_count": int(row.get("helpful_count") or 0),
+            "unhelpful_count": int(row.get("unhelpful_count") or 0),
+            "last_hit_at": row.get("last_hit_at") or "",
+            "updated_at": row.get("updated_at") or "",
+            "status": row.get("status") or "active",
             "sections": sections, "created_at": row.get("created_at") or "",
             "uri": f"faultkb://case/{row.get('id')}",
         }
@@ -408,7 +446,8 @@ class KBService:
                       draft_id: str = "") -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503)
-        doc_id = self._insert_document(payload, int(user["id"]))
+        doc_id = self._insert_document(payload, int(user["id"]), action="create",
+                                       actor_type="human", reason="创建文档")
         if draft_id:
             self.db.execute("UPDATE kb_drafts SET status='approved', doc_id=?, reviewed_by=?, "
                             "reviewed_at=? WHERE id=?",
@@ -475,7 +514,8 @@ class KBService:
         payload = _json_obj(row.get("payload_json"))
         if not payload:
             raise KBError("版本内容损坏", 409, "bad_version")
-        self._replace_document(doc_id, payload, int(user["id"]))
+        self._replace_document(doc_id, payload, int(user["id"]), action="restore",
+                               reason="恢复文档版本")
         self._schedule_rebuild()
         return self.get_document(doc_id, reveal=True)
 
@@ -611,6 +651,27 @@ class KBService:
                 self._process_job(job_id)
             except Exception as exc:  # noqa: BLE001
                 self._finish_job(job_id, "failed", error=str(exc))
+
+    def _queue_review(self, target_type: str, target_id: str, *, stage: str = "import") -> str:
+        """创建审核记录并入队；失败只记录错误，不影响主流程。"""
+        try:
+            review = self.reviews.create(target_type, target_id, stage=stage)
+            self._review_queue.put(str(review["id"]))
+            return str(review["id"])
+        except ReviewError:
+            return ""
+        except Exception:
+            return ""
+
+    def _review_worker_loop(self) -> None:
+        while not self._stop.is_set():
+            review_id = self._review_queue.get()
+            if review_id is None:
+                return
+            try:
+                self.reviews.run(review_id)
+            except Exception:
+                pass
 
     def _process_job(self, job_id: str) -> None:
         job = self.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
@@ -771,6 +832,8 @@ class KBService:
                          float(payload.get("document", {}).get("confidence", 0.9)),
                          json.dumps(_json_list(row.get("warnings_json")), ensure_ascii=False),
                          draft_id))
+        if self.reviews.enabled():
+            self._queue_review("draft", draft_id, stage="edit")
         return self.get_draft(draft_id, user)
 
     def approve_draft(self, draft_id: str, user: dict[str, Any]) -> dict[str, Any]:
@@ -825,6 +888,7 @@ class KBService:
         result["query_id"] = query_id
         if log:
             self._log_query(user, query, filters or {}, result)
+            self._record_hits(result.get("items") or [], user)
         return result
 
     def answer(self, query: str, user: dict[str, Any], *,
@@ -880,15 +944,35 @@ class KBService:
                  "citation": c["citation"], "doc_id": c["doc_id"]} for c in cases],
             "analysis": result.get("analysis") or {},
         })
+        self._record_citations(cases)
         return answer
 
     def feedback(self, user: dict[str, Any], *, query_id: str, helpful: bool,
                  reason: str = "") -> dict[str, Any]:
+        log = self.db.one("SELECT top_ids_json,created_at FROM kb_query_logs WHERE id=?",
+                          (query_id,))
+        if not log:
+            raise KBError("查询记录不存在", 404, "not_found")
         self.db.execute(
             "INSERT INTO kb_feedback(id,query_id,user_id,helpful,reason,created_at) "
             "VALUES(?,?,?,?,?,?)",
             (new_id("FB", with_time=False), query_id[:80], user["id"], 1 if helpful else 0,
              reason[:1000], iso_now()))
+        top_ids = [str(x) for x in _json_list(log.get("top_ids_json"))]
+        day = str(log.get("created_at") or iso_now())[:10]
+        for case_id in top_ids[:6]:
+            field = "helpful_count" if helpful else "unhelpful_count"
+            try:
+                self.db.execute(f"UPDATE kb_cases SET {field}={field}+1 WHERE id=?", (case_id,))
+                usage_field = "helpful" if helpful else "unhelpful"
+                self.db.execute(
+                    "INSERT INTO kb_case_usage_daily(day,case_id,hits,citations,helpful,unhelpful,"
+                    "unique_users,updated_at) VALUES(?,?,0,0,?,?,0,?) "
+                    "ON CONFLICT(day,case_id) DO UPDATE SET "
+                    f"{usage_field}={usage_field}+1, updated_at=excluded.updated_at",
+                    (day, case_id, 1 if helpful else 0, 0 if helpful else 1, iso_now()))
+            except Exception:
+                pass
         return {"ok": True}
 
     def list_queries(self, user: dict[str, Any], limit: int = 30) -> dict[str, Any]:
@@ -906,6 +990,43 @@ class KBService:
             item["top_ids"] = _json_list(item.pop("top_ids_json"))
             out.append(item)
         return {"items": out}
+
+    def _record_hits(self, items: list[dict[str, Any]], user: dict[str, Any]) -> None:
+        day = iso_now()[:10]
+        now = iso_now()
+        for item in items[:8]:
+            case_id = str(item.get("case_id") or "")
+            if not case_id:
+                continue
+            try:
+                self.db.execute("UPDATE kb_cases SET hit_count=hit_count+1,last_hit_at=? WHERE id=?",
+                                (now, case_id))
+                self.db.execute(
+                    "INSERT INTO kb_case_usage_daily(day,case_id,hits,citations,helpful,unhelpful,"
+                    "unique_users,updated_at) VALUES(?,?,1,0,0,0,1,?) "
+                    "ON CONFLICT(day,case_id) DO UPDATE SET hits=hits+1,"
+                    "unique_users=MAX(unique_users,1),updated_at=excluded.updated_at",
+                    (day, case_id, now))
+            except Exception:
+                pass
+
+    def _record_citations(self, cases: list[dict[str, Any]]) -> None:
+        day = iso_now()[:10]
+        now = iso_now()
+        for case in cases:
+            case_id = str(case.get("case_id") or "")
+            if not case_id:
+                continue
+            try:
+                self.db.execute("UPDATE kb_cases SET citation_count=citation_count+1 WHERE id=?",
+                                (case_id,))
+                self.db.execute(
+                    "INSERT INTO kb_case_usage_daily(day,case_id,hits,citations,helpful,unhelpful,"
+                    "unique_users,updated_at) VALUES(?,?,0,1,0,0,0,?) "
+                    "ON CONFLICT(day,case_id) DO UPDATE SET citations=citations+1,"
+                    "updated_at=excluded.updated_at", (day, case_id, now))
+            except Exception:
+                pass
 
     def _log_query(self, user: dict[str, Any], query: str, filters: dict[str, Any],
                    result: dict[str, Any]) -> None:
@@ -925,6 +1046,415 @@ class KBService:
             pass
 
     # ------------------------------------------------------------ 数据库写入
+    # ------------------------------------------------------------ 案例修订与审计
+    def _case_access(self, case_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        row = self.db.one(
+            "SELECT c.*,d.created_by AS doc_created_by,d.title AS doc_title "
+            "FROM kb_cases c JOIN kb_documents d ON d.id=c.doc_id WHERE c.id=?",
+            (case_id,))
+        if not row:
+            raise KBError("案例不存在", 404, "not_found")
+        if bool(user.get("role") == "admin"):
+            return dict(row)
+        if int(row.get("doc_created_by") or 0) != int(user.get("id") or 0):
+            raise KBError("只有文档上传者或管理员可以查看修订", 403, "forbidden")
+        return dict(row)
+
+    def list_case_revisions(self, case_id: str, user: dict[str, Any],
+                            *, page: int = 1, size: int = 50) -> dict[str, Any]:
+        self._case_access(case_id, user)
+        page = max(1, int(page or 1))
+        size = max(1, min(100, int(size or 50)))
+        total = int(self.db.one(
+            "SELECT COUNT(*) AS n FROM kb_case_revisions WHERE case_id=?",
+            (case_id,))["n"])
+        rows = self.db.all(
+            "SELECT id,case_id,doc_id,revision,action,actor_type,actor_id,actor_name,source,"
+            "reason,diff_json,request_id,review_id,model,prompt_version,prev_hash,entry_hash,"
+            "created_at FROM kb_case_revisions WHERE case_id=? ORDER BY revision DESC "
+            "LIMIT ? OFFSET ?", (case_id, size, (page - 1) * size))
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["diff"] = _json_list(item.pop("diff_json"))
+            items.append(item)
+        return {"items": items, "total": total, "page": page, "size": size}
+
+    def get_case_revision(self, case_id: str, revision: str,
+                          user: dict[str, Any]) -> dict[str, Any]:
+        self._case_access(case_id, user)
+        row = self.db.one(
+            "SELECT * FROM kb_case_revisions WHERE case_id=? AND (id=? OR CAST(revision AS TEXT)=?) "
+            "ORDER BY revision DESC LIMIT 1", (case_id, str(revision), str(revision)))
+        if not row:
+            raise KBError("修订不存在", 404, "not_found")
+        item = dict(row)
+        item["diff"] = _json_list(item.pop("diff_json"))
+        item["snapshot"] = decode_snapshot(item.pop("snapshot_z"))
+        return item
+
+    def update_case(self, case_id: str, data: dict[str, Any],
+                    user: dict[str, Any], *, actor_type: str = "human",
+                    source: str = "web") -> dict[str, Any]:
+        row = self._case_access(case_id, user)
+        if bool(user.get("role") != "admin") and int(row.get("doc_created_by") or 0) != int(user.get("id") or 0):
+            raise KBError("无权编辑该案例", 403, "forbidden")
+        reason = str(data.get("reason") or "").strip()
+        if not reason:
+            raise KBError("请填写变更原因", 400, "reason_required")
+        allowed = {"title", "symptom", "environment", "expected", "actual", "repro",
+                   "found_date", "location", "cause", "cause_detail", "solution",
+                   "prevention", "root_cause_key", "quality", "boards", "domains",
+                   "versions", "status"}
+        case = self._case_public(row)
+        changed = False
+        for key in allowed:
+            if key in data:
+                value = data.get(key)
+                if key in {"boards", "domains", "versions"}:
+                    value = _json_list(value)
+                if key == "quality":
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        value = case.get("quality") or 0
+                if key == "status" and str(value) not in {"active", "disabled", "archived"}:
+                    raise KBError("非法案例状态")
+                case[key] = value
+                changed = True
+        if "title" in data and "title_clean" not in data:
+            case["title_clean"] = self._title_clean(str(case.get("title") or ""))
+        if not changed:
+            raise KBError("没有要修改的字段", 400, "no_change")
+        doc = {"title": row.get("doc_title") or "", "title_clean": row.get("title_clean") or "",
+               "boards": _json_list(row.get("boards_json")),
+               "domains": _json_list(row.get("domains_json")),
+               "versions": _json_list(row.get("versions_json"))}
+        with self.db.tx() as conn:
+            self._update_case_row(
+                conn, case_id, case, doc, int(case.get("ordinal") or 1), iso_now(),
+                int(user.get("id") or 0), action="update", actor_type=actor_type,
+                source=source, reason=reason,
+                review_id=str(data.get("review_id") or ""))
+        if (self.reviews.enabled()
+                and bool(self.config.get("kb_review_auto_on_edit", False))):
+            self._queue_review("case", case_id, stage="edit")
+        self._schedule_rebuild()
+        return self.get_case(case_id)
+
+    def set_case_status(self, case_id: str, status: str, user: dict[str, Any],
+                        reason: str = "") -> dict[str, Any]:
+        if status not in {"active", "disabled", "archived"}:
+            raise KBError("非法案例状态")
+        row = self._case_access(case_id, user)
+        if bool(user.get("role") != "admin") and int(row.get("doc_created_by") or 0) != int(user.get("id") or 0):
+            raise KBError("无权修改该案例", 403, "forbidden")
+        before = case_snapshot(row, self._case_tags_db_for(case_id))
+        now = iso_now()
+        with self.db.tx() as conn:
+            conn.execute("UPDATE kb_cases SET status=?,revision=revision+1,updated_at=?,"
+                         "updated_by=? WHERE id=?", (status, now, user.get("id"), case_id))
+            after = case_snapshot(self._case_row(conn, case_id), self._case_tags_db(conn, case_id))
+            self._step_revision(conn, case_id, str(row.get("doc_id") or ""),
+                                int(row.get("revision") or 1) + 1, "status", before, after,
+                                int(user.get("id") or 0), reason=reason or f"状态改为 {status}")
+        self._schedule_rebuild()
+        return self.get_case(case_id)
+
+    def _case_tags_db_for(self, case_id: str) -> dict[str, list[str]]:
+        # 非事务读取使用连接；与 _case_tags_db 的同构结果。
+        result: dict[str, list[str]] = {"boards": [], "domains": [], "versions": []}
+        kind_map = {"board": "boards", "domain": "domains", "version": "versions"}
+        for row in self.db.all("SELECT kind,value FROM kb_case_tags WHERE case_id=?", (case_id,)):
+            key = kind_map.get(str(row.get("kind")))
+            if key:
+                result[key].append(str(row.get("value")))
+        return result
+
+    def restore_case_revision(self, case_id: str, revision: str,
+                              user: dict[str, Any], *, reason: str = "") -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可恢复案例修订", 403, "forbidden")
+        rev = self.get_case_revision(case_id, revision, user)
+        snapshot = rev.get("snapshot") or {}
+        if not snapshot:
+            raise KBError("修订快照损坏", 409, "bad_revision")
+        row = self.db.one("SELECT * FROM kb_cases WHERE id=?", (case_id,))
+        if not row:
+            raise KBError("案例不存在", 404, "not_found")
+        case = dict(snapshot)
+        # 恢复内容时默认重新生效；管理员可随后再停用。
+        if str(case.get("status")) not in {"active", "disabled", "archived"}:
+            case["status"] = "active"
+        case["ordinal"] = int(row.get("ordinal") or 1)
+        doc = {"title": self.db.one("SELECT title,title_clean,boards_json,domains_json,versions_json "
+                                    "FROM kb_documents WHERE id=?", (row["doc_id"],)) or {}}
+        doc_row = doc["title"]
+        doc_data = {"title": doc_row.get("title") or "", "title_clean": doc_row.get("title_clean") or "",
+                    "boards": _json_list(doc_row.get("boards_json")),
+                    "domains": _json_list(doc_row.get("domains_json")),
+                    "versions": _json_list(doc_row.get("versions_json"))}
+        with self.db.tx() as conn:
+            self._update_case_row(conn, case_id, case, doc_data, int(row.get("ordinal") or 1),
+                                  iso_now(), int(user.get("id") or 0), action="restore",
+                                  actor_type="human", source="restore",
+                                  reason=reason or f"恢复 r{rev.get('revision')}")
+        self._schedule_rebuild()
+        return self.get_case(case_id)
+
+    def verify_case_revisions(self, case_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可校验修订链", 403, "forbidden")
+        rows = self.db.all("SELECT * FROM kb_case_revisions WHERE case_id=? ORDER BY revision",
+                           (case_id,))
+        result = verify_chain(rows)
+        result["case_id"] = case_id
+        return result
+
+    def list_audit(self, user: dict[str, Any], *, actor: str = "", action: str = "",
+                   target: str = "", since: str = "", until: str = "", limit: int = 100) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看审计", 403, "forbidden")
+        limit = max(1, min(500, int(limit or 100)))
+        rev_sql = "SELECT * FROM kb_case_revisions WHERE 1=1"
+        rev_args: list[Any] = []
+        if since:
+            rev_sql += " AND created_at>=?"
+            rev_args.append(since)
+        if until:
+            rev_sql += " AND created_at<=?"
+            rev_args.append(until)
+        if target:
+            rev_sql += " AND (case_id LIKE ? OR doc_id LIKE ?)"
+            rev_args.extend([f"%{target}%", f"%{target}%"])
+        if actor:
+            rev_sql += " AND actor_name LIKE ?"
+            rev_args.append(f"%{actor}%")
+        if action:
+            rev_sql += " AND action LIKE ?"
+            rev_args.append(f"%{action}%")
+        rev_sql += " ORDER BY created_at DESC LIMIT ?"
+        rev_args.append(limit)
+        items: list[dict[str, Any]] = []
+        for row in self.db.all(rev_sql, tuple(rev_args)):
+            item = dict(row)
+            item.update({"kind": "revision", "action": f"case.{item.get('action')}",
+                         "target": item.get("case_id"), "object_type": "case",
+                         "detail": _json_list(item.pop("diff_json")),
+                         "actor": item.get("actor_name") or "",
+                         "message": item.get("reason") or ""})
+            items.append(item)
+        log_sql = "SELECT * FROM audit_logs WHERE action LIKE 'kb.%'"
+        log_args: list[Any] = []
+        if since:
+            log_sql += " AND ts>=?"
+            log_args.append(since)
+        if until:
+            log_sql += " AND ts<=?"
+            log_args.append(until)
+        if target:
+            log_sql += " AND target LIKE ?"
+            log_args.append(f"%{target}%")
+        if actor:
+            log_sql += " AND username LIKE ?"
+            log_args.append(f"%{actor}%")
+        if action:
+            log_sql += " AND action LIKE ?"
+            log_args.append(f"%{action}%")
+        log_sql += " ORDER BY ts DESC LIMIT ?"
+        log_args.append(limit)
+        for row in self.db.all(log_sql, tuple(log_args)):
+            item = dict(row)
+            item.update({"kind": "audit", "actor": item.get("username") or "",
+                         "created_at": item.get("ts") or "", "object_type": "kb",
+                         "detail": _json_obj(item.get("detail_json")),
+                         "message": ""})
+            items.append(item)
+        items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return {"items": items[:limit], "total": len(items)}
+
+    def audit_csv(self, user: dict[str, Any], **filters) -> str:
+        import csv
+        import io
+        data = self.list_audit(user, **filters)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["created_at", "kind", "action", "actor", "target", "reason", "detail"])
+        for item in data["items"]:
+            writer.writerow([item.get("created_at") or "", item.get("kind") or "",
+                             item.get("action") or "", item.get("actor") or "",
+                             item.get("target") or "", item.get("message") or "",
+                             json.dumps(item.get("detail") or {}, ensure_ascii=False)])
+        return buf.getvalue()
+
+    # ------------------------------------------------------------ 统计与审核
+    def stats(self, user: dict[str, Any], *, days: int = 90) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看知识库统计", 403, "forbidden")
+        return build_stats(self.db, self.config, days=days)
+
+    def stats_csv(self, user: dict[str, Any], *, days: int = 90) -> str:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看知识库统计", 403, "forbidden")
+        return stats_csv(build_stats(self.db, self.config, days=days))
+
+    def list_reviews(self, user: dict[str, Any], *, status: str = "",
+                     target_type: str = "", limit: int = 50) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看审核队列", 403, "forbidden")
+        data = self.reviews.list(status=status, target_type=target_type, limit=limit)
+        for item in data["items"]:
+            item["target_title"] = self._review_target_title(item.get("target_type"),
+                                                             item.get("target_id"))
+        return data
+
+    def get_review(self, review_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看审核记录", 403, "forbidden")
+        item = self.reviews.get(review_id)
+        item["target_title"] = self._review_target_title(item.get("target_type"),
+                                                         item.get("target_id"))
+        return item
+
+    def _review_target_title(self, target_type: str, target_id: str) -> str:
+        try:
+            if target_type == "draft":
+                row = self.db.one("SELECT title FROM kb_drafts WHERE id=?", (target_id,))
+            elif target_type == "case":
+                row = self.db.one("SELECT title FROM kb_cases WHERE id=?", (target_id,))
+            else:
+                row = self.db.one("SELECT title FROM kb_documents WHERE id=?", (target_id,))
+            return str((row or {}).get("title") or "")
+        except Exception:
+            return ""
+
+    def create_review(self, user: dict[str, Any], *, target_type: str, target_id: str,
+                      stage: str = "manual", run: bool = False) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可发起审核", 403, "forbidden")
+        if target_type not in {"draft", "case", "doc"}:
+            raise KBError("不支持的审核对象", 400, "bad_target")
+        review = self.reviews.create(target_type, target_id, stage=stage, actor=user)
+        if run:
+            review = self.reviews.run(review["id"])
+        else:
+            self._review_queue.put(review["id"])
+        review["target_title"] = self._review_target_title(target_type, target_id)
+        return review
+
+    def run_review(self, review_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可执行审核", 403, "forbidden")
+        item = self.reviews.run(review_id)
+        item["target_title"] = self._review_target_title(item.get("target_type"), item.get("target_id"))
+        return item
+
+    def run_reviews(self, user: dict[str, Any], *, limit: int = 20) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可批量审核", 403, "forbidden")
+        rows = self.db.all(
+            "SELECT id FROM kb_reviews WHERE status IN ('queued','manual','failed') "
+            "ORDER BY created_at LIMIT ?", (max(1, min(100, limit)),))
+        done, failed = [], []
+        for row in rows:
+            try:
+                item = self.reviews.run(str(row["id"]))
+                (failed if item.get("status") == "failed" else done).append(item["id"])
+            except Exception:
+                failed.append(str(row["id"]))
+        return {"ok": True, "processed": len(rows), "done": done, "failed": failed}
+
+    def decide_review(self, review_id: str, user: dict[str, Any], *, decision: str,
+                      note: str = "", apply_patch: bool = False) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可终审", 403, "forbidden")
+        if decision not in {"approve", "reject", "adopt_patch"}:
+            raise KBError("终审结论必须是 approve/reject/adopt_patch")
+        review = self.reviews.get(review_id)
+        if review.get("status") == "decided":
+            raise KBError("该审核已终审", 409, "already_decided")
+        target_type = str(review.get("target_type") or "")
+        target_id = str(review.get("target_id") or "")
+        patch = review.get("suggested_patch") or {}
+        applied: dict[str, Any] = {}
+        if decision == "adopt_patch" or apply_patch:
+            if not patch:
+                raise KBError("审核没有可采纳的 patch", 409, "no_patch")
+            applied = self._apply_review_patch(target_type, target_id, patch, review, user)
+        if decision == "approve":
+            if target_type == "draft":
+                try:
+                    self.approve_draft(target_id, user)
+                except KBError as exc:
+                    if exc.code != "already_reviewed":
+                        raise
+            elif target_type == "case":
+                self.db.execute("UPDATE kb_cases SET status='active',review_status='pass',"
+                                "last_review_id=?,updated_at=? WHERE id=?",
+                                (review_id, iso_now(), target_id))
+                self._schedule_rebuild()
+            elif target_type == "doc":
+                self.set_document_status(target_id, "active", user)
+        elif decision == "reject":
+            if target_type == "draft":
+                self.reject_draft(target_id, user, note)
+            elif target_type == "case":
+                self.db.execute("UPDATE kb_cases SET status='disabled',review_status='reject',"
+                                "last_review_id=?,updated_at=? WHERE id=?",
+                                (review_id, iso_now(), target_id))
+                self._schedule_rebuild()
+            elif target_type == "doc":
+                self.set_document_status(target_id, "disabled", user)
+        self.db.execute(
+            "UPDATE kb_reviews SET status='decided',human_decision=?,human_note=?,"
+            "reviewed_by=?,reviewed_at=?,applied_patch_json=? WHERE id=?",
+            (decision, note[:1000], user.get("id"), iso_now(),
+             json.dumps(applied or {}, ensure_ascii=False), review_id))
+        result = self.reviews.get(review_id)
+        result["target_title"] = self._review_target_title(target_type, target_id)
+        return result
+
+    def _apply_review_patch(self, target_type: str, target_id: str, patch: dict[str, Any],
+                            review: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        clean = {k: v for k, v in patch.items() if k in {
+            "title", "symptom", "environment", "expected", "actual", "repro", "found_date",
+            "location", "cause", "cause_detail", "solution", "prevention", "boards",
+            "domains", "versions", "quality"}}
+        if not clean:
+            raise KBError("patch 没有可应用字段", 400, "empty_patch")
+        if target_type == "case":
+            self.update_case(target_id, {**clean, "reason": f"采纳审核 {review.get('id')} 的 patch",
+                                         "review_id": review.get("id")}, user)
+            self.db.execute("UPDATE kb_cases SET review_status=?,last_review_id=? WHERE id=?",
+                            (review.get("decision") or "needs_review", review.get("id"), target_id))
+            return clean
+        if target_type == "draft":
+            row = self.db.one("SELECT * FROM kb_drafts WHERE id=?", (target_id,))
+            if not row:
+                raise KBError("草稿不存在", 404, "not_found")
+            payload = _json_obj(row.get("payload_json"))
+            cases = payload.get("cases") or []
+            if not cases:
+                raise KBError("草稿没有案例", 409, "bad_draft")
+            case = dict(cases[0])
+            if "boards" in clean:
+                clean["boards"] = _json_list(clean["boards"])
+            if "domains" in clean:
+                clean["domains"] = _json_list(clean["domains"])
+            if "versions" in clean:
+                clean["versions"] = _json_list(clean["versions"])
+            case.update(clean)
+            cases[0] = case
+            payload["cases"] = cases
+            if clean.get("title"):
+                payload.setdefault("document", {})["title"] = clean["title"]
+            self.db.execute("UPDATE kb_drafts SET title=?,payload_json=? WHERE id=?",
+                            (str(clean.get("title") or row.get("title") or ""),
+                             json.dumps(payload, ensure_ascii=False), target_id))
+            return clean
+        raise KBError("文档级 patch 暂不支持，请按案例编辑", 400, "unsupported_patch")
+
+
     def _document_payload(self, doc_row: dict[str, Any]) -> dict[str, Any]:
         payload = {"document": self._doc_public(doc_row, reveal=True),
                    "cases": [self._case_public(dict(c)) for c in self.db.all(
@@ -932,7 +1462,165 @@ class KBService:
                        "ORDER BY ordinal,id", (doc_row["id"],))]}
         return payload
 
-    def _insert_document(self, payload: dict[str, Any], user_id: int) -> str:
+    def _user_name(self, user_id: int | None) -> str:
+        row = self.db.one("SELECT display_name,username FROM users WHERE id=?", (user_id,)) or {}
+        return str(row.get("display_name") or row.get("username") or "系统")
+
+    def _case_values(self, case: dict[str, Any], doc: dict[str, Any], ordinal: int) -> dict[str, Any]:
+        boards = _json_list(case.get("boards")) or _json_list(doc.get("boards"))
+        domains = _json_list(case.get("domains")) or _json_list(doc.get("domains"))
+        versions = _json_list(case.get("versions")) or _json_list(doc.get("versions"))
+        return {
+            "title": str(case.get("title") or doc.get("title") or ""),
+            "title_clean": str(case.get("title_clean") or doc.get("title_clean") or ""),
+            "symptom": str(case.get("symptom") or ""),
+            "environment": str(case.get("environment") or ""),
+            "expected": str(case.get("expected") or ""),
+            "actual": str(case.get("actual") or ""),
+            "repro": str(case.get("repro") or ""),
+            "found_date": str(case.get("found_date") or ""),
+            "location": str(case.get("location") or ""),
+            "cause": str(case.get("cause") or ""),
+            "cause_detail": str(case.get("cause_detail") or ""),
+            "solution": str(case.get("solution") or ""),
+            "prevention": str(case.get("prevention") or ""),
+            "root_cause_key": str(case.get("root_cause_key") or ""),
+            "sections_json": json.dumps(_json_list(case.get("sections")), ensure_ascii=False),
+            "boards_json": json.dumps(boards, ensure_ascii=False),
+            "domains_json": json.dumps(domains, ensure_ascii=False),
+            "versions_json": json.dumps(versions, ensure_ascii=False),
+            "quality": float(case.get("quality") or 0),
+            "confidence": float(case.get("confidence") or 0.9),
+            "is_derived": 1 if case.get("is_derived") else 0,
+        }
+
+    def _tags_for_values(self, values: dict[str, Any]) -> dict[str, list[str]]:
+        return {"boards": _json_list(values.get("boards_json")),
+                "domains": _json_list(values.get("domains_json")),
+                "versions": _json_list(values.get("versions_json"))}
+
+    def _step_revision(self, conn, case_id: str, doc_id: str, revision: int, action: str,
+                       before: dict[str, Any] | None, after: dict[str, Any], user_id: int,
+                       *, actor_type: str = "human", source: str = "web", reason: str = "",
+                       request_id: str = "", review_id: str = "", model: str = "",
+                       prompt_version: str = "") -> dict[str, Any] | None:
+        return write_revision(
+            conn, case_id=case_id, doc_id=doc_id, revision=revision, action=action,
+            actor_type=actor_type, actor_id=user_id, actor_name=self._user_name(user_id),
+            source=source, reason=reason, before=before, after=after,
+            request_id=request_id, review_id=review_id, model=model,
+            prompt_version=prompt_version, new_id_fn=lambda: new_id("R", with_time=False))
+
+    def _case_row(self, conn, case_id: str) -> dict[str, Any]:
+        row = conn.execute("SELECT * FROM kb_cases WHERE id=?", (case_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def _case_tags_db(self, conn, case_id: str) -> dict[str, list[str]]:
+        result: dict[str, list[str]] = {"boards": [], "domains": [], "versions": []}
+        kind_map = {"board": "boards", "domain": "domains", "version": "versions"}
+        for row in conn.execute("SELECT kind,value FROM kb_case_tags WHERE case_id=?",
+                                (case_id,)).fetchall():
+            key = kind_map.get(str(row["kind"]))
+            if key:
+                result[key].append(str(row["value"]))
+        return result
+
+    def _replace_case_tags(self, conn, case_id: str, values: dict[str, Any]) -> None:
+        conn.execute("DELETE FROM kb_case_tags WHERE case_id=?", (case_id,))
+        for kind, key in (("board", "boards_json"), ("domain", "domains_json"),
+                          ("version", "versions_json")):
+            for value in _json_list(values.get(key)):
+                conn.execute("INSERT OR IGNORE INTO kb_case_tags(case_id,kind,value) VALUES(?,?,?)",
+                             (case_id, kind, str(value)))
+
+    def _insert_case_row(self, conn, doc_id: str, case: dict[str, Any], doc: dict[str, Any],
+                         ordinal: int, now: str, user_id: int, *, action: str,
+                         actor_type: str, reason: str) -> tuple[str, dict[str, Any]]:
+        values = self._case_values(case, doc, ordinal)
+        case_id = new_id("K", with_time=False)
+        case_vals = {
+            "title": values["title"], "title_clean": values["title_clean"],
+            "symptom": values["symptom"], "environment": values["environment"],
+            "expected": values["expected"], "actual": values["actual"],
+            "repro": values["repro"], "found_date": values["found_date"],
+            "location": values["location"], "cause": values["cause"],
+            "cause_detail": values["cause_detail"], "solution": values["solution"],
+            "prevention": values["prevention"], "root_cause_key": values["root_cause_key"],
+            "sections_json": values["sections_json"], "boards_json": values["boards_json"],
+            "domains_json": values["domains_json"], "versions_json": values["versions_json"],
+            "quality": values["quality"], "confidence": values["confidence"],
+            "is_derived": values["is_derived"], "ordinal": ordinal,
+        }
+        conn.execute(
+            "INSERT INTO kb_cases(id,doc_id,ordinal,is_derived,title,title_clean,symptom,"
+            "environment,expected,actual,repro,found_date,location,cause,cause_detail,solution,"
+            "prevention,root_cause_key,sections_json,boards_json,domains_json,versions_json,"
+            "quality,confidence,status,revision,review_status,created_at,updated_at,updated_by) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',1,'unreviewed',?,?,?)",
+            (case_id, doc_id, case_vals["ordinal"], case_vals["is_derived"],
+             case_vals["title"], case_vals["title_clean"], case_vals["symptom"],
+             case_vals["environment"], case_vals["expected"], case_vals["actual"],
+             case_vals["repro"], case_vals["found_date"], case_vals["location"],
+             case_vals["cause"], case_vals["cause_detail"], case_vals["solution"],
+             case_vals["prevention"], case_vals["root_cause_key"],
+             case_vals["sections_json"], case_vals["boards_json"], case_vals["domains_json"],
+             case_vals["versions_json"], case_vals["quality"], case_vals["confidence"],
+             now, now, user_id))
+        self._replace_case_tags(conn, case_id, values)
+        row = self._case_row(conn, case_id)
+        after = case_snapshot(row, self._case_tags_db(conn, case_id))
+        self._step_revision(conn, case_id, doc_id, 1, action, None, after, user_id,
+                            actor_type=actor_type, source="import" if actor_type == "import" else "web",
+                            reason=reason)
+        version_case = dict(case)
+        version_case["id"] = case_id
+        return case_id, version_case
+
+    def _update_case_row(self, conn, case_id: str, case: dict[str, Any], doc: dict[str, Any],
+                         ordinal: int, now: str, user_id: int, *, action: str = "update",
+                         actor_type: str = "human", source: str = "web", reason: str = "",
+                         review_id: str = "", model: str = "", prompt_version: str = "") -> dict[str, Any]:
+        values = self._case_values(case, doc, ordinal)
+        old = self._case_row(conn, case_id)
+        before = case_snapshot(old, self._case_tags_db(conn, case_id))
+        old_status = str(old.get("status") or "active")
+        new_status = str(case.get("status") or old_status or "active")
+        conn.execute(
+            "UPDATE kb_cases SET title=?,title_clean=?,symptom=?,environment=?,expected=?,"
+            "actual=?,repro=?,found_date=?,location=?,cause=?,cause_detail=?,solution=?,"
+            "prevention=?,root_cause_key=?,sections_json=?,boards_json=?,domains_json=?,"
+            "versions_json=?,quality=?,confidence=?,is_derived=?,ordinal=?,status=?,"
+            "revision=?,review_status='unreviewed',last_review_id=NULL,updated_at=?,updated_by=? "
+            "WHERE id=?",
+            (values["title"], values["title_clean"], values["symptom"], values["environment"],
+             values["expected"], values["actual"], values["repro"], values["found_date"],
+             values["location"], values["cause"], values["cause_detail"], values["solution"],
+             values["prevention"], values["root_cause_key"], values["sections_json"],
+             values["boards_json"], values["domains_json"], values["versions_json"],
+             values["quality"], values["confidence"], values["is_derived"], ordinal,
+             new_status, int(old.get("revision") or 1) + 1, now, user_id, case_id))
+        self._replace_case_tags(conn, case_id, values)
+        after = case_snapshot(self._case_row(conn, case_id), self._case_tags_db(conn, case_id))
+        if not case_diff(before, after):
+            # 仅文档标题等非案例字段变化时，不制造空修订，也不清掉已有审核结论。
+            conn.execute(
+                "UPDATE kb_cases SET revision=?,review_status=?,last_review_id=?,status=?,"
+                "updated_at=?,updated_by=? WHERE id=?",
+                (int(old.get("revision") or 1), old.get("review_status") or "unreviewed",
+                 old.get("last_review_id"), old.get("status") or "active",
+                 old.get("updated_at") or "", old.get("updated_by"), case_id))
+        else:
+            self._step_revision(conn, case_id, str(old.get("doc_id") or ""),
+                                int(old.get("revision") or 1) + 1, action, before, after, user_id,
+                                actor_type=actor_type, source=source, reason=reason,
+                                review_id=review_id, model=model, prompt_version=prompt_version)
+        result = dict(case)
+        result["id"] = case_id
+        return result
+
+    def _insert_document(self, payload: dict[str, Any], user_id: int, *,
+                         action: str = "import", actor_type: str = "import",
+                         reason: str = "导入建库") -> str:
         doc = dict(payload.get("document") or {})
         cases = list(payload.get("cases") or [])
         if not doc or not cases:
@@ -945,7 +1633,7 @@ class KBService:
         domains = _json_list(doc.get("domains"))
         versions = _json_list(doc.get("versions"))
         quality = max([float(c.get("quality") or 0) for c in cases] or [0])
-        payload_json = json.dumps(payload, ensure_ascii=False)
+        version_cases: list[dict[str, Any]] = []
         with self.db.tx() as conn:
             conn.execute(
                 "INSERT INTO kb_documents(id,kb_id,title,title_clean,doc_type,source_type,"
@@ -962,45 +1650,21 @@ class KBService:
                  json.dumps(versions, ensure_ascii=False), "[]", raw, masked, "[]",
                  user_id, now, now))
             for ordinal, case in enumerate(cases, start=1):
-                case_id = new_id("K", with_time=False)
-                case_boards = _json_list(case.get("boards")) or boards
-                case_domains = _json_list(case.get("domains")) or domains
-                case_versions = _json_list(case.get("versions")) or versions
-                conn.execute(
-                    "INSERT INTO kb_cases(id,doc_id,ordinal,is_derived,title,title_clean,"
-                    "symptom,environment,expected,actual,repro,found_date,location,cause,"
-                    "cause_detail,solution,prevention,root_cause_key,sections_json,boards_json,"
-                    "domains_json,versions_json,quality,confidence,status,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (case_id, doc_id, ordinal, 1 if case.get("is_derived") else 0,
-                     str(case.get("title") or doc.get("title") or ""),
-                     str(case.get("title_clean") or doc.get("title_clean") or ""),
-                     str(case.get("symptom") or ""), str(case.get("environment") or ""),
-                     str(case.get("expected") or ""), str(case.get("actual") or ""),
-                     str(case.get("repro") or ""), str(case.get("found_date") or ""),
-                     str(case.get("location") or ""), str(case.get("cause") or ""),
-                     str(case.get("cause_detail") or ""), str(case.get("solution") or ""),
-                     str(case.get("prevention") or ""), str(case.get("root_cause_key") or ""),
-                     json.dumps(_json_list(case.get("sections")), ensure_ascii=False),
-                     json.dumps(case_boards, ensure_ascii=False),
-                     json.dumps(case_domains, ensure_ascii=False),
-                     json.dumps(case_versions, ensure_ascii=False),
-                     float(case.get("quality") or 0), float(case.get("confidence") or 0.9),
-                     "active", now, now))
-                for kind, values in (("board", case_boards), ("domain", case_domains),
-                                     ("version", case_versions)):
-                    for value in values:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO kb_case_tags(case_id,kind,value) VALUES(?,?,?)",
-                            (case_id, kind, str(value)))
+                _, version_case = self._insert_case_row(
+                    conn, doc_id, case, doc, ordinal, now, user_id, action=action,
+                    actor_type=actor_type, reason=reason)
+                version_cases.append(version_case)
+            version_payload = {"document": doc, "cases": version_cases}
             conn.execute(
                 "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
                 "created_at) VALUES(?,?,?,?,?,?,?)",
-                (new_id("V", with_time=False), doc_id, 1, payload_json,
+                (new_id("V", with_time=False), doc_id, 1,
+                 json.dumps(version_payload, ensure_ascii=False),
                  hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
         return doc_id
 
-    def _replace_document(self, doc_id: str, payload: dict[str, Any], user_id: int) -> None:
+    def _replace_document(self, doc_id: str, payload: dict[str, Any], user_id: int, *,
+                          action: str = "update", reason: str = "编辑文档") -> None:
         doc = dict(payload.get("document") or {})
         cases = list(payload.get("cases") or [])
         if not cases:
@@ -1010,16 +1674,50 @@ class KBService:
         version = int((self.db.one(
             "SELECT MAX(version) AS v FROM kb_doc_versions WHERE doc_id=?", (doc_id,)) or {}
             ).get("v") or 0) + 1
-        payload_json = json.dumps(payload, ensure_ascii=False)
         with self.db.tx() as conn:
-            conn.execute(
-                "DELETE FROM kb_case_tags WHERE case_id IN "
-                "(SELECT id FROM kb_cases WHERE doc_id=?)", (doc_id,))
-            conn.execute("DELETE FROM kb_cases WHERE doc_id=?", (doc_id,))
+            old_rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM kb_cases WHERE doc_id=? ORDER BY ordinal,id", (doc_id,)).fetchall()]
+            old_by_id = {str(r["id"]): r for r in old_rows}
+            old_by_ord = {int(r.get("ordinal") or 1): r for r in old_rows
+                          if str(r.get("status") or "") != "deleted"}
+            used: set[str] = set()
+            version_cases: list[dict[str, Any]] = []
+            for ordinal, case in enumerate(cases, start=1):
+                supplied_id = str(case.get("id") or "")
+                target = old_by_id.get(supplied_id) if supplied_id else None
+                if target is None:
+                    target = old_by_ord.get(ordinal)
+                if target and str(target.get("status") or "") != "deleted":
+                    case_id = str(target["id"])
+                    used.add(case_id)
+                    result = self._update_case_row(
+                        conn, case_id, case, doc, ordinal, now, user_id, action=action,
+                        actor_type="human" if action != "import" else "import",
+                        source="restore" if action == "restore" else "web",
+                        reason=reason)
+                    version_cases.append(result)
+                else:
+                    case_id, version_case = self._insert_case_row(
+                        conn, doc_id, case, doc, ordinal, now, user_id, action=action,
+                        actor_type="human" if action != "import" else "import", reason=reason)
+                    version_cases.append(version_case)
+            for old in old_rows:
+                if str(old["id"]) in used or str(old.get("status") or "") == "deleted":
+                    continue
+                before = case_snapshot(old, self._case_tags_db(conn, str(old["id"])))
+                conn.execute("UPDATE kb_cases SET status='deleted',revision=revision+1,"
+                             "updated_at=?,updated_by=? WHERE id=?",
+                             (now, user_id, old["id"]))
+                after = case_snapshot(self._case_row(conn, str(old["id"])),
+                                      self._case_tags_db(conn, str(old["id"])))
+                self._step_revision(conn, str(old["id"]), doc_id,
+                                    int(old.get("revision") or 1) + 1, "delete", before, after,
+                                    user_id, reason=reason)
             conn.execute(
                 "UPDATE kb_documents SET title=?,title_clean=?,status='active',quality=?,"
                 "confidence=?,pii_masked=?,boards_json=?,domains_json=?,versions_json=?,"
-                "raw_text=?,masked_text=?,updated_at=?,deleted_at=NULL WHERE id=?",
+                "source_type=?,source_name=?,source_sha256=?,raw_text=?,masked_text=?,"
+                "updated_at=?,deleted_at=NULL WHERE id=?",
                 (str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
                  max([float(c.get("quality") or 0) for c in cases] or [0]),
                  float(doc.get("confidence") or 0.9),
@@ -1027,43 +1725,15 @@ class KBService:
                  json.dumps(_json_list(doc.get("boards")), ensure_ascii=False),
                  json.dumps(_json_list(doc.get("domains")), ensure_ascii=False),
                  json.dumps(_json_list(doc.get("versions")), ensure_ascii=False),
+                 str(doc.get("source_type") or "paste"), str(doc.get("source_name") or ""),
+                 str(doc.get("source_sha256") or ""),
                  raw, str(doc.get("masked_text") or raw), now, doc_id))
-            for ordinal, case in enumerate(cases, start=1):
-                case_id = new_id("K", with_time=False)
-                case_boards = _json_list(case.get("boards"))
-                case_domains = _json_list(case.get("domains"))
-                case_versions = _json_list(case.get("versions"))
-                conn.execute(
-                    "INSERT INTO kb_cases(id,doc_id,ordinal,is_derived,title,title_clean,"
-                    "symptom,environment,expected,actual,repro,found_date,location,cause,"
-                    "cause_detail,solution,prevention,root_cause_key,sections_json,boards_json,"
-                    "domains_json,versions_json,quality,confidence,status,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (case_id, doc_id, ordinal, 1 if case.get("is_derived") else 0,
-                     str(case.get("title") or doc.get("title") or ""),
-                     str(case.get("title_clean") or doc.get("title_clean") or ""),
-                     str(case.get("symptom") or ""), str(case.get("environment") or ""),
-                     str(case.get("expected") or ""), str(case.get("actual") or ""),
-                     str(case.get("repro") or ""), str(case.get("found_date") or ""),
-                     str(case.get("location") or ""), str(case.get("cause") or ""),
-                     str(case.get("cause_detail") or ""), str(case.get("solution") or ""),
-                     str(case.get("prevention") or ""), str(case.get("root_cause_key") or ""),
-                     json.dumps(_json_list(case.get("sections")), ensure_ascii=False),
-                     json.dumps(case_boards, ensure_ascii=False),
-                     json.dumps(case_domains, ensure_ascii=False),
-                     json.dumps(case_versions, ensure_ascii=False),
-                     float(case.get("quality") or 0), float(case.get("confidence") or 0.9),
-                     "active", now, now))
-                for kind, values in (("board", case_boards), ("domain", case_domains),
-                                     ("version", case_versions)):
-                    for value in values:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO kb_case_tags(case_id,kind,value) VALUES(?,?,?)",
-                            (case_id, kind, str(value)))
+            version_payload = {"document": doc, "cases": version_cases}
             conn.execute(
                 "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
                 "created_at) VALUES(?,?,?,?,?,?,?)",
-                (new_id("V", with_time=False), doc_id, version, payload_json,
+                (new_id("V", with_time=False), doc_id, version,
+                 json.dumps(version_payload, ensure_ascii=False),
                  hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
 
     def _create_draft(self, payload: dict[str, Any], user_id: int, *, job_id: str,
@@ -1075,6 +1745,9 @@ class KBService:
             (draft_id, job_id, user_id, title[:300],
              json.dumps(payload, ensure_ascii=False), confidence,
              json.dumps(warnings, ensure_ascii=False), iso_now()))
+        if (self.reviews.enabled()
+                and bool(self.config.get("kb_review_auto_on_import", True))):
+            self._queue_review("draft", draft_id, stage="import")
         return draft_id
 
     @staticmethod
