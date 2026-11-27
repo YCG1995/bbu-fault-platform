@@ -72,6 +72,7 @@ from .migration import (
 )
 from .mcp_server import MCPService
 from .metrics import collect as collect_metrics, prometheus as prometheus_metrics
+from .system_metrics import snapshot as system_snapshot
 from .model_roles import MODEL_ROLES
 from .netguard import OutboundPolicyError, endpoint_target
 from .notifications import create_notification, notification_public
@@ -2036,6 +2037,7 @@ def h_stats(app: App, req):
         "real_cases_labeled": case_total,
         "model_status": app.gateway.model_status(user["id"]),
         "workers": app.worker.stats(),
+        "system": system_snapshot(app.config.data_dir),
         "recent": [_task_summary(r) for r in recent],
     })
 
@@ -5243,6 +5245,7 @@ def h_system_info(app: App, req):
         },
         "skills": {r["status"]: r["n"] for r in skills},
         "workers": app.worker.stats(),
+        "system": system_snapshot(app.config.data_dir),
         "config": app.config.public(),
         "demo_installed": app.db.setting("demo_installed") == "1",
         "role": user["role"],

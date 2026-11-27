@@ -199,10 +199,21 @@ def main() -> int:
             # 总览必须提供知识库入口，任务记录必须能看见检索操作。
             page.goto(f"http://{host}:{port}/#/dashboard", wait_until="domcontentloaded")
             page.wait_for_selector(".kb-dashboard-card", timeout=15000)
+            page.wait_for_selector(".system-resource-card", timeout=15000)
             dash = page.locator("#view").inner_text()
-            for token in ("故障知识库", "生效文档", "操作记录"):
+            for token in ("故障知识库", "生效文档", "操作记录", "系统资源", "CPU 使用率",
+                          "当前应用内存", "系统内存", "数据盘"):
                 if token not in dash:
                     errors.append(f"总览页缺少：{token}")
+            nav_section = page.evaluate("""() => {
+              const link = document.querySelector('#nav a[href="#/system"]');
+              if (!link) return null;
+              let node = link.previousElementSibling;
+              while (node && !node.classList.contains('nav-section')) node = node.previousElementSibling;
+              return node ? node.textContent.trim() : '';
+            }""")
+            if nav_section != "管理":
+                errors.append(f"系统信息未放入管理分区：{nav_section}")
             page.screenshot(path=str(out / "dashboard-kb.png"), full_page=True)
 
             page.goto(f"http://{host}:{port}/#/tasks?tab=kb", wait_until="domcontentloaded")

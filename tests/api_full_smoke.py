@@ -1267,9 +1267,11 @@ def main() -> int:
         hit("GET /api/audit/export")
         _, system = admin_client.json("GET", "/api/system/info")
         assert system["config"]["planner_enabled"] is True
+        assert "cpu" in system["system"] and "process" in system["system"]
         hit("GET /api/system/info")
         _, stats = admin_client.json("GET", "/api/stats")
         assert stats["today"] >= 1 and "pending_reviews" in stats
+        assert "cpu" in stats["system"] and "memory" in stats["system"]
         hit("GET /api/stats")
         _, notes = admin_client.json("GET", "/api/notifications")
         assert "items" in notes and "unread" in notes
