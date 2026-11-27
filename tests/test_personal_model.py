@@ -89,14 +89,14 @@ class PersonalModelTests(unittest.TestCase):
         self.gateway = AIGateway(self.db, self.cfg, secret_box=self.box)
         _MockHandler.seen.clear()
 
-    def _admin_model(self, provider="mock", name="管理员默认"):
+    def _admin_model(self, provider="mock", name="管理员默认", roles=None):
         now = "2026-11-25T00:00:00Z"
         self.db.execute(
             "INSERT INTO model_configs(name,provider,base_url,api_key,model,roles,max_tokens,"
             "temperature,timeout_sec,enabled,priority,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, provider, f"http://127.0.0.1:{self.port}/v1", self.box.encrypt("admin-key"),
-             "admin-model", json.dumps(["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
+             "admin-model", json.dumps(roles or ["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
 
     def _personal_model(self, uid, model="deepseek-v4-flash", key="personal-secret-key"):
         now = "2026-11-25T00:00:00Z"
@@ -192,6 +192,28 @@ class PersonalModelTests(unittest.TestCase):
         self.assertFalse(status["personal"]["available"])
         self.assertEqual(status["source"], "admin")
         self.assertEqual(self.gateway.choose("default", user_id=self.uid)[0]["source"], "admin")
+
+    def test_non_default_global_model_does_not_make_default_usable(self):
+        self._admin_model(roles=["workshop"])
+        status = self.gateway.model_status(self.uid)
+        self.assertFalse(status["usable"])
+        self.assertFalse(status["default"]["configured"])
+        self.assertFalse(status["default"]["available"])
+        self.assertEqual(self.gateway.choose("default", user_id=self.uid), [])
+        self.assertEqual([m["name"] for m in self.gateway.choose("workshop", user_id=self.uid)],
+                         ["管理员默认"])
+
+    def test_broken_global_key_is_configured_not_usable(self):
+        self._admin_model()
+        self.db.execute(
+            "UPDATE model_configs SET api_key=? WHERE name=?",
+            ("enc:v1:broken", "管理员默认"))
+        status = self.gateway.model_status(self.uid)
+        self.assertFalse(status["usable"])
+        self.assertTrue(status["default"]["configured"])
+        self.assertFalse(status["default"]["available"])
+        self.assertEqual(status["notice"]["code"], "default_model_error")
+        self.assertIn("暂时不可用", status["notice"]["title"])
 
 
 if __name__ == "__main__":

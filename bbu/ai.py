@@ -167,9 +167,11 @@ def fit_prompt_to_context(system: str, user: str, *,
     and the number of prompt characters removed.  The caller still owns budget
     reservation and must use ``max_tokens`` from this result for the request.
     """
-    context = max(1024, int(context_window or 32768))
-    margin = max(0, min(int(margin_tokens or 0), context // 4))
-    output_limit = max(64, int(max_output or 4096))
+    context = int(context_window or 32768)
+    if context <= 0:
+        context = 32768
+    margin = max(0, min(int(margin_tokens or 0), max(0, context - 2)))
+    output_limit = max(1, int(max_output or 4096))
     # DB ``max_tokens`` is a default, while workshop/assistant callers may
     # deliberately request a larger output.  Only an explicitly declared
     # ``extra.capabilities.max_output`` is a hard cap.
@@ -180,13 +182,15 @@ def fit_prompt_to_context(system: str, user: str, *,
         requested = max(1, int(requested_max_tokens))
         cap_by_declared = bool(max_output_declared)
     output_cap = output_limit if cap_by_declared else requested
-    # Never ask for more output than the context can hold after reserving
-    # room for at least a tiny prompt.
-    output = min(requested, output_cap, max(64, context - margin - 64))
-    input_budget = max(64, context - margin - output)
+    # Never ask for more output than the context can hold while leaving at
+    # least one token for the prompt.  Do not floor the window: a declared
+    # 512-token model must remain a 512-token budget.
+    output = min(requested, output_cap, max(1, context - margin - 1))
+    input_budget = max(1, context - margin - output)
     original_system, original_user = str(system or ""), str(user or "")
     current_system = original_system
-    system_budget = max(32, min(input_budget, max(64, input_budget // 3)))
+    system_budget = min(input_budget, max(32, input_budget // 3))
+    system_budget = min(system_budget, input_budget - 1) if input_budget > 1 else 0
     if estimate_tokens(current_system) > system_budget:
         current_system = trim_text_to_tokens(current_system, system_budget)
     user_budget = max(1, input_budget - estimate_tokens(current_system))
@@ -752,11 +756,14 @@ class AIGateway:
         globals_ = self._global_models()
         personal_ok = bool(personal and not personal.get("key_error")
                            and not self._model_skipped(personal))
-        # Any enabled global role can serve as a fallback via the default/empty
-        # role rule; model_status previously looked only at role=default and
-        # reported "no model" when only planner/arbiter/writer was configured.
-        global_rows = [m for m in globals_ if not m.get("key_error")]
-        global_ok = [m for m in global_rows if not self._model_skipped(m)]
+        # ``default`` status must mirror ``choose("default")``: only models
+        # with the default role (or an empty role list) are default-capable.
+        # Keep key-error rows in ``global_rows`` so the notice can distinguish
+        # "未配置" from "已配置但 Key 解密失败".
+        global_rows = [m for m in globals_
+                       if not m.get("roles") or "default" in m.get("roles")]
+        global_ok = [m for m in global_rows
+                     if not m.get("key_error") and not self._model_skipped(m)]
         usable = personal_ok or bool(global_ok)
         url = str(self.config.get("personal_api_key_url") or "")
         notice = None

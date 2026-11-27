@@ -260,7 +260,7 @@ async function openAssignReviewer(task, onDone) {
   let users = [];
   try {
     const data = await api('/api/users?role=reviewer&status=active&page_size=100');
-    users = data.items || [];
+    users = Array.isArray(data) ? data : (data?.items || []);
   } catch (err) { toast(err.message, 'error'); return; }
   const m = modal({
     title: '分配复核专家',
@@ -822,10 +822,11 @@ export async function renderTaskDetail(taskId) {
       let offset = 0;
       for (let page = 0; page < 40; page += 1) {
         const data = await api(`/api/tasks/${encodeURIComponent(task.id)}/evidence?limit=500&offset=${offset}`);
-        total = Number(data.total || 0);
-        items.push(...(data.items || []));
-        if (!data.items?.length || items.length >= total) break;
-        offset += data.items.length;
+        const pageItems = Array.isArray(data) ? data : (data?.items || []);
+        total = Number(data?.total || 0);
+        items.push(...pageItems);
+        if (!pageItems.length || items.length >= total) break;
+        offset += pageItems.length;
       }
       evidencePayload = { items, total, complete: items.length >= total };
 	} catch (err) {
@@ -856,7 +857,7 @@ export async function renderTaskDetail(taskId) {
     if (!host || !task) return;
     try {
       const data = await api(`/api/traces?kind=diagnosis&ref_id=${encodeURIComponent(task.id)}&limit=20`);
-      const items = data.items || [];
+      const items = Array.isArray(data) ? data : (data?.items || []);
       host.innerHTML = items.length ? `<div class="stack">${items.map((item) => `<div class="between" style="gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid #eef2f7">
         <div><a href="#/traces/${encodeURIComponent(item.id)}"><strong>${esc(item.id)}</strong></a>
           <span class="badge info" style="margin-left:6px">第 ${esc(item.attempt_no || 1)} 次</span>

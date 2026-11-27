@@ -27,9 +27,17 @@ export async function renderWorkshop() {
   let models = [];
   let recipes = [];
   try {
-    drafts = (await api('/api/workshop/drafts')).items || [];
-    try { models = ((await api('/api/models')).items || []).filter((m) => m.enabled); } catch { models = []; }
-    try { recipes = (await api('/api/workshop/recipes')).items || []; } catch { recipes = []; }
+    const draftsData = await api('/api/workshop/drafts');
+    drafts = Array.isArray(draftsData) ? draftsData : (draftsData?.items || []);
+    try {
+      const modelsData = await api('/api/models');
+      models = (Array.isArray(modelsData) ? modelsData : (modelsData?.items || []))
+        .filter((m) => m.enabled);
+    } catch { models = []; }
+    try {
+      const recipesData = await api('/api/workshop/recipes');
+      recipes = Array.isArray(recipesData) ? recipesData : (recipesData?.items || []);
+    } catch { recipes = []; }
   } catch (err) {
     view.querySelector('#draft-detail').innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return view;
@@ -203,7 +211,8 @@ export async function renderWorkshop() {
       try {
         const jobId = btn.dataset.job;
         const data = await api(`/api/traces?kind=workshop&ref_id=${encodeURIComponent(jobId)}&limit=5`);
-        const item = (data.items || [])[0];
+        const items = Array.isArray(data) ? data : (data?.items || []);
+        const item = items[0];
         if (!item) { toast('该工坊任务还没有轨迹记录', 'warn'); return; }
         location.hash = `#/traces/${encodeURIComponent(item.id)}`;
       } catch (err) { toast(err.message, 'error'); }
@@ -505,7 +514,7 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
   const suggestions = analysis.rule_candidates?.rule_suggestions || [];
   const samples = analysis.samples || [];
   const counts = quality.counts || {};
-  const cases = caseData.items || [];
+  const cases = Array.isArray(caseData) ? caseData : (caseData?.items || []);
   const isAdmin = state.user?.role === 'admin';
   const published = draft.status === 'published';
   const canPublish = build.ok && build.verified && quality.ok !== false && isAdmin && !published;

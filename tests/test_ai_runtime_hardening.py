@@ -209,6 +209,19 @@ class ContextWindowTests(unittest.TestCase):
                                        max_output_declared=True, margin_tokens=256)
         self.assertEqual(fitted["max_tokens"], 4096)
 
+    def test_small_window_and_zero_margin_never_overrun(self):
+        fitted = fit_prompt_to_context("sys", "user", context_window=512,
+                                       max_output=4096, requested_max_tokens=12000,
+                                       margin_tokens=256)
+        self.assertEqual(fitted["context_window"], 512)
+        self.assertLessEqual(fitted["input_tokens"] + fitted["max_tokens"], 512)
+        self.assertLessEqual(fitted["max_tokens"], 256)
+
+        fitted = fit_prompt_to_context("系统提示词", "用户内容" * 1000,
+                                       context_window=1024, max_output=960,
+                                       requested_max_tokens=960, margin_tokens=0)
+        self.assertLessEqual(fitted["input_tokens"] + fitted["max_tokens"], 1024)
+
     def test_trim_text_never_exceeds_budget(self):
         text = "中" * 2000
         trimmed = trim_text_to_tokens(text, 100)

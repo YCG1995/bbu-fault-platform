@@ -183,10 +183,10 @@ export async function renderTraceDetail(runId) {
         api(`/api/traces/${encodeURIComponent(runId)}/summary`),
         api(`/api/traces/${encodeURIComponent(runId)}/events?limit=1000`),
       ]);
-      summary = s;
-      events = e.items || [];
-      total = e.total || 0;
-      next = e.next || 0;
+      summary = s || null;
+      events = Array.isArray(e) ? e : (e?.items || []);
+      total = e?.total || events.length;
+      next = e?.next || 0;
       render();
     } catch (err) {
       view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div>
@@ -297,7 +297,7 @@ export async function renderTraces() {
   async function load() {
     try {
       const data = await api('/api/traces?limit=100');
-      render(data.items || []);
+      render(Array.isArray(data) ? data : (data?.items || []));
     } catch (err) {
       view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     }
@@ -334,7 +334,7 @@ export async function renderTraceListPanel(panel) {
   panel.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 轨迹索引加载中…</div></div>`;
   try {
     const data = await api('/api/traces?limit=20');
-    const items = data.items || [];
+    const items = Array.isArray(data) ? data : (data?.items || []);
     panel.innerHTML = `<div class="card"><div class="card-head"><h2>执行轨迹</h2>
       <div class="inline" style="margin-left:auto"><a class="btn btn-sm" href="#/traces">查看全部</a></div></div>
       <div class="card-body tight table-wrap"><table class="data"><thead><tr><th>时间</th><th>类型</th><th>对象</th><th>状态</th><th>失败摘要</th></tr></thead><tbody>
