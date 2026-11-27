@@ -57,10 +57,11 @@ class QueryAnalysis:
         }
 
 
-def analyze_query(query: str, filters: dict[str, Any] | None = None) -> QueryAnalysis:
+def analyze_query(query: str, filters: dict[str, Any] | None = None,
+                  synonyms: dict[str, list[str]] | None = None) -> QueryAnalysis:
     raw = str(query or "").strip()
     normalized = normalize_key(raw)
-    expansions = expand_terms(raw)
+    expansions = expand_terms(raw, synonyms)
     terms = make_terms(raw)
     # 同义词只做有限扩展；实体原样保留，避免把型号扩成别的系列。
     for expansion in expansions:
@@ -199,9 +200,10 @@ def _dedupe(hits: list[SearchHit], limit: int) -> list[SearchHit]:
 
 
 def search(index: KBIndex, query: str, *, filters: dict[str, Any] | None = None,
-           limit: int = 10, threshold: float = 0.18) -> dict[str, Any]:
+           limit: int = 10, threshold: float = 0.18,
+           synonyms: dict[str, list[str]] | None = None) -> dict[str, Any]:
     started = time.monotonic()
-    analysis = analyze_query(query, filters)
+    analysis = analyze_query(query, filters, synonyms=synonyms)
     allowed = _allowed(index, analysis)
     limit = max(1, min(12, int(limit or 10)))
     if not analysis.normalized:

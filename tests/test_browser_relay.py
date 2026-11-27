@@ -148,7 +148,7 @@ class BrowserRelayTests(unittest.TestCase):
 
     # ---------- 核心 ----------
     def test_schema_24_has_transport_column(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 26)
+        self.assertEqual(SCHEMA_VERSION, 27)
         with sqlite3.connect(self.db.path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_usage_events)")}
         self.assertIn("transport", columns)

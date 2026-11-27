@@ -393,7 +393,7 @@ export async function renderKb() {
 const KB_TABS = [
   ['overview', '概览'], ['stats', '统计'], ['docs', '文档'], ['import', '导入'],
   ['review', '审核'], ['audit', '变更与审计'], ['terms', '词典'],
-  ['libraries', '知识库'], ['eval', '评测'], ['settings', '设置'],
+  ['libraries', '知识库'], ['dedupe', '近重复'], ['eval', '评测'], ['settings', '设置'],
 ];
 
 function kbLibraryBar(status, kbId = 1) {
@@ -444,6 +444,47 @@ function miniBars(items, key = 'n') {
 
 function kbReloadTab(tab) {
   location.hash = `#/kb/docs?tab=${encodeURIComponent(tab)}&_=${Date.now()}`;
+}
+
+async function openDuplicateWizard(source, target, kbId) {
+  let preview;
+  try { preview = await api(`/api/kb/duplicates/preview?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}&kb=${kbId}`); }
+  catch (err) { toast(err.message, 'error'); return; }
+  const fields = preview.fields || [];
+  const m = modal({
+    title: '近重复合并预览',
+    wide: true,
+    body: `<div class="alert info">${icon('info')}<div>相似度 ${(preview.similarity * 100).toFixed(1)}%；建议 canonical：
+      <strong>${esc(preview.suggested_canonical === preview.source.doc_id ? preview.source.title : preview.target.title)}</strong>。
+      合并只把源案例并入目标，源文档标记 merged，不物理删除。</div></div>
+      <div class="grid grid-2"><div class="card"><div class="card-body"><strong>源：${esc(preview.source.title)}</strong>
+        <div class="tiny muted">${preview.source.case_count} 案例 · ${esc(preview.source.doc_id)}</div></div></div>
+        <div class="card"><div class="card-body"><strong>目标：${esc(preview.target.title)}</strong>
+        <div class="tiny muted">${preview.target.case_count} 案例 · ${esc(preview.target.doc_id)}</div></div></div></div>
+      <div class="kb-subhead">逐字段差异</div><div class="table-wrap"><table class="data"><thead><tr><th>字段</th><th>源</th><th>目标</th></tr></thead><tbody>
+      ${fields.map((f) => `<tr><td>${esc(f.field)}</td><td class="tiny">${esc(JSON.stringify(f.source))}</td><td class="tiny">${esc(JSON.stringify(f.target))}</td></tr>`).join('') || '<tr><td colspan="3" class="empty small">关键字段一致</td></tr>'}
+      </tbody></table></div>
+      <div class="alert warn" style="margin-top:12px">${icon('alert')}<div>合并会迁移 ${preview.source.case_count} 个案例并追加 merge 修订；目标文档已有案例不会被覆盖。</div></div>`,
+    footer: `<button class="btn" data-act="close">取消</button>
+      <button class="btn btn-primary" data-act="merge">${icon('check')} 确认合并</button>`,
+  });
+  m.mask.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'close') { m.close(); return; }
+    if (btn.dataset.act === 'merge') {
+      const reason = prompt('合并原因（写入审计，可留空）') ?? null;
+      if (reason === null) return;
+      const token = `merge-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      setBusy(btn, true, '合并中…');
+      try {
+        const r = await api('/api/kb/duplicates/merge', { method: 'POST', body: {
+          source_doc_id: source, target_doc_id: target, kb_id: kbId, merge_token: token,
+          reason: reason || '近重复合并向导' } });
+        toast(`已合并 ${r.moved_cases || 0} 个案例`, 'ok'); m.close(); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    }
+  });
 }
 
 async function openReviewModal(id) {
@@ -570,7 +611,32 @@ async function batchJobAction(view, el, path, confirmText, busyText) {
   finally { setBusy(el, false); }
 }
 
-function bindKbTabActions(view) {
+function renderImportPreview(boxes, preview, sheetName = "") {
+  if (!boxes || !preview) return;
+  const targets = [['', '— 忽略 —'], ['title', '标题'], ['symptom', '故障现象'], ['cause', '原因'],
+    ['solution', '解决方案'], ['answer', '整段答案'], ['board', '板卡'], ['domain', '领域'],
+    ['version', '版本'], ['tags', '标签']];
+  const sheets = preview.sheets || [];
+  const sheet = sheets.find((x) => x.sheet === sheetName) || sheets[0] || null;
+  const headers = sheet ? sheet.headers || [] : preview.headers || [];
+  const guessed = sheet ? sheet.guessed_mapping || {} : preview.guessed_mapping || {};
+  const rows = sheet ? sheet.rows || [] : preview.rows || [];
+  const sheetSelect = sheets.length > 1
+    ? `<div class="form-row"><label>工作表</label><select class="input" id="kb-import-sheet" data-change="preview-sheet">
+        ${sheets.map((x) => `<option value="${esc(x.sheet)}" ${x.sheet === (sheet?.sheet || '') ? 'selected' : ''}>${esc(x.sheet)}</option>`).join('')}
+      </select><div class="tiny muted">切换工作表会重新猜测列映射；确认后再开始导入。</div></div>`
+    : '';
+  boxes.innerHTML = `${sheetSelect}
+    <div class="kb-subhead">列映射</div>
+    <div class="kb-map-grid">${headers.map((h) => `<label class="kb-map-field"><span class="kb-map-label" title="${esc(h)}">${esc(h)}</span>
+      <select class="input kb-map-select" data-header="${esc(h)}">${targets.map(([v, label]) => `<option value="${v}" ${guessed[h] === v ? 'selected' : ''}>${label}</option>`).join('')}</select></label>`).join('')}</div>
+    <div class="kb-subhead">前 20 行脱敏预览</div>
+    <div class="table-wrap"><table class="data"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>
+      ${rows.slice(0, 5).map((row) => `<tr>${headers.map((h) => `<td class="tiny">${esc(row[h] || '')}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="99" class="empty small">没有样本行</td></tr>'}
+    </tbody></table></div><div class="tiny muted">编码 ${esc(preview.encoding || preview.format)} · 分隔符 ${esc(preview.delimiter || 'sheet')}</div>`;
+}
+
+function bindKbTabActions(view, kbId = 1) {
   bindActions(view, {
     'review-view': (el) => openReviewModal(el.dataset.id),
     'review-decision': (el) => openReviewModal(el.dataset.id),
@@ -744,7 +810,98 @@ function bindKbTabActions(view) {
       try { await api(`/api/kb/drafts/${encodeURIComponent(el.dataset.id)}/reject`, { method: 'POST', body: { reason } }); toast('已退回', 'ok'); renderKbDocs(); }
       catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
+    'term-save': async (el) => {
+      const term = view.querySelector('#kb-term-term')?.value.trim() || '';
+      if (!term) { toast('请填写词条', 'error'); return; }
+      const id = view.querySelector('#kb-term-id')?.value || '';
+      const payload = {
+        term,
+        aliases: (view.querySelector('#kb-term-aliases')?.value || '').split(',').map((x) => x.trim()).filter(Boolean),
+        kind: view.querySelector('#kb-term-kind')?.value || 'synonym',
+        weight: Number(view.querySelector('#kb-term-weight')?.value || 1),
+        enabled: !!view.querySelector('#kb-term-enabled')?.checked,
+        kb_id: kbId,
+      };
+      setBusy(el, true, '保存中…');
+      try {
+        await api(id ? `/api/kb/terms/${encodeURIComponent(id)}` : '/api/kb/terms', { method: id ? 'PUT' : 'POST', body: payload });
+        toast('词条已保存，检索立即生效', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'term-reset': () => {
+      for (const id of ['#kb-term-id', '#kb-term-term', '#kb-term-aliases']) { const el = view.querySelector(id); if (el) el.value = ''; }
+      const w = view.querySelector('#kb-term-weight'); if (w) w.value = '1';
+    },
+    'term-edit': (el) => {
+      const setv = (id, value) => { const x = view.querySelector(id); if (x) x.value = value; };
+      setv('#kb-term-id', el.dataset.id || ''); setv('#kb-term-term', el.dataset.term || '');
+      setv('#kb-term-aliases', el.dataset.aliases || ''); setv('#kb-term-weight', el.dataset.weight || '1');
+      setv('#kb-term-kind', el.dataset.kind || 'synonym');
+      const enabled = view.querySelector('#kb-term-enabled'); if (enabled) enabled.checked = el.dataset.enabled === '1';
+      view.querySelector('#kb-term-term')?.focus();
+    },
+    'term-delete': async (el) => {
+      if (!(await confirmDialog('删除该词条？删除后不会再参与查询扩展。'))) return;
+      setBusy(el, true, '删除中…');
+      try { await api(`/api/kb/terms/${encodeURIComponent(el.dataset.id)}?kb=${kbId}`, { method: 'DELETE' }); toast('词条已删除', 'ok'); renderKbDocs(); }
+      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'term-import': async (el) => {
+      const file = view.querySelector('#kb-term-file')?.files?.[0];
+      if (!file) { toast('请选择词典 CSV', 'error'); return; }
+      const fd = new FormData(); fd.append('file', file, file.name); fd.append('kb_id', String(kbId));
+      setBusy(el, true, '导入中…');
+      try { const r = await api('/api/kb/terms/import', { method: 'POST', body: fd }); toast(`已导入 ${r.imported || 0} 条`, 'ok'); renderKbDocs(); }
+      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'eval-import': async (el) => {
+      const file = view.querySelector('#kb-eval-file')?.files?.[0];
+      const name = view.querySelector('#kb-eval-name')?.value.trim() || '';
+      if (!file) { toast('请选择评测集文件', 'error'); return; }
+      if (!name) { toast('请填写评测集名称', 'error'); return; }
+      const fd = new FormData(); fd.append('file', file, file.name); fd.append('name', name);
+      setBusy(el, true, '导入中…');
+      try { const r = await api('/api/kb/eval/sets', { method: 'POST', body: fd }); toast(`已导入 ${r.imported || 0} 条查询`, 'ok'); renderKbDocs(); }
+      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'eval-run': async (el) => {
+      setBusy(el, true, '运行评测中…');
+      try {
+        const r = await api(`/api/kb/eval/sets/${encodeURIComponent(el.dataset.id)}/run`, { method: 'POST', body: { kb_id: kbId, top_k: 10 }, timeoutMs: 300000 });
+        toast(`评测完成：R@5 ${(Number(r.summary?.['recall@5'] || 0) * 100).toFixed(1)}%`, 'ok');
+        location.hash = `#/kb/docs?tab=eval&run=${encodeURIComponent(r.id)}&kb=${kbId}`;
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'eval-view': async (el) => {
+      try {
+        const set = await api(`/api/kb/eval/sets/${encodeURIComponent(el.dataset.id)}`);
+        const run = (set.runs || [])[0];
+        if (!run) { toast('该评测集还没有运行记录', 'warn'); return; }
+        location.hash = `#/kb/docs?tab=eval&run=${encodeURIComponent(run.id)}&kb=${kbId}`;
+      } catch (err) { toast(err.message, 'error'); }
+    },
+    'eval-delete': async (el) => {
+      if (!(await confirmDialog('删除该评测集及其运行记录？只删除评测数据，不影响知识库。'))) return;
+      setBusy(el, true, '删除中…');
+      try { await api(`/api/kb/eval/sets/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' }); toast('已删除', 'ok'); renderKbDocs(); }
+      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'dup-preview': (el) => openDuplicateWizard(el.dataset.source, el.dataset.target, kbId),
+    'auto-publish': async (el) => {
+      if (!(await confirmDialog('立即自动发布该草稿？将写入 kb.auto_publish 审计。'))) return;
+      setBusy(el, true, '发布中…');
+      try { await api(`/api/kb/reviews/${encodeURIComponent(el.dataset.id)}/auto-publish`, { method: 'POST', body: {} }); toast('已自动发布', 'ok'); renderKbDocs(); }
+      catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
   });
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function importJobProgress(job) {
@@ -809,7 +966,10 @@ async function renderKbImport(view, header, status, kbId = 1) {
           <form id="kb-import-form">
             <div class="form-row"><label>选择文件（可多选）</label>
               <input class="input" type="file" name="files" multiple accept=".csv,.tsv,.txt,.md,.markdown,.log,.html,.htm,.docx,.xlsx,.pdf,.png,.jpg,.jpeg,.webp" required>
-              <div class="tiny muted">CSV/XLSX 按问题、答案列解析；DOCX/PDF 抽取文本；图片/扫描 PDF 进入人工转写队列。同一条答案里的多个【原因分析】会拆成多个派生案例。</div></div>
+              <div class="tiny muted">CSV/XLSX 先预览表头再映射列；DOCX/PDF 抽取文本；图片/扫描 PDF 进入人工转写队列。同一条答案里的多个【原因分析】会拆成多个派生案例。</div>
+              <div class="inline" style="margin-top:8px"><button class="btn btn-sm" type="button" data-act="preview-mapping">${icon('search')} 解析表头 / 列映射</button>
+                <span class="tiny muted">仅 CSV / XLSX；多文件时对第一个文件生效</span></div>
+              <div id="kb-import-preview" style="margin-top:10px"></div></div>
             ${state.user?.role === 'admin' ? `<div class="form-row"><label>入库方式</label>
               <select class="input" name="mode"><option value="direct">直接生效（管理员）</option>
               <option value="review">先进入审核队列</option></select></div>` : `<input type="hidden" name="mode" value="review">`}
@@ -853,6 +1013,14 @@ async function renderKbImport(view, header, status, kbId = 1) {
       if (!files || !files.length) { toast('请选择文件', 'error'); return; }
       const fd = new FormData();
       for (const f of files) fd.append('files', f, f.name);
+      // 把预览页的列映射随任务保存；没有映射则沿用旧自动猜测。
+      const map = {};
+      view.querySelectorAll('.kb-map-select').forEach((sel) => {
+        if (sel.value) map[sel.dataset.header] = sel.value;
+      });
+      if (Object.keys(map).length) fd.append('mapping', JSON.stringify(map));
+      const sheet = view.querySelector('#kb-import-sheet')?.value || '';
+      if (sheet) fd.append('sheet', sheet);
       fd.append('mode', form.querySelector('[name="mode"]')?.value || 'review');
       fd.append('kb_id', form.querySelector('[name="kb_id"]')?.value || '1');
       setBusy(el, true, '上传中…');
@@ -865,6 +1033,24 @@ async function renderKbImport(view, header, status, kbId = 1) {
       } catch (err) { toast(err.message, 'error'); }
       finally { setBusy(el, false); }
     },
+    'preview-mapping': async (el) => {
+      const form = view.querySelector('#kb-import-form');
+      const file = form.querySelector('input[type="file"]')?.files?.[0];
+      if (!file) { toast('请选择一个 CSV 或 XLSX 文件', 'error'); return; }
+      if (!/\.(csv|tsv|xlsx)$/i.test(file.name)) { toast('列映射预览仅支持 CSV / XLSX', 'warn'); return; }
+      const fd = new FormData(); fd.append('file', file, file.name);
+      setBusy(el, true, '解析中…');
+      try {
+        const { preview } = await api('/api/kb/import/preview', { method: 'POST', body: fd });
+        view._kbImportPreview = preview;
+        renderImportPreview(view.querySelector('#kb-import-preview'), preview);
+        toast('表头已解析；确认映射后开始导入', 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      finally { setBusy(el, false); }
+    },
+    'preview-sheet': (el) => {
+      renderImportPreview(view.querySelector('#kb-import-preview'), view._kbImportPreview, el.value);
+    },
     sample: async (el) => {
       if (!(await confirmDialog('载入 20 条脱敏示例案例？'))) return;
       setBusy(el, true, '载入中…');
@@ -876,7 +1062,7 @@ async function renderKbImport(view, header, status, kbId = 1) {
 
 async function renderKbTab(tab, view, status, facets, kbId = 1) {
   const admin = state.user?.role === 'admin';
-  bindKbTabActions(view);
+  bindKbTabActions(view, kbId);
   view.addEventListener('change', (e) => {
     if (e.target.id === 'kb-library-switch') {
       location.hash = `#/kb/docs?tab=overview&kb=${encodeURIComponent(e.target.value)}`;
@@ -1028,6 +1214,8 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
     let reviews = { items: [] };
     try { drafts = await api(`/api/kb/drafts?kb=${kbId}`); } catch { /* optional */ }
     try { reviews = await api(`/api/kb/reviews?status=pending&limit=100&kb=${kbId}`); } catch { /* optional */ }
+    let autoPublish = { enabled: false, dry_run: true, items: [], would_publish: 0 };
+    try { autoPublish = await api('/api/kb/reviews/auto-publish/dry-run?limit=40'); } catch { /* optional */ }
     const reviewTabs = [
       ['drafts', `待入库草稿 ${drafts.total ?? drafts.items?.length ?? 0}`],
       ['reviews', `AI / 人工审核 ${reviews.total ?? reviews.items?.length ?? 0}`],
@@ -1066,7 +1254,15 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
           <div class="kb-tabbar" role="tablist">${reviewTabs.map(([key, label]) =>
             `<a class="kb-tab ${key === activeView ? 'active' : ''}" href="#/kb/docs?tab=review&view=${key}${kbSuffix}" role="tab">${label}</a>`).join('')}</div>
           <div class="table-wrap" style="margin-top:10px">${panels[activeView]}</div>
-        </div></div>`;
+        </div></div>
+      <div class="card" style="margin-top:14px"><div class="card-head"><h2>AI 自动发布 dry-run</h2>
+        <span class="sub">总开关 ${autoPublish.enabled ? '已开启' : '关闭'}；dry-run ${autoPublish.dry_run ? '开启' : '关闭'}；策略 ${esc(autoPublish.policy_id || 'review-auto-v1')}</span>
+        <span class="badge ${autoPublish.would_publish ? 'warn' : 'info'}" style="margin-left:auto">会发布 ${autoPublish.would_publish || 0} / 评估 ${autoPublish.evaluated || 0}</span></div>
+        <div class="card-body"><div class="table-wrap"><table class="data"><thead><tr><th>草稿</th><th>分数</th><th>置信度</th><th>结论</th><th>原因</th><th></th></tr></thead><tbody>
+          ${(autoPublish.items || []).slice(0, 30).map((x) => `<tr><td class="mono tiny">${esc(x.draft_id || '')}</td><td>${Math.round(Number(x.score || 0))}</td><td>${(Number(x.confidence || 0) * 100).toFixed(0)}%</td>
+            <td><span class="badge ${x.eligible ? 'ok' : 'warn'}">${x.eligible ? '会发布' : '不发布'}</span></td><td class="tiny">${esc((x.reasons || []).join('；') || '满足全部策略')}</td>
+            <td>${x.eligible && autoPublish.enabled && !autoPublish.dry_run ? `<button class="btn btn-sm" data-act="auto-publish" data-id="${esc(x.review_id)}">立即自动发布</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty small">没有可评估的已完成审核</td></tr>'}
+        </tbody></table></div><div class="tiny muted">自动发布只针对 draft；上线前建议保持 dry-run 一周，观察误放率。关闭总开关后全部人工终审。</div></div></div>`;
     const checks = view.querySelectorAll('.kb-draft-check,.kb-review-check');
     view.querySelector('#kb-draft-all')?.addEventListener('change', (e) => {
       view.querySelectorAll('.kb-draft-check').forEach((x) => { x.checked = e.target.checked; });
@@ -1101,19 +1297,117 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
     return;
   }
   if (tab === 'terms') {
-    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>术语与词典</h2><span class="sub">当前从已入库标签抽取；同义词/停用词编辑将在后续版本开放</span></div>
-      <div class="card-body"><div class="kb-subhead">板卡</div><div class="kb-matrix">${(facets.boards || []).map((x) => `<span class="badge info">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div>
-      <div class="kb-subhead">领域</div><div class="kb-matrix">${(facets.domains || []).map((x) => `<span class="badge">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div></div></div>`;
+    let terms = { items: [], effective: 0 };
+    try { terms = await api(`/api/kb/terms?kb=${kbId}`); }
+    catch (err) { view.innerHTML = `${header}<div class="alert danger">${esc(err.message)}</div>`; return; }
+    view.innerHTML = `${header}
+      <div class="grid grid-2">
+        <div class="card"><div class="card-head"><h2>同义词词典</h2><span class="sub">保存后立即参与检索；不重建倒排。${terms.effective} 条生效</span>
+          <a class="btn btn-sm" style="margin-left:auto" href="/api/kb/terms/export?kb=${kbId}">${icon('download')} 导出 CSV</a></div>
+          <div class="card-body tight table-wrap"><table class="data"><thead><tr><th>词条</th><th>同义词</th><th>权重</th><th>状态</th><th></th></tr></thead><tbody>
+            ${(terms.items || []).map((x) => `<tr><td><strong>${esc(x.term)}</strong><div class="tiny muted">${esc(x.kind)}</div></td>
+              <td class="tiny">${esc((x.aliases || []).join('、') || '—')}</td><td>${Number(x.weight || 1).toFixed(1)}</td>
+              <td><span class="badge ${x.enabled ? 'ok' : 'warn'}">${x.enabled ? '启用' : '停用'}</span></td>
+              <td><button class="btn btn-sm" data-act="term-edit" data-id="${x.id}" data-term="${esc(x.term)}" data-aliases="${esc((x.aliases || []).join(','))}" data-weight="${x.weight}" data-enabled="${x.enabled ? 1 : 0}" data-kind="${esc(x.kind)}">编辑</button>
+                <button class="btn btn-sm btn-danger" data-act="term-delete" data-id="${x.id}">删除</button></td></tr>`).join('') || '<tr><td colspan="5" class="empty small">暂无自定义词条</td></tr>'}
+          </tbody></table></div>
+          <div class="card-body" style="border-top:1px solid var(--line)">
+            <div class="form-row"><label>导入词典 CSV（term,aliases,kind,weight,enabled）</label><input class="input" type="file" id="kb-term-file" accept=".csv"></div>
+            <button class="btn btn-sm" data-act="term-import">${icon('upload')} 导入</button>
+          </div>
+        </div>
+        <div class="card"><div class="card-head"><h2>新增 / 编辑词条</h2><span class="sub">管理员可写；保存时拒绝成环、空别名和同名别名</span></div>
+          <div class="card-body"><input type="hidden" id="kb-term-id">
+            <div class="form-row"><label>词条</label><input class="input" id="kb-term-term" placeholder="如 看门狗"></div>
+            <div class="form-row"><label>同义词（逗号分隔，最多 10 个）</label><input class="input" id="kb-term-aliases" placeholder="watchdog, wdg, 狗复位"></div>
+            <div class="inline"><div class="form-row" style="flex:1"><label>类型</label><select class="input" id="kb-term-kind"><option value="synonym">同义词</option><option value="stopword">停用词</option><option value="domain">领域词</option></select></div>
+              <div class="form-row" style="flex:0 0 110px"><label>权重</label><input class="input" id="kb-term-weight" type="number" min="0.1" max="10" step="0.1" value="1"></div>
+              <label class="check" style="align-self:end;margin-bottom:10px"><input type="checkbox" id="kb-term-enabled" checked> 启用</label></div>
+            <div class="inline" style="margin-top:10px"><button class="btn btn-primary" data-act="term-save">${icon('check')} 保存词条</button>
+              <button class="btn" data-act="term-reset">清空</button></div>
+            <div class="kb-subhead">入库标签</div><div class="kb-matrix">${(facets.boards || []).map((x) => `<span class="badge info">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div>
+            <div class="kb-subhead">领域</div><div class="kb-matrix">${(facets.domains || []).map((x) => `<span class="badge">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div>
+          </div>
+        </div>
+      </div>`;
     return;
   }
   if (tab === 'eval') {
-    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>评测</h2><span class="sub">示例集结果；真实 2268 条语料与 300 条专家金标准仍待验收</span></div>
-      <div class="card-body"><div class="grid grid-4 kb-stats">
-        <div class="card stat"><div><div class="stat-val">12/12</div><div class="stat-label">示例 Top1/Top5</div><div class="stat-note">20 文档 / 21 案例</div></div></div>
-        <div class="card stat"><div><div class="stat-val">3.5 ms</div><div class="stat-label">平均检索</div><div class="stat-note">P95 3.7 ms</div></div></div>
-        <div class="card stat"><div><div class="stat-val">2/2</div><div class="stat-label">库外拒答</div><div class="stat-note">不生成推测根因</div></div></div>
-        <div class="card stat"><div><div class="stat-val">${stats.coverage.duplicate_candidates.length}</div><div class="stat-label">近重复候选</div><div class="stat-note">标题归一化后重复</div></div></div>
-      </div><div class="alert info" style="margin-top:12px">${icon('info')}<div>评测台、Recall/MRR 页面和专家金标准导入在后续版本开放；当前报告见 docs/故障知识库评测报告-1.30.0.md。</div></div></div></div>`;
+    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    const runId = params.get('run') || '';
+    let sets = { items: [] };
+    let run = null;
+    try { sets = await api('/api/kb/eval/sets'); } catch (err) { view.innerHTML = `${header}<div class="alert danger">${esc(err.message)}</div>`; return; }
+    if (runId) { try { run = await api(`/api/kb/eval/runs/${encodeURIComponent(runId)}`); } catch (err) { toast(err.message, 'error'); } }
+    const metric = (key) => run ? Number(run.metrics?.summary?.[key] || 0) : 0;
+    const pct = (key) => `${(metric(key) * 100).toFixed(1)}%`;
+    const f = (key, digits = 3) => Number(metric(key)).toFixed(digits);
+    const catRows = run ? Object.entries(run.metrics?.by_category || {}) : [];
+    const failures = run?.failures || [];
+    view.innerHTML = `${header}
+      <div class="grid grid-2">
+        <div class="card"><div class="card-head"><h2>评测集</h2><span class="sub">300 条金标准须专家标注；系统不生成 qrels</span></div>
+          <div class="card-body tight"><div class="kb-job-list">
+            ${(sets.items || []).map((x) => `<div class="kb-job-row" style="flex-wrap:wrap">
+              <span style="font-weight:600">${esc(x.name)}</span>
+              <span class="badge info">${x.query_count || 0} 条</span>
+              <span class="tiny muted">${esc(x.description || '')}</span>
+              ${x.last_run ? `<span class="badge ${x.last_run.status === 'success' ? 'ok' : 'warn'}">${esc(x.last_run.status)}</span>` : ''}
+              <span style="margin-left:auto" class="inline">
+                <button class="btn btn-sm btn-primary" data-act="eval-run" data-id="${esc(x.id)}">${icon('play')} 运行</button>
+                <button class="btn btn-sm" data-act="eval-view" data-id="${esc(x.id)}">查看</button>
+                <button class="btn btn-sm btn-danger" data-act="eval-delete" data-id="${esc(x.id)}">删除</button>
+              </span>
+              ${x.last_summary ? `<div class="tiny muted" style="flex-basis:100%">R@5 ${(Number(x.last_summary['recall@5'] || 0) * 100).toFixed(1)}% · MRR ${Number(x.last_summary['mrr@10'] || 0).toFixed(3)} · nDCG ${Number(x.last_summary['ndcg@10'] || 0).toFixed(3)}</div>` : ''}
+            </div>`).join('') || '<div class="empty small">还没有评测集；先导入专家标注 JSONL/CSV。</div>'}
+          </div>
+          <div class="card-body" style="border-top:1px solid var(--line)">
+            <div class="form-row"><label>导入评测集（JSONL / CSV）</label><input class="input" type="file" id="kb-eval-file" accept=".jsonl,.json,.csv"></div>
+            <div class="inline"><input class="input" id="kb-eval-name" placeholder="评测集名称，如 300条金标准-v1" style="max-width:280px">
+              <button class="btn btn-sm" data-act="eval-import">${icon('upload')} 导入</button></div>
+            <div class="tiny muted" style="margin-top:8px">CSV 列：query,qrels,category,split；qrels 用逗号分隔案例 ID。四类各 75 条。</div>
+          </div>
+        </div>
+        <div class="card"><div class="card-head"><h2>运行指标</h2><span class="sub">${run ? esc(run.metrics?.set_name || run.set_id) : '选择评测集运行'}</span></div>
+          <div class="card-body">
+            ${run ? `<div class="grid grid-4 kb-stats">
+              <div class="card stat"><div><div class="stat-val">${pct('recall@5')}</div><div class="stat-label">Recall@5</div><div class="stat-note">CI ${(Number((run.metrics?.summary?.['recall@5_ci95'] || {}).lower || 0) * 100).toFixed(1)}–${(Number((run.metrics?.summary?.['recall@5_ci95'] || {}).upper || 0) * 100).toFixed(1)}%</div></div></div>
+              <div class="card stat"><div><div class="stat-val">${f('mrr@10')}</div><div class="stat-label">MRR@10</div><div class="stat-note">${metric('graded_queries')} 条有标注</div></div></div>
+              <div class="card stat"><div><div class="stat-val">${f('ndcg@10')}</div><div class="stat-label">nDCG@10</div><div class="stat-note">二值相关</div></div></div>
+              <div class="card stat"><div><div class="stat-val">${pct('no_answer_accuracy')}</div><div class="stat-label">库外拒答</div><div class="stat-note">${metric('no_answer_queries')} 条无答案</div></div></div>
+            </div>
+            <div class="inline" style="margin:10px 0"><span class="badge ${run.metrics?.comparable === false ? 'warn' : 'ok'}">${run.metrics?.comparable === false ? '索引已变化，不可比' : '索引冻结可比'}</span>
+              <span class="tiny muted mono">checksum ${esc((run.metrics?.index_checksum || '').slice(0, 12))}</span>
+              <a class="btn btn-sm" style="margin-left:auto" href="/api/kb/eval/runs/${encodeURIComponent(run.id)}/export?format=csv">CSV</a>
+              <a class="btn btn-sm" href="/api/kb/eval/runs/${encodeURIComponent(run.id)}/export?format=md">Markdown</a></div>
+            ${run.metrics?.warnings?.length ? `<div class="alert warn">${run.metrics.warnings.map(esc).join('；')}</div>` : ''}
+            <div class="table-wrap"><table class="data"><thead><tr><th>类别</th><th>查询</th><th>R@1</th><th>R@5</th><th>MRR</th><th>nDCG</th></tr></thead><tbody>
+              ${catRows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.queries}</td>${Number(v.graded_queries) ? `<td>${(v['recall@1'] * 100).toFixed(1)}%</td><td>${(v['recall@5'] * 100).toFixed(1)}%</td><td>${Number(v['mrr@10']).toFixed(3)}</td><td>${Number(v['ndcg@10']).toFixed(3)}</td>` : '<td>—</td><td>—</td><td>—</td><td>—</td>'}</tr>`).join('') || '<tr><td colspan="6" class="empty small">暂无分类指标</td></tr>'}
+            </tbody></table></div>
+            <div class="kb-subhead">失败样例（${failures.length}）</div>
+            <div class="table-wrap"><table class="data"><thead><tr><th>查询</th><th>类别</th><th>原因</th><th>Top10</th></tr></thead><tbody>
+              ${failures.slice(0, 30).map((x) => `<tr><td>${esc(x.query)}</td><td>${esc(x.category || '—')}</td><td class="tiny">${esc(x.reason)}</td><td class="tiny mono">${esc((x.top_case_ids || []).join('、'))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty small">没有失败样例</td></tr>'}
+            </tbody></table></div>` : `<div class="empty small">导入评测集后点击“运行”，这里会显示 Recall/MRR/nDCG、分类别指标和失败样例。空索引会安全跳过，不会除零。</div>`}
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+  if (tab === 'dedupe') {
+    let dup = { items: [], total: 0, threshold: 0.82 };
+    try { dup = await api(`/api/kb/duplicates?kb=${kbId}&limit=80`); }
+    catch (err) { view.innerHTML = `${header}<div class="alert danger">${esc(err.message)}</div>`; return; }
+    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>近重复合并向导</h2><span class="sub">字符 3-gram + Jaccard；只“并入”不物理删除，先预览再执行</span>
+      <span class="badge info" style="margin-left:auto">阈值 ${(dup.threshold * 100).toFixed(0)}% · ${dup.total} 对 · ${dup.documents || 0} 文档</span></div>
+      <div class="card-body tight"><div class="kb-job-list">
+        ${(dup.items || []).map((x) => `<div class="kb-job-row" style="flex-wrap:wrap">
+          <div style="flex-basis:100%"><strong>${esc(x.source.title)}</strong> <span class="badge warn">相似 ${(x.similarity * 100).toFixed(1)}%</span> <span class="tiny muted">→ ${esc(x.target.title)}</span></div>
+          <div class="tiny muted" style="flex-basis:100%">源 ${x.source.case_count} 案例 · 目标 ${x.target.case_count} 案例 · 建议 canonical ${esc(x.suggested_target)}</div>
+          <div class="inline" style="margin-top:6px">
+            <button class="btn btn-sm" data-act="dup-preview" data-source="${esc(x.suggested_source)}" data-target="${esc(x.suggested_target)}">${icon('search')} 预览逐字段差异</button>
+          </div>
+        </div>`).join('') || '<div class="empty small">当前没有超过阈值的近重复候选。</div>'}
+      </div></div></div>`;
     return;
   }
   if (tab === 'settings') {
@@ -1166,6 +1460,7 @@ export async function renderKbDocs() {
   }
   const items = docs.items || [];
   const pages = Math.max(1, Math.ceil(Number(docs.total || items.length) / 50));
+  const kbParam = Number(kbId) !== 1 ? `&kb=${Number(kbId)}` : '';
   view.innerHTML = `
     ${kbTabNav('docs', kbId)}
     <div class="grid grid-4 kb-stats">
@@ -1184,12 +1479,14 @@ export async function renderKbDocs() {
           <select class="input" id="kb-doc-status"><option value="all">全部状态</option>
             ${Object.entries(STATUS_LABEL).map(([k, v]) => `<option value="${k}" ${docStatus === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
           <input class="input" id="kb-doc-q" placeholder="搜索标题/正文" value="${esc(docQ)}" style="max-width:200px">
-          <button class="btn btn-sm" data-act="filter-docs">筛选</button></div>
+          <button class="btn btn-sm" data-act="filter-docs">筛选</button>
+          <button class="btn btn-sm" data-act="export-report">${icon('download')} 导出报告</button></div>
       </div>
       <div class="card-body tight table-wrap">
-        ${items.length ? `<table class="data responsive"><thead><tr><th>标题</th><th>来源</th><th>板卡/领域</th>
+        ${items.length ? `<table class="data responsive"><thead><tr><th style="width:36px"><input type="checkbox" id="kb-doc-all" title="全选本页"></th><th>标题</th><th>来源</th><th>板卡/领域</th>
           <th>案例</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
           ${items.map((d) => `<tr class="row-hover" data-href="#/kb/docs/${encodeURIComponent(d.id)}">
+            <td><input type="checkbox" class="kb-doc-check" value="${esc(d.id)}" title="选中导出"></td>
             <td data-label="标题"><div style="font-weight:600">${esc(d.title)}</div>
               <div class="tiny muted mono">${esc(d.id)}</div></td>
             <td data-label="来源">${esc(d.source_type || '—')}<div class="tiny muted">${esc(d.source_name || '')}</div></td>
@@ -1209,7 +1506,6 @@ export async function renderKbDocs() {
       <strong>数据纪律：</strong>原始文本只对管理员开放；普通用户和模型证据只使用脱敏文本。删除是软删除，版本仍保留用于审计。
     </div></div>`;
 
-  const kbParam = Number(kbId) !== 1 ? `&kb=${Number(kbId)}` : '';
   const goDocs = (nextPage = page) => {
     location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&page=${nextPage}${kbParam}`;
   };
@@ -1220,10 +1516,27 @@ export async function renderKbDocs() {
       location.hash = `#/kb/docs?tab=docs&status=${encodeURIComponent(statusVal)}&q=${encodeURIComponent(q)}&page=1&kb=${Number(kbId)}`;
     },
     'page-docs': (el) => goDocs(Number(el.dataset.page || 1)),
+    'export-report': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-doc-check:checked')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选要导出的文档（可全选本页）', 'error'); return; }
+      setBusy(el, true, '生成报告中…');
+      try {
+        const blob = await api('/api/kb/export/report', { method: 'POST', timeoutMs: 300000,
+          body: { kb_id: kbId, doc_ids: ids, formats: ['html', 'md', 'csv', 'docx'], reveal: false,
+                  title: `知识库导出-${ids.length}个文档` } });
+        saveBlob(blob, `kb-report-${Date.now()}.zip`);
+        toast('报告已生成（含 HTML/Word/CSV/Markdown）', 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      finally { setBusy(el, false); }
+    },
+    'doc-select-all': () => {},
+  });
+  view.querySelector('#kb-doc-all')?.addEventListener('change', (e) => {
+    view.querySelectorAll('.kb-doc-check').forEach((x) => { x.checked = e.target.checked; });
   });
   view.querySelectorAll('tr[data-href]').forEach((tr) => {
     tr.addEventListener('click', (event) => {
-      if (event.target.closest('button,a')) return;
+      if (event.target.closest('button,a,input')) return;
       location.hash = tr.dataset.href;
     });
   });

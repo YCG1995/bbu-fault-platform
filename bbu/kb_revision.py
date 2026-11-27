@@ -108,7 +108,7 @@ def write_revision(
 ) -> dict[str, Any] | None:
     """在调用方事务内追加一条修订；无字段变化且不是建库/恢复动作时跳过。"""
     diff = case_diff(before, after)
-    if not diff and action not in {"create", "import", "restore"}:
+    if not diff and action not in {"create", "import", "restore", "merge"}:
         return None
     created_at = created_at or iso_now()
     prev = conn.execute(

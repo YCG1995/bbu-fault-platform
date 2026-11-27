@@ -243,6 +243,27 @@ EXPECTED_ROUTES = {
     "GET /api/kb/queries",
     "POST /api/kb/sample",
     "GET /api/kb/audit",
+    "POST /api/kb/export/report",
+    "GET /api/kb/duplicates",
+    "GET /api/kb/duplicates/preview",
+    "POST /api/kb/duplicates/merge",
+    "GET /api/kb/eval/sets",
+    "POST /api/kb/eval/sets",
+    "GET /api/kb/eval/sets/{id}",
+    "DELETE /api/kb/eval/sets/{id}",
+    "POST /api/kb/eval/sets/{id}/run",
+    "GET /api/kb/eval/runs",
+    "GET /api/kb/eval/runs/{id}",
+    "GET /api/kb/eval/runs/{id}/export",
+    "GET /api/kb/terms",
+    "POST /api/kb/terms",
+    "GET /api/kb/terms/export",
+    "POST /api/kb/terms/import",
+    "PUT /api/kb/terms/{id}",
+    "DELETE /api/kb/terms/{id}",
+    "POST /api/kb/import/preview",
+    "GET /api/kb/reviews/auto-publish/dry-run",
+    "POST /api/kb/reviews/{id}/auto-publish",
     "GET /api/kb/stats",
     "GET /api/kb/reviews",
     "GET /api/kb/reviews/{review_id}",
@@ -1669,6 +1690,110 @@ def main() -> int:
         assert status == 200 and b"created_at" in body
         status, body, headers = admin_client.request("GET", "/api/kb/stats?format=csv")
         assert status == 200 and b"group,metric" in body
+
+        # 第二波：报告、近重复、评测台、术语、导入映射与自动发布
+        report_bytes = b""
+        status, report_bytes, _ = admin_client.request(
+            "POST", "/api/kb/export/report",
+            json.dumps({"kb_id": 1, "doc_ids": [doc_id, doc_created_id],
+                        "formats": ["html", "md", "csv", "docx"]}).encode(),
+            {"Content-Type": "application/json", "X-CSRF": admin_client.csrf})
+        assert status == 200 and report_bytes[:2] == b"PK"
+        assert b"report.docx" in report_bytes
+        hit("POST /api/kb/export/report")
+
+        _, dup_a = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 冒烟重复文档",
+            "text": "【故障现象】单板反复复位\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
+        }, expected=201)
+        _, dup_b = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 冒烟重复文档",
+            "text": "【故障现象】单板反复复位\n【原因分析】喂狗异常\n【处理方案】升级逻辑版本",
+        }, expected=201)
+        _, duplicates = admin_client.json("GET", "/api/kb/duplicates?threshold=0.8&limit=20")
+        assert duplicates["items"]
+        hit("GET /api/kb/duplicates")
+        _, dup_preview = admin_client.json(
+            "GET", f"/api/kb/duplicates/preview?source={dup_a['doc_id']}&target={dup_b['doc_id']}")
+        assert dup_preview["similarity"] >= 0.8
+        hit("GET /api/kb/duplicates/preview")
+        _, dup_merged = admin_client.json("POST", "/api/kb/duplicates/merge", {
+            "source_doc_id": dup_a["doc_id"], "target_doc_id": dup_b["doc_id"],
+            "merge_token": "api-smoke-merge", "reason": "api-smoke",
+        })
+        assert dup_merged["moved_cases"] >= 1
+        hit("POST /api/kb/duplicates/merge")
+
+        _, eval_set = admin_client.json("POST", "/api/kb/eval/sets", {
+            "name": "API 冒烟评测集", "filename": "smoke.jsonl",
+            "description": "smoke", "queries": [
+                {"query": "看门狗复位", "qrels": [case_created_id],
+                 "category": "实体精确", "split": "test"},
+                {"query": "红烧肉怎么做", "qrels": [], "category": "库外无答案", "split": "test"},
+            ],
+        }, expected=201)
+        eval_set_id = eval_set["id"]
+        hit("POST /api/kb/eval/sets")
+        _, eval_sets = admin_client.json("GET", "/api/kb/eval/sets")
+        assert eval_sets["items"]
+        hit("GET /api/kb/eval/sets")
+        admin_client.json("GET", f"/api/kb/eval/sets/{eval_set_id}")
+        hit("GET /api/kb/eval/sets/{id}")
+        _, eval_run = admin_client.json("POST", f"/api/kb/eval/sets/{eval_set_id}/run",
+                                        {"kb_id": 1, "top_k": 10}, expected=201)
+        run_id = eval_run["id"]
+        hit("POST /api/kb/eval/sets/{id}/run")
+        _, eval_runs = admin_client.json(
+            "GET", f"/api/kb/eval/runs?set_id={eval_set_id}")
+        assert eval_runs["items"]
+        hit("GET /api/kb/eval/runs")
+        admin_client.json("GET", f"/api/kb/eval/runs/{run_id}")
+        hit("GET /api/kb/eval/runs/{id}")
+        status, eval_csv, _ = admin_client.request(
+            "GET", f"/api/kb/eval/runs/{run_id}/export?format=csv")
+        assert status == 200 and b"query_id" in eval_csv
+        hit("GET /api/kb/eval/runs/{id}/export")
+        admin_client.json("DELETE", f"/api/kb/eval/sets/{eval_set_id}")
+        hit("DELETE /api/kb/eval/sets/{id}")
+
+        _, term = admin_client.json("POST", "/api/kb/terms", {
+            "term": "冒烟同义词", "aliases": ["冒烟别名"], "kind": "synonym",
+            "weight": 2, "kb_id": 1,
+        })
+        term_id = term["item"]["id"]
+        hit("POST /api/kb/terms")
+        _, terms = admin_client.json("GET", "/api/kb/terms?kb=1")
+        assert terms["items"]
+        hit("GET /api/kb/terms")
+        status, term_csv, _ = admin_client.request("GET", "/api/kb/terms/export?kb=1")
+        if status != 200 or b"term" not in term_csv:
+            print("DEBUG terms export", status, term_csv[:500])
+        assert status == 200 and b"term" in term_csv
+        hit("GET /api/kb/terms/export")
+        term_import_csv = "term,aliases,kind,weight,enabled\n冒烟导入词,冒烟导入别名,synonym,1,1\n".encode("utf-8")
+        admin_client.multipart("/api/kb/terms/import", {"kb_id": "1"},
+                               [("file", "terms.csv", term_import_csv, "text/csv")])
+        hit("POST /api/kb/terms/import")
+        admin_client.json("PUT", f"/api/kb/terms/{term_id}", {"weight": 3})
+        hit("PUT /api/kb/terms/{id}")
+        admin_client.json("DELETE", f"/api/kb/terms/{term_id}")
+        hit("DELETE /api/kb/terms/{id}")
+
+        _, preview = admin_client.multipart(
+            "/api/kb/import/preview", {},
+            [("file", "api-preview.csv",
+              ("问题,现象,原因,方案,板卡\nVBP 复位,反复复位,喂狗异常,升级逻辑,VBPE2\n").encode(),
+              "text/csv")])
+        assert preview["preview"]["headers"] == ["问题", "现象", "原因", "方案", "板卡"]
+        assert preview["preview"]["guessed_mapping"]["方案"] == "solution"
+        hit("POST /api/kb/import/preview")
+
+        _, auto_dry = admin_client.json("GET", "/api/kb/reviews/auto-publish/dry-run?limit=10")
+        assert "would_publish" in auto_dry
+        hit("GET /api/kb/reviews/auto-publish/dry-run")
+        admin_client.json("POST", "/api/kb/reviews/not-a-real-review/auto-publish",
+                          {}, expected=409)
+        hit("POST /api/kb/reviews/{id}/auto-publish")
 
         _, review = admin_client.json("POST", "/api/kb/reviews", {
             "target_type": "case", "target_id": case_created_id, "stage": "manual", "run": True,

@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -666,7 +666,7 @@ CREATE TABLE IF NOT EXISTS skill_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_approvals ON skill_approvals(skill, version, decision);
 
--- 故障知识库（schema 24；schema 26 增加逻辑多库）。
+-- 故障知识库（schema 24；schema 26 增加逻辑多库；schema 27 增加合并/评测分层）。
 CREATE TABLE IF NOT EXISTS kb_libraries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -708,7 +708,10 @@ CREATE TABLE IF NOT EXISTS kb_documents (
   created_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  deleted_at TEXT
+  deleted_at TEXT,
+  merged_into TEXT NOT NULL DEFAULT '',
+  merged_at TEXT,
+  merge_token TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_kb_docs_kb_status ON kb_documents(kb_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_status ON kb_documents(status, created_at DESC);
@@ -993,7 +996,7 @@ CREATE TABLE IF NOT EXISTS kb_stats_daily (
   UNIQUE(day, metric, dim_key)
 );
 
--- 评测表先随 schema 建好；1.31.0 再开放评测台，不影响 1.30.x 的检索与治理。
+-- 评测表随 schema 建好；1.33.0 开放评测台与分层指标。
 CREATE TABLE IF NOT EXISTS kb_eval_sets (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
@@ -1008,6 +1011,8 @@ CREATE TABLE IF NOT EXISTS kb_eval_queries (
   query TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL DEFAULT 'open',
   qrels_json TEXT NOT NULL DEFAULT '[]',
+  category TEXT NOT NULL DEFAULT '',
+  split TEXT NOT NULL DEFAULT 'test',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_eval_queries_set ON kb_eval_queries(set_id, id);
@@ -1270,6 +1275,30 @@ class Database:
                 "UPDATE kb_import_jobs SET rollback_supported=0 "
                 "WHERE id IN (SELECT job_id FROM kb_import_files "
                 "WHERE doc_ids_json='[]' AND draft_ids_json='[]')")
+            # schema 27：近重复合并软链、评测分层与术语唯一键。
+            for table, columns in (
+                ("kb_documents", (
+                    ("merged_into", "ALTER TABLE kb_documents ADD COLUMN merged_into TEXT NOT NULL DEFAULT ''"),
+                    ("merged_at", "ALTER TABLE kb_documents ADD COLUMN merged_at TEXT"),
+                    ("merge_token", "ALTER TABLE kb_documents ADD COLUMN merge_token TEXT NOT NULL DEFAULT ''"),
+                )),
+                ("kb_eval_queries", (
+                    ("category", "ALTER TABLE kb_eval_queries ADD COLUMN category TEXT NOT NULL DEFAULT ''"),
+                    ("split", "ALTER TABLE kb_eval_queries ADD COLUMN split TEXT NOT NULL DEFAULT 'test'"),
+                )),
+            ):
+                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                for name, ddl in columns:
+                    if name not in existing:
+                        conn.execute(ddl)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_docs_merged ON kb_documents(kb_id, merged_into)")
+            # 术语(old data may contain duplicates)：保留最早一条，再加唯一索引。
+            conn.execute(
+                "DELETE FROM kb_terms WHERE id NOT IN ("
+                "SELECT MIN(id) FROM kb_terms GROUP BY kb_id, kind, term)")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_terms_unique "
+                "ON kb_terms(kb_id, kind, term)")
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),))

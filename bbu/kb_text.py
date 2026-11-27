@@ -326,14 +326,27 @@ QUERY_SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 
 
-def expand_terms(text: str) -> list[str]:
-    """只对概念词做最多 2 个同义词扩展，不扩板卡型号/版本号/告警码。"""
+def expand_terms(text: str, synonyms: dict[str, list[str]] | None = None) -> list[str]:
+    """只对概念词做最多 2 个同义词扩展，不扩板卡型号/版本号/告警码。
+
+    synonyms 为知识库内启用的同义词（term -> aliases），由服务层按库加载；
+    内置词典先参与，库内词条按权重排序后参与，二者均做去重。
+    """
     low = normalize_key(text)
     expansions: list[str] = []
     for phrase, aliases in QUERY_SYNONYMS.items():
         if phrase in low:
             for alias in aliases[:2]:
-                expansions.append(alias)
+                if alias not in expansions:
+                    expansions.append(alias)
+    for phrase, aliases in (synonyms or {}).items():
+        if phrase and phrase in low:
+            for alias in aliases[:2]:
+                if alias and alias not in expansions:
+                    # 库内配置也不能把查询扩成另一个板卡/版本实体。
+                    if detect_boards(alias) or detect_versions(alias):
+                        continue
+                    expansions.append(alias)
     return expansions
 
 

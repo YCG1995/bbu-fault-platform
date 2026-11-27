@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -1107,9 +1109,237 @@ class KBService:
                 "review_enabled": bool(self.config.get("kb_review_enabled", True)),
                 "review_auto_on_import": bool(self.config.get("kb_review_auto_on_import", True)),
                 "review_auto_publish": bool(self.config.get("kb_review_auto_publish", False)),
+                "review_auto_publish_dry_run": bool(self.config.get("kb_review_auto_publish_dry_run", True)),
                 "review_pending": review_pending,
             },
         }
+
+    def _library_synonyms(self, kb_id: int = 1) -> dict[str, list[str]]:
+        """加载当前库启用的同义词；只读，不参与索引构建。"""
+        rows = self.db.all(
+            "SELECT term, aliases_json, weight FROM kb_terms "
+            "WHERE kb_id=? AND kind='synonym' AND enabled=1 "
+            "ORDER BY weight DESC, id ASC", (int(kb_id or 1),))
+        mapping: dict[str, list[str]] = {}
+        for row in rows[:500]:
+            term = normalize_key(row.get("term"))
+            if not term:
+                continue
+            aliases = [str(x).strip() for x in _json_list(row.get("aliases_json"))
+                       if str(x).strip() and normalize_key(x) != term]
+            if not aliases:
+                continue
+            # 词条与别名互为同义：用户从任意一侧提问都应扩展。
+            keys = [term] + [normalize_key(x) for x in aliases]
+            for key in keys:
+                if not key:
+                    continue
+                bucket = mapping.setdefault(key, [])
+                for value in keys:
+                    value = str(value or "").strip()
+                    if not value or value == key:
+                        continue
+                    if value not in bucket and len(bucket) < 2:
+                        bucket.append(value)
+        return mapping
+
+    def list_terms(self, user: dict[str, Any], *, kb_id: int = 1,
+                   include_disabled: bool = True) -> dict[str, Any]:
+        if user.get("role") != "admin" and int(kb_id) not in self._visible_library_ids(user):
+            raise KBError("无权查看该知识库词典", 403, "forbidden")
+        where = ["kb_id=?"]
+        args: list[Any] = [int(kb_id)]
+        if not include_disabled and user.get("role") != "admin":
+            where.append("enabled=1")
+        rows = self.db.all(
+            "SELECT * FROM kb_terms WHERE " + " AND ".join(where) +
+            " ORDER BY kind, term COLLATE NOCASE", tuple(args))
+        items = [{
+            "id": row.get("id"), "kb_id": int(row.get("kb_id") or 1),
+            "kind": row.get("kind") or "synonym", "term": row.get("term") or "",
+            "aliases": _json_list(row.get("aliases_json")),
+            "weight": float(row.get("weight") or 1),
+            "enabled": bool(row.get("enabled")),
+            "created_at": row.get("created_at") or "",
+        } for row in rows]
+        return {"items": items, "total": len(items), "kb_id": int(kb_id),
+                "effective": len(self._library_synonyms(kb_id))}
+
+    def _term_graph(self, kb_id: int, *, exclude_id: int = 0,
+                    term: str = "", aliases: list[str] | None = None) -> dict[str, set[str]]:
+        graph: dict[str, set[str]] = {}
+        for row in self.db.all(
+                "SELECT id,term,aliases_json FROM kb_terms "
+                "WHERE kb_id=? AND kind='synonym' AND enabled=1", (int(kb_id),)):
+            if exclude_id and int(row.get("id") or 0) == int(exclude_id):
+                continue
+            graph[normalize_key(row.get("term"))] = {
+                normalize_key(x) for x in _json_list(row.get("aliases_json")) if normalize_key(x)
+            }
+        if term:
+            graph[normalize_key(term)] = {normalize_key(x) for x in (aliases or []) if normalize_key(x)}
+        return graph
+
+    @staticmethod
+    def _term_cycle(graph: dict[str, set[str]], start: str) -> bool:
+        """只在当前 DFS 路径上重复才算环；菱形汇聚不是环。"""
+        visited: set[str] = set()
+        path: set[str] = set()
+
+        def walk(node: str) -> bool:
+            if node in path:
+                return True
+            if node in visited:
+                return False
+            visited.add(node)
+            path.add(node)
+            for child in graph.get(node, set()):
+                if walk(child):
+                    return True
+            path.discard(node)
+            return False
+
+        return walk(start)
+
+    def save_term(self, user: dict[str, Any], payload: dict[str, Any], *,
+                  kb_id: int = 1) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可编辑知识库词典", 403, "forbidden")
+        kb_id = int(kb_id or 1)
+        payload = dict(payload or {})
+        term_id = int(payload.get("id") or 0)
+        existing = None
+        if term_id:
+            existing = self.db.one("SELECT * FROM kb_terms WHERE id=? AND kb_id=?",
+                                   (term_id, kb_id))
+            if not existing:
+                raise KBError("词条不存在", 404, "not_found")
+            # PUT 允许局部更新：未提交的字段沿用原值。
+            base = {
+                "kind": existing.get("kind") or "synonym",
+                "term": existing.get("term") or "",
+                "aliases": _json_list(existing.get("aliases_json")),
+                "weight": float(existing.get("weight") or 1),
+                "enabled": bool(existing.get("enabled")),
+            }
+            base.update({k: v for k, v in payload.items() if v is not None})
+            payload = base
+        kind = str(payload.get("kind") or "synonym").strip().lower()
+        if kind not in {"synonym", "stopword", "domain"}:
+            raise KBError("词典类型必须是 synonym/stopword/domain", 400, "bad_kind")
+        term = str(payload.get("term") or "").strip()
+        if not term:
+            raise KBError("词条不能为空", 400, "empty_term")
+        if len(term) > 120:
+            raise KBError("词条最多 120 字", 400, "term_too_long")
+        aliases = payload.get("aliases")
+        if isinstance(aliases, str):
+            aliases = [x.strip() for x in aliases.replace("|", ",").replace(";", ",").split(",")]
+        if not isinstance(aliases, list):
+            aliases = []
+        cleaned = []
+        for alias in aliases:
+            value = str(alias or "").strip()
+            if not value:
+                raise KBError("同义词不能包含空值", 400, "empty_alias")
+            if len(value) > 120:
+                raise KBError("同义词最多 120 字", 400, "alias_too_long")
+            if normalize_key(value) == normalize_key(term):
+                raise KBError("同义词不能与词条相同", 400, "alias_equals_term")
+            if value not in cleaned:
+                cleaned.append(value)
+        if len(cleaned) > 10:
+            raise KBError("同义词最多 10 个", 400, "too_many_aliases")
+        if kind == "synonym" and not cleaned:
+            raise KBError("同义词条目至少需要一个别名", 400, "missing_alias")
+        try:
+            weight = float(payload.get("weight", 1) or 1)
+        except (TypeError, ValueError):
+            raise KBError("权重必须是 0.1–10 的数字", 400, "bad_weight") from None
+        if not math.isfinite(weight):
+            raise KBError("权重必须是 0.1–10 的数字", 400, "bad_weight")
+        weight = max(0.1, min(10.0, weight))
+        enabled = 1 if payload.get("enabled", True) else 0
+        duplicate = self.db.one(
+            "SELECT id FROM kb_terms WHERE kb_id=? AND kind=? AND term=? AND id!=?",
+            (kb_id, kind, term, term_id))
+        if duplicate:
+            raise KBError("同库同类型下词条已存在", 409, "duplicate_term")
+        if kind == "synonym" and enabled:
+            graph = self._term_graph(kb_id, exclude_id=term_id, term=term, aliases=cleaned)
+            if self._term_cycle(graph, normalize_key(term)):
+                raise KBError("同义词存在环，拒绝保存", 400, "term_cycle")
+        now = iso_now()
+        if existing:
+            self.db.execute(
+                "UPDATE kb_terms SET kind=?,term=?,aliases_json=?,weight=?,enabled=? WHERE id=?",
+                (kind, term, json.dumps(cleaned, ensure_ascii=False), weight, enabled, term_id))
+            new_id_value = term_id
+        else:
+            new_id_value = self.db.execute(
+                "INSERT INTO kb_terms(kb_id,kind,term,aliases_json,weight,enabled,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (kb_id, kind, term, json.dumps(cleaned, ensure_ascii=False), weight, enabled, now))
+            term_id = int(new_id_value)
+        # 词典不参与倒排，但 facets 缓存可能包含旧标签；清掉即可。
+        with self._lock:
+            self._facets_cache = None
+        return {"ok": True, "item": {
+            "id": term_id, "kb_id": kb_id, "kind": kind, "term": term,
+            "aliases": cleaned, "weight": weight, "enabled": bool(enabled),
+            "created_at": existing.get("created_at") if existing else now,
+        }}
+
+    def delete_term(self, term_id: int, user: dict[str, Any], *, kb_id: int = 1) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可编辑知识库词典", 403, "forbidden")
+        row = self.db.one("SELECT id,term FROM kb_terms WHERE id=? AND kb_id=?",
+                          (int(term_id), int(kb_id or 1)))
+        if not row:
+            raise KBError("词条不存在", 404, "not_found")
+        self.db.execute("DELETE FROM kb_terms WHERE id=?", (int(term_id),))
+        with self._lock:
+            self._facets_cache = None
+        return {"ok": True, "id": int(term_id), "term": row.get("term") or ""}
+
+    def import_terms_csv(self, user: dict[str, Any], data: bytes, *,
+                         kb_id: int = 1) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可导入知识库词典", 403, "forbidden")
+        text = data.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            raise KBError("CSV 缺少表头", 400, "bad_csv")
+        count = 0
+        errors: list[str] = []
+        for line_no, row in enumerate(reader, 2):
+            if not any(str(v or "").strip() for v in row.values()):
+                continue
+            payload = {
+                "term": row.get("term") or row.get("词条") or "",
+                "aliases": row.get("aliases") or row.get("同义词") or "",
+                "kind": row.get("kind") or "synonym",
+                "weight": row.get("weight") or 1,
+                "enabled": str(row.get("enabled") or "1").lower() not in {"0", "false", "no"},
+            }
+            try:
+                self.save_term(user, payload, kb_id=kb_id)
+                count += 1
+            except Exception as exc:  # noqa: BLE001 - 收集行级错误
+                errors.append(f"第 {line_no} 行：{exc}")
+        if errors and not count:
+            raise KBError("词典导入失败：" + errors[0], 400, "bad_csv")
+        return {"ok": True, "imported": count, "errors": errors[:20]}
+
+    def terms_csv(self, user: dict[str, Any], *, kb_id: int = 1) -> str:
+        data = self.list_terms(user, kb_id=kb_id)
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["term", "aliases", "kind", "weight", "enabled"])
+        for item in data["items"]:
+            writer.writerow([item["term"], ",".join(item["aliases"]), item["kind"],
+                             item["weight"], 1 if item["enabled"] else 0])
+        return "\ufeff" + out.getvalue()
 
     def facets(self, kb_id: int = 1) -> dict[str, Any]:
         kb_id = int(kb_id or 1)
@@ -1400,7 +1630,8 @@ class KBService:
                 "cases": payload["cases"]}
 
     def create_import_job(self, user: dict[str, Any], uploads: Iterable[Any],
-                          *, mode: str = "review", kb_id: int = 1) -> dict[str, Any]:
+                          *, mode: str = "review", kb_id: int = 1,
+                          options: dict[str, Any] | None = None) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503)
         if user.get("role") not in {"admin", "engineer"}:
@@ -1419,10 +1650,12 @@ class KBService:
         job_dir = self.staging_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         clean_mode = "direct" if mode == "direct" else "review"
+        options_json = json.dumps(options or {}, ensure_ascii=False)[:4000]
         self.db.execute(
-            "INSERT INTO kb_import_jobs(id,kb_id,user_id,status,mode,total_files,created_at) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (job_id, int(kb_id), user["id"], "queued", clean_mode, len(files), iso_now()))
+            "INSERT INTO kb_import_jobs(id,kb_id,user_id,status,mode,options_json,"
+            "total_files,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (job_id, int(kb_id), user["id"], "queued", clean_mode, options_json,
+             len(files), iso_now()))
         for item in files:
             size = int(getattr(item, "size", 0) or 0)
             name = safe_filename(getattr(item, "filename", "") or "upload")
@@ -1513,6 +1746,122 @@ class KBService:
         except Exception:
             return ""
 
+    def _auto_publish_eval(self, review: dict[str, Any]) -> dict[str, Any]:
+        policy_id = "review-auto-v1"
+        reasons: list[str] = []
+        if str(review.get("target_type") or "") != "draft":
+            reasons.append("仅 draft 目标允许自动发布")
+        if str(review.get("status") or "") != "done":
+            reasons.append("审核尚未完成")
+        if str(review.get("decision") or "") != "pass":
+            reasons.append("模型结论不是 pass")
+        issues = review.get("issues") or _json_list(review.get("issues_json"))
+        if any(str(x.get("severity") or "") == "blocker" for x in issues if isinstance(x, dict)):
+            reasons.append("存在 blocker")
+        min_score = float(self.config.get("kb_auto_publish_min_score", 90) or 90)
+        min_conf = float(self.config.get("kb_auto_publish_min_confidence", 0.9) or 0.9)
+        if float(review.get("score") or 0) < min_score:
+            reasons.append(f"分数低于 {min_score:g}")
+        if float(review.get("confidence") or 0) < min_conf:
+            reasons.append(f"置信度低于 {min_conf:g}")
+        expected_prompt = str(self.config.get("kb_review_prompt_version", "review-v1"))
+        if str(review.get("prompt_version") or "") != expected_prompt:
+            reasons.append("prompt_version 不是当前版本")
+        draft = self.db.one("SELECT * FROM kb_drafts WHERE id=?",
+                            (str(review.get("target_id") or ""),))
+        if not draft:
+            reasons.append("草稿不存在")
+        elif str(draft.get("status") or "") != "reviewing":
+            reasons.append("草稿不是待审状态")
+        else:
+            payload = _json_obj(draft.get("payload_json"))
+            cases = [x for x in (payload.get("cases") or []) if isinstance(x, dict)]
+            if not cases:
+                reasons.append("草稿没有案例")
+            for case in cases:
+                if not all(str(case.get(k) or "").strip() for k in ("symptom", "cause", "solution")):
+                    reasons.append("案例缺少现象/原因/方案")
+                    break
+            warnings = " ".join(str(x) for x in _json_list(draft.get("warnings_json")))
+            if any(word in warnings for word in ("扫描", "人工转写", "图片", "低置信")):
+                reasons.append("低置信占位稿（扫描/图片/人工转写）")
+            if float(draft.get("confidence") or 0) < 0.5:
+                reasons.append("草稿置信度低于 0.5")
+        return {"policy_id": policy_id, "eligible": not reasons, "reasons": reasons,
+                "score": float(review.get("score") or 0),
+                "confidence": float(review.get("confidence") or 0),
+                "review_id": review.get("id"), "draft_id": review.get("target_id"),
+                "dry_run": bool(self.config.get("kb_review_auto_publish_dry_run", True))}
+
+    def _maybe_auto_publish(self, review_id: str) -> dict[str, Any] | None:
+        if not bool(self.config.get("kb_review_auto_publish", False)):
+            return None
+        if bool(self.config.get("kb_review_auto_publish_dry_run", True)):
+            return None
+        review = self.db.one("SELECT * FROM kb_reviews WHERE id=?", (review_id,))
+        if not review:
+            return None
+        decision = self._auto_publish_eval(dict(review))
+        if not decision["eligible"]:
+            return None
+        review = dict(review)
+        draft_id = str(review.get("target_id") or "")
+        # 双检查：review 与 draft 状态任一已变化都 no-op，避免重复发布。
+        current = self.db.one("SELECT status FROM kb_reviews WHERE id=?", (review_id,)) or {}
+        if current.get("status") == "decided":
+            return None
+        draft_now = self.db.one("SELECT status FROM kb_drafts WHERE id=?", (draft_id,)) or {}
+        if draft_now.get("status") != "reviewing":
+            return None
+        system_user = {"id": 0, "username": "system:auto_publish", "role": "admin"}
+        try:
+            result = self.approve_draft(draft_id, system_user)
+        except KBError as exc:
+            if exc.code != "already_reviewed":
+                raise
+            return None
+        self.db.execute(
+            "UPDATE kb_reviews SET status='decided',human_decision='auto_publish',"
+            "human_note=?,reviewed_by=0,reviewed_at=? WHERE id=? AND status='done'",
+            (f"policy={decision['policy_id']}; score={decision['score']}; "
+             f"confidence={decision['confidence']}", iso_now(), review_id))
+        self.db.audit(0, "system:auto_publish", "kb.auto_publish", review_id,
+                      {"policy_id": decision["policy_id"], "draft_id": draft_id,
+                       "doc_id": result.get("doc_id"), "score": decision["score"],
+                       "confidence": decision["confidence"], "reasons": decision["reasons"]})
+        return {**result, **decision}
+
+    def auto_publish_dry_run(self, user: dict[str, Any], *, limit: int = 50) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可查看自动发布 dry-run", 403, "forbidden")
+        rows = self.db.all(
+            "SELECT * FROM kb_reviews WHERE target_type='draft' AND status='done' "
+            "ORDER BY created_at DESC LIMIT ?", (max(1, min(200, int(limit or 50))),))
+        items = [self._auto_publish_eval(dict(row)) for row in rows]
+        eligible = sum(1 for item in items if item["eligible"])
+        return {"enabled": bool(self.config.get("kb_review_auto_publish", False)),
+                "dry_run": bool(self.config.get("kb_review_auto_publish_dry_run", True)),
+                "policy_id": "review-auto-v1", "evaluated": len(items),
+                "would_publish": eligible, "blocked": len(items) - eligible,
+                "items": items}
+
+    def auto_publish_now(self, review_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可执行自动发布", 403, "forbidden")
+        if not bool(self.config.get("kb_review_auto_publish", False)):
+            raise KBError("自动发布总开关未开启", 409, "disabled")
+        review = self.db.one("SELECT * FROM kb_reviews WHERE id=?", (review_id,))
+        if not review:
+            raise KBError("审核记录不存在", 404, "not_found")
+        decision = self._auto_publish_eval(dict(review))
+        if not decision["eligible"]:
+            raise KBError("不满足自动发布条件：" + "；".join(decision["reasons"]), 409,
+                          "not_eligible")
+        if bool(self.config.get("kb_review_auto_publish_dry_run", True)):
+            return {"ok": True, "dry_run": True, "executed": False, **decision}
+        result = self._maybe_auto_publish(review_id)
+        return result or {"ok": False, "reason": "noop"}
+
     def _review_worker_loop(self) -> None:
         while not self._stop.is_set():
             review_id = self._review_queue.get()
@@ -1520,6 +1869,7 @@ class KBService:
                 return
             try:
                 self.reviews.run(review_id)
+                self._maybe_auto_publish(review_id)
             except Exception:
                 pass
 
@@ -1605,9 +1955,12 @@ class KBService:
                     stats["skipped"] += 1
                     stats["skipped_files"] += 1
                     continue
+                options = _json_obj(job.get("options_json"))
                 docs = parse_file(
                     Path(file_row["stored_path"]), str(file_row.get("name") or "upload"),
-                    sha256=sha, pii_masked=bool(self.config.get("kb_mask_pii", True)))
+                    sha256=sha, pii_masked=bool(self.config.get("kb_mask_pii", True)),
+                    mapping=options.get("mapping") if isinstance(options.get("mapping"), dict) else None,
+                    sheet_name=str(options.get("sheet") or ""))
                 doc_ids: list[str] = []
                 draft_ids: list[str] = []
                 for doc in docs:
@@ -1685,6 +2038,7 @@ class KBService:
             "id": row["id"], "kb_id": int(row.get("kb_id") or 1),
             "display_name": display_name or f"导入任务 {row['id']}",
             "status": row.get("status"), "mode": row.get("mode"),
+            "options": _json_obj(row.get("options_json")),
             "total_files": int(row.get("total_files") or 0),
             "done_files": int(row.get("done_files") or 0),
             "failed_files": int(row.get("failed_files") or 0),
@@ -1956,14 +2310,16 @@ class KBService:
         threshold = float(self.config.get("kb_no_answer_threshold", 0.18))
         if len(ids) == 1:
             result = retrieve(self.ensure_index(ids[0]), query, filters=filters, limit=limit,
-                              threshold=threshold)
+                              threshold=threshold,
+                              synonyms=self._library_synonyms(ids[0]))
         else:
             per_library = []
             for child in ids:
                 try:
                     per_library.append((child, retrieve(
                         self.ensure_index(child), query, filters=filters,
-                        limit=max(limit, 8), threshold=threshold)))
+                        limit=max(limit, 8), threshold=threshold,
+                        synonyms=self._library_synonyms(child))))
                 except Exception:
                     continue
             if not per_library:
@@ -2617,6 +2973,7 @@ class KBService:
         review = self.reviews.create(target_type, target_id, stage=stage, actor=user)
         if run:
             review = self.reviews.run(review["id"])
+            self._maybe_auto_publish(review["id"])
         else:
             self._review_queue.put(review["id"])
         review["target_title"] = self._review_target_title(target_type, target_id)
@@ -2626,6 +2983,7 @@ class KBService:
         if user.get("role") != "admin":
             raise KBError("仅管理员可执行审核", 403, "forbidden")
         item = self.reviews.run(review_id)
+        self._maybe_auto_publish(review_id)
         item["target_title"] = self._review_target_title(item.get("target_type"), item.get("target_id"))
         return item
 
@@ -2645,6 +3003,7 @@ class KBService:
         for row in rows:
             try:
                 item = self.reviews.run(str(row["id"]))
+                self._maybe_auto_publish(str(row["id"]))
                 (failed if item.get("status") == "failed" else done).append(item["id"])
             except Exception:
                 failed.append(str(row["id"]))

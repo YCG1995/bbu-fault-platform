@@ -81,6 +81,10 @@ from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
 from .kb_service import KBService, MAX_BACKUP_TOTAL_BYTES
+from .kb_eval import KBEvaluator
+from .kb_duplicates import KBDuplicates
+from .kb_report import KBReport
+from .kb_ingest import preview_import_file, normalize_mapping
 from .pipeline import TaskPipeline
 from .review import ReviewService
 from .agent import BoundedAgent
@@ -335,6 +339,9 @@ class App:
                                  relay=self.relay)
         self.traces = TraceStore(self.db, config)
         self.kb = KBService(self.db, config, gateway=self.gateway, traces=self.traces)
+        self.kb_eval = KBEvaluator(self.kb)
+        self.kb_duplicates = KBDuplicates(self.kb)
+        self.kb_report = KBReport(self.kb)
         self.usage = UsageStore(self.db, config)
         self.gateway.on_usage = self._record_llm_usage
         try:
@@ -475,6 +482,7 @@ class App:
         r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions/"
               r"(?P<version_id>[A-Za-z0-9_-]+)/restore", h_kb_doc_restore)
         r.add("GET", r"/api/kb/files/(?P<file_id>[A-Za-z0-9_-]+)", h_kb_file)
+        r.add("POST", r"/api/kb/import/preview", h_kb_import_preview)
         r.add("POST", r"/api/kb/import", h_kb_import)
         r.add("GET", r"/api/kb/import/jobs", h_kb_jobs)
         r.add("GET", r"/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)", h_kb_job)
@@ -493,7 +501,26 @@ class App:
         r.add("GET", r"/api/kb/queries", h_kb_queries)
         r.add("POST", r"/api/kb/sample", h_kb_sample)
         r.add("GET", r"/api/kb/audit", h_kb_audit)
+        r.add("POST", r"/api/kb/export/report", h_kb_export_report)
+        r.add("GET", r"/api/kb/duplicates", h_kb_duplicates)
+        r.add("GET", r"/api/kb/duplicates/preview", h_kb_duplicate_preview)
+        r.add("POST", r"/api/kb/duplicates/merge", h_kb_duplicate_merge)
+        r.add("GET", r"/api/kb/eval/sets", h_kb_eval_sets)
+        r.add("POST", r"/api/kb/eval/sets", h_kb_eval_set_create)
+        r.add("GET", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)", h_kb_eval_set)
+        r.add("DELETE", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)", h_kb_eval_set_delete)
+        r.add("POST", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)/run", h_kb_eval_run)
+        r.add("GET", r"/api/kb/eval/runs", h_kb_eval_runs)
+        r.add("GET", r"/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)", h_kb_eval_run_get)
+        r.add("GET", r"/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)/export", h_kb_eval_export)
+        r.add("GET", r"/api/kb/terms", h_kb_terms)
+        r.add("POST", r"/api/kb/terms", h_kb_term_create)
+        r.add("GET", r"/api/kb/terms/export", h_kb_terms_export)
+        r.add("POST", r"/api/kb/terms/import", h_kb_terms_import)
+        r.add("PUT", r"/api/kb/terms/(?P<term_id>[0-9]+)", h_kb_term_update)
+        r.add("DELETE", r"/api/kb/terms/(?P<term_id>[0-9]+)", h_kb_term_delete)
         r.add("GET", r"/api/kb/stats", h_kb_stats)
+        r.add("GET", r"/api/kb/reviews/auto-publish/dry-run", h_kb_auto_publish_dry_run)
         r.add("GET", r"/api/kb/reviews", h_kb_reviews)
         r.add("GET", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)", h_kb_review)
         r.add("POST", r"/api/kb/reviews", h_kb_review_create)
@@ -501,6 +528,7 @@ class App:
         r.add("POST", r"/api/kb/reviews/batch-decision", h_kb_reviews_batch_decision)
         r.add("POST", r"/api/kb/reviews/batch-retry", h_kb_reviews_batch_retry)
         r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/decision", h_kb_review_decision)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/auto-publish", h_kb_auto_publish)
         r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/retry", h_kb_review_retry)
         r.add("GET", r"/api/mcp/info", h_mcp_info)
         r.add("POST", r"/api/mcp/token", h_mcp_token_create)
@@ -4828,6 +4856,288 @@ def h_kb_stats(app: App, req):
         _kb_raise(exc)
 
 
+def h_kb_export_report(app: App, req):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    doc_ids = body.get("doc_ids") if isinstance(body.get("doc_ids"), list) else []
+    case_ids = body.get("case_ids") if isinstance(body.get("case_ids"), list) else []
+    formats = body.get("formats") if isinstance(body.get("formats"), list) else None
+    try:
+        payload, filename, ctype = app.kb_report.generate(
+            user, kb_id=kb_id, doc_ids=doc_ids, case_ids=case_ids,
+            formats=formats, reveal=bool(body.get("reveal")), title=str(body.get("title") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.report_export", str(kb_id),
+                 {"documents": len(doc_ids), "cases": len(case_ids),
+                  "formats": formats or [], "reveal": bool(body.get("reveal"))}, req.ip)
+    safe_name = "kb-report.zip"
+    return 200, {"Content-Type": ctype, "Cache-Control": "no-store",
+                 "Content-Disposition": f"attachment; filename=\"{safe_name}\"; "
+                                       f"filename*=UTF-8''{quote(filename)}"}, payload
+
+
+def h_kb_duplicates(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        return response_json(app.kb_duplicates.candidates(
+            user, kb_id=kb_id, threshold=float(req.query.get("threshold") or 0.82),
+            limit=_kb_int(req.query.get("limit"), 60)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_duplicate_preview(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    source = str(req.query.get("source") or "")
+    target = str(req.query.get("target") or "")
+    if not source or not target:
+        raise HTTPError(400, "需要 source 和 target 文档 ID")
+    try:
+        return response_json(app.kb_duplicates.preview(source, target, user, kb_id=kb_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_duplicate_merge(app: App, req):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    source = str(body.get("source_doc_id") or body.get("source") or "")
+    target = str(body.get("target_doc_id") or body.get("target") or "")
+    token = str(body.get("merge_token") or "")
+    if not source or not target:
+        raise HTTPError(400, "需要 source_doc_id 和 target_doc_id")
+    try:
+        result = app.kb_duplicates.merge(
+            source, target, user, merge_token=token,
+            reason=str(body.get("reason") or ""), kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_merge", source,
+                 {"target": target, "moved_cases": result.get("moved_cases") or 0,
+                  "token": token, "reason": str(body.get("reason") or "")[:200]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_terms(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        return response_json(app.kb.list_terms(user, kb_id=kb_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_term_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    kb_id = _kb_id_param(req, 1)
+    if isinstance(data, dict) and data.get("kb_id"):
+        kb_id = _kb_int(data.get("kb_id"), 1)
+    try:
+        result = app.kb.save_term(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_create", str(result["item"]["id"]),
+                 {"term": result["item"]["term"]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_term_update(app: App, req, term_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    if not isinstance(data, dict):
+        data = {}
+    data["id"] = int(term_id)
+    kb_id = _kb_id_param(req, 1)
+    if data.get("kb_id"):
+        kb_id = _kb_int(data.get("kb_id"), 1)
+    try:
+        result = app.kb.save_term(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_update", term_id,
+                 {"term": result["item"]["term"]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_term_delete(app: App, req, term_id: str):
+    user = _admin(app, req)
+    kb_id = _kb_id_param(req)
+    try:
+        result = app.kb.delete_term(int(term_id), user, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_delete", term_id,
+                 {"term": result.get("term") or ""}, req.ip)
+    return response_json(result)
+
+
+def h_kb_terms_export(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        text = app.kb.terms_csv(user, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return _kb_csv(text, f"kb-terms-{kb_id}.csv")
+
+
+def h_kb_terms_import(app: App, req):
+    user = _admin(app, req)
+    ctype = str(req.headers.get("Content-Type") or "").lower()
+    if "multipart/form-data" in ctype:
+        fields, uploads = req.parse_multipart(16 * 1024 * 1024)
+        if not uploads:
+            raise HTTPError(400, "需要上传词典 CSV")
+        data = Path(uploads[0].path).read_bytes()
+        kb_id = _kb_int(fields.get("kb_id") or fields.get("kb"), 1)
+    else:
+        body = req.json()
+        data = str(body.get("content") or "").encode("utf-8")
+        kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    try:
+        result = app.kb.import_terms_csv(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_import", str(kb_id),
+                 {"imported": result.get("imported") or 0}, req.ip)
+    return response_json(result)
+
+
+def h_kb_eval_sets(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.list_sets(user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_set_create(app: App, req):
+    user = _admin(app, req)
+    ctype = str(req.headers.get("Content-Type") or "").lower()
+    if "multipart/form-data" in ctype:
+        fields, uploads = req.parse_multipart(32 * 1024 * 1024)
+        if not uploads:
+            raise HTTPError(400, "需要上传评测集文件")
+        item = uploads[0]
+        data = Path(item.path).read_bytes()
+        name = str(fields.get("name") or Path(item.filename).stem)
+        description = str(fields.get("description") or "")
+        kind = str(fields.get("kind") or "retrieval")
+        filename = item.filename
+    else:
+        body = req.json()
+        raw = body.get("content") or body.get("queries") or ""
+        if isinstance(raw, (list, dict)):
+            raw = json.dumps(raw, ensure_ascii=False)
+        data = str(raw or "").encode("utf-8")
+        name = str(body.get("name") or "")
+        description = str(body.get("description") or "")
+        kind = str(body.get("kind") or "retrieval")
+        filename = str(body.get("filename") or "eval.jsonl")
+    if not data:
+        raise HTTPError(400, "评测集内容为空")
+    try:
+        result = app.kb_eval.import_set(
+            user, name=name, data=data, filename=filename,
+            description=description, kind=kind)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_import", result.get("id") or "",
+                 {"name": name, "queries": result.get("imported") or 0}, req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_eval_set(app: App, req, set_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.get_set(set_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_set_delete(app: App, req, set_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb_eval.delete_set(set_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_delete", set_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_eval_run(app: App, req, set_id: str):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or body.get("kb"), 1)
+    top_k = max(1, min(10, _kb_int(body.get("top_k"), 10)))
+    try:
+        result = app.kb_eval.run_set(set_id, user, kb_id=kb_id, top_k=top_k)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_run", result.get("id") or "",
+                 {"set_id": set_id, "kb_id": kb_id, "summary": result.get("summary") or {}},
+                 req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_eval_runs(app: App, req):
+    user = _admin(app, req, csrf=False)
+    set_id = str(req.query.get("set_id") or "")
+    if not set_id:
+        raise HTTPError(400, "缺少 set_id")
+    try:
+        return response_json(app.kb_eval.list_runs(set_id, user,
+                                                   limit=_kb_int(req.query.get("limit"), 30)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_run_get(app: App, req, run_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.get_run(run_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_export(app: App, req, run_id: str):
+    user = _admin(app, req, csrf=False)
+    fmt = str(req.query.get("format") or "csv").lower()
+    try:
+        payload, ctype = app.kb_eval.export_run(run_id, user, fmt=fmt)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    ext = "md" if fmt == "md" else "csv"
+    return 200, {"Content-Type": ctype, "Cache-Control": "no-store",
+                 "Content-Disposition": f'attachment; filename="kb-eval-{run_id}.{ext}"'}, payload
+
+
+def h_kb_auto_publish_dry_run(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.auto_publish_dry_run(
+            user, limit=_kb_int(req.query.get("limit"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_auto_publish(app: App, req, review_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.auto_publish_now(review_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.auto_publish_manual", review_id,
+                 result, req.ip)
+    return response_json(result)
+
+
 def h_kb_reviews(app: App, req):
     user = _admin(app, req, csrf=False)
     try:
@@ -5052,6 +5362,21 @@ def h_kb_file(app: App, req, file_id: str):
                          str(row.get("name") or "file"), inline=False)
 
 
+def h_kb_import_preview(app: App, req):
+    user = _admin(app, req)
+    fields, uploads = req.parse_multipart(32 * 1024 * 1024)
+    if not uploads:
+        raise HTTPError(400, "需要上传 CSV 或 XLSX")
+    item = uploads[0]
+    try:
+        result = preview_import_file(
+            Path(item.path), item.filename,
+            mask_enabled=bool(app.config.get("kb_mask_pii", True)))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPError(400, str(exc)) from exc
+    return response_json({"preview": result, "filename": item.filename})
+
+
 def h_kb_import(app: App, req):
     user = _auth(app, req)
     max_mb = int(app.config.get("kb_max_batch_mb", 200))
@@ -5066,8 +5391,19 @@ def h_kb_import(app: App, req):
         _kb_require_visible(app, user, kb_id)
     else:
         kb_id = _kb_default_visible(app, user)
+    options: dict[str, Any] = {}
+    raw_mapping = str(fields.get("mapping") or "").strip()
+    if raw_mapping:
+        try:
+            parsed_mapping = json.loads(raw_mapping)
+            options["mapping"] = normalize_mapping(parsed_mapping)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPError(400, f"列映射无效：{exc}") from exc
+    if str(fields.get("sheet") or "").strip():
+        options["sheet"] = str(fields.get("sheet")).strip()[:120]
     try:
-        job = app.kb.create_import_job(user, uploads, mode=mode, kb_id=kb_id)
+        job = app.kb.create_import_job(user, uploads, mode=mode, kb_id=kb_id,
+                                       options=options)
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     app.db.audit(user["id"], user["username"], "kb.import", job.get("id") or "",

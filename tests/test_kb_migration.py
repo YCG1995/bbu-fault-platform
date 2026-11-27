@@ -44,7 +44,8 @@ class KBMigrationTests(unittest.TestCase):
             for name in (
                 "idx_kb_docs_content_hash", "idx_kb_cases_kb_status", "idx_kb_import_jobs_kb",
                 "idx_kb_drafts_kb", "idx_kb_drafts_hash", "idx_kb_query_logs_kb",
-                "idx_kb_reviews_kb", "idx_kb_terms_kb",
+                "idx_kb_reviews_kb", "idx_kb_terms_kb", "idx_kb_terms_unique",
+                "idx_kb_docs_merged",
             ):
                 conn.execute(f"DROP INDEX IF EXISTS {name}")
             for table, columns in (
@@ -68,8 +69,8 @@ class KBMigrationTests(unittest.TestCase):
         # 关闭旧连接后再用当前代码升级。
         db.connect().close()
         upgraded = Database(db_path)
-        self.assertEqual(SCHEMA_VERSION, 26)
-        self.assertEqual(upgraded.one("SELECT value FROM settings WHERE key='schema_version'")["value"], "26")
+        self.assertEqual(SCHEMA_VERSION, 27)
+        self.assertEqual(upgraded.one("SELECT value FROM settings WHERE key='schema_version'")["value"], "27")
         self.assertEqual(upgraded.one("SELECT COUNT(*) AS n FROM kb_documents")["n"], 1)
         self.assertEqual(upgraded.one("SELECT COUNT(*) AS n FROM kb_cases")["n"], 1)
         lib = upgraded.one("SELECT id,name,status,is_default FROM kb_libraries WHERE id=1")

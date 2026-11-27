@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""1.31.0 故障知识库 UI 冒烟：导航拆分、库切换、跨库、导入批次、审核标签与库管理。"""
+"""1.33.0 故障知识库 UI 冒烟：导航、库切换、跨库、导入映射、审核、词典、评测与近重复。"""
 from __future__ import annotations
 
 import json
@@ -78,7 +78,23 @@ def main() -> int:
         _, docs = admin.json("GET", "/api/kb/docs?size=5&status=active")
         doc_id = docs["items"][0]["id"]
         _, detail0 = admin.json("GET", f"/api/kb/docs/{doc_id}")
-        case_id = detail0["doc"]["cases"][0]["id"]
+        first_case = detail0["doc"]["cases"][0]
+        case_id = first_case["id"]
+        # 第二波页面数据：词典、评测集与一对近重复文档。
+        admin.json("POST", "/api/kb/terms", {
+            "term": "UI同义词", "aliases": ["UI别名"], "kind": "synonym", "weight": 2})
+        admin.json("POST", "/api/kb/eval/sets", {
+            "name": "UI评测集", "queries": [
+                {"query": first_case["title"], "qrels": [case_id], "category": "实体精确",
+                 "split": "test"},
+                {"query": "红烧肉怎么做", "qrels": [], "category": "库外无答案",
+                 "split": "test"},
+            ], "filename": "ui.jsonl", "description": "ui smoke"}, expected=201)
+        for title in ("UI 重复文档 A", "UI 重复文档 A"):
+            admin.json("POST", "/api/kb/docs", {
+                "title": title,
+                "text": "【故障现象】单板反复复位\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
+            }, expected=201)
 
         _, created = admin.json("POST", "/api/kb/libraries", {
             "name": "专家经验库", "kind": "expert", "description": "UI smoke",
@@ -208,6 +224,36 @@ def main() -> int:
                 errors.append("专家库文档页串入了默认库文档")
             page.screenshot(path=str(out / "kb-docs.png"), full_page=True)
 
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=terms", wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-term-term", timeout=15000)
+            terms_body = page.locator("#view").inner_text()
+            for token in ("同义词词典", "UI同义词", "保存词条", "导入词典 CSV"):
+                if token not in terms_body:
+                    errors.append(f"词典页缺少：{token}")
+            page.screenshot(path=str(out / "kb-terms.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=eval", wait_until="domcontentloaded")
+            page.wait_for_selector("text=评测集", timeout=15000)
+            if "UI评测集" not in page.locator("#view").inner_text():
+                errors.append("评测台没有显示评测集")
+            page.locator('[data-act="eval-run"]').first.click()
+            page.wait_for_selector("text=Recall@5", timeout=30000)
+            if "库外拒答" not in page.locator("#view").inner_text():
+                errors.append("评测运行后缺少库外拒答指标")
+            page.screenshot(path=str(out / "kb-eval.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=dedupe", wait_until="domcontentloaded")
+            page.wait_for_selector("text=近重复合并向导", timeout=15000)
+            dup_body = page.locator("#view").inner_text()
+            if "相似" not in dup_body:
+                errors.append("近重复页没有相似度候选")
+            page.locator('[data-act="dup-preview"]').first.click()
+            page.wait_for_selector("text=近重复合并预览", timeout=15000)
+            page.wait_for_timeout(250)
+            page.screenshot(path=str(out / "kb-dedupe-preview.png"), full_page=True)
+            page.locator('[data-act="close"]').first.click()
+            page.screenshot(path=str(out / "kb-dedupe.png"), full_page=True)
+
             page.goto(f"http://{host}:{port}/#/kb/docs?tab=review&view=reviews&kb={expert_id}",
                       wait_until="domcontentloaded")
             page.wait_for_selector(".kb-tabbar", timeout=15000)
@@ -246,6 +292,27 @@ def main() -> int:
             if page.locator('[name="kb_id"]').input_value() != str(expert_id):
                 errors.append("导入页目标知识库没有跟随当前库")
             page.screenshot(path=str(out / "kb-import.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=import&kb={expert_id}", wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-import-form", timeout=15000)
+            page.set_input_files('#kb-import-form input[type="file"]', str(expert_csv))
+            page.locator('[data-act="preview-mapping"]').click()
+            page.wait_for_selector("text=列映射", timeout=15000)
+            if "编码" not in page.locator("#kb-import-preview").inner_text():
+                errors.append("导入页列映射预览缺少编码信息")
+            page.screenshot(path=str(out / "kb-import-mapping.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=docs&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-doc-check", timeout=15000)
+            page.locator(".kb-doc-check").first.check()
+            with page.expect_download(timeout=30000) as download_info:
+                page.locator('[data-act="export-report"]').click()
+            download = download_info.value
+            download_path = work / "ui-report.zip"
+            download.save_as(str(download_path))
+            if not download_path.exists() or download_path.read_bytes()[:2] != b"PK":
+                errors.append("文档页导出报告没有下载 ZIP")
 
             page.goto(f"http://{host}:{port}/#/kb/docs?tab=libraries", wait_until="domcontentloaded")
             page.wait_for_selector("#kb-lib-name", timeout=15000)

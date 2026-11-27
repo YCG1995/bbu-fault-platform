@@ -30,6 +30,23 @@ SUPPORTED_EXTENSIONS = (CSV_EXTENSIONS | TEXT_EXTENSIONS | HTML_EXTENSIONS
 QUESTION_KEYS = ("question", "问题", "标题", "故障现象", "title", "q")
 ANSWER_KEYS = ("answer", "答案", "回答", "内容", "故障描述", "content", "a")
 MAX_SECTION_CHARS = 2 * 1024 * 1024
+MAPPING_TARGETS = ("title", "symptom", "cause", "solution", "board", "domain",
+                   "version", "tags", "answer")
+MAPPING_LABELS = {
+    "symptom": "故障现象", "cause": "原因", "solution": "解决方案",
+    "board": "板卡", "domain": "领域", "version": "版本", "tags": "标签",
+}
+MAPPING_GUESS = {
+    "title": ("title", "标题", "问题", "故障标题", "q"),
+    "symptom": ("symptom", "故障现象", "现象", "症状", "问题描述", "描述"),
+    "cause": ("cause", "原因", "根因", "故障原因", "cause_detail"),
+    "solution": ("solution", "解决方案", "处理方案", "处理步骤", "措施", "解决办法", "方案"),
+    "answer": ("answer", "答案", "回答", "内容", "正文", "故障描述", "content"),
+    "board": ("board", "板卡", "单板", "board"),
+    "domain": ("domain", "领域", "专业领域", "domain"),
+    "version": ("version", "版本", "软件版本", "version"),
+    "tags": ("tags", "标签", "tag"),
+}
 
 
 @dataclass
@@ -133,6 +150,69 @@ def _pick_answer(row: dict[str, str], fallback: str) -> str:
     return fallback
 
 
+def normalize_mapping(mapping: dict[str, Any] | None) -> dict[str, str]:
+    if not mapping:
+        return {}
+    result: dict[str, str] = {}
+    for source, target in mapping.items():
+        source = str(source or "").strip()
+        target = str(target or "").strip()
+        if not source or target not in MAPPING_TARGETS:
+            raise ValueError(f"非法列映射：{source!r} -> {target!r}")
+        result[source] = target
+    if len(set(result.values())) != len(result):
+        raise ValueError("同一目标字段被映射了多列")
+    return result
+
+
+def guessed_mapping(headers: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    used: set[str] = set()
+    for header in headers:
+        key = normalize_text(str(header or "")).lower().strip()
+        for target, aliases in MAPPING_GUESS.items():
+            if target in used:
+                continue
+            if key == target or key in aliases:
+                result[str(header)] = target
+                used.add(target)
+                break
+    return result
+
+
+def validate_mapping(headers: list[str], mapping: dict[str, Any] | None) -> dict[str, str]:
+    clean = normalize_mapping(mapping)
+    if not clean:
+        return {}
+    header_set = {str(x) for x in headers}
+    missing = [source for source in clean if source not in header_set]
+    if missing:
+        raise ValueError("映射列不存在：" + "、".join(missing))
+    targets = set(clean.values())
+    if "answer" not in targets and not (targets & {"title", "symptom", "cause", "solution"}):
+        raise ValueError("映射必须至少包含 answer 或一个内容字段")
+    return clean
+
+
+def _mapped_parts(row: dict[str, str], mapping: dict[str, str],
+                  fallback_title: str) -> tuple[str, str]:
+    values = {target: str(row.get(source) or "").strip()
+              for source, target in mapping.items()}
+    title = values.get("title") or fallback_title
+    body_parts: list[str] = []
+    if values.get("answer"):
+        body_parts.append(values["answer"])
+    for target in ("symptom", "cause", "solution"):
+        if values.get(target):
+            body_parts.append(f"【{MAPPING_LABELS[target]}】{values[target]}")
+    for target in ("board", "domain", "version", "tags"):
+        if values.get(target):
+            body_parts.append(f"【{MAPPING_LABELS[target]}】{values[target]}")
+    if not body_parts:
+        body_parts.append("\n".join(str(v or "") for v in row.values()))
+    return title, "\n".join(body_parts)
+
+
 def _masked(raw_text: str, enabled: bool = True) -> tuple[str, bool]:
     if not enabled:
         return raw_text, False
@@ -168,7 +248,7 @@ def _document_from_text(title: str, body: str, *, source_name: str, source_type:
 
 
 def parse_csv_bytes(data: bytes, *, source_name: str, sha256: str = "",
-                    mask_enabled: bool = True) -> list[DocumentDraft]:
+                    mask_enabled: bool = True, mapping: dict[str, Any] | None = None) -> list[DocumentDraft]:
     text, _encoding = decode_text(data)
     text = text.lstrip("\ufeff")
     sample = text[:4096]
@@ -179,12 +259,17 @@ def parse_csv_bytes(data: bytes, *, source_name: str, sha256: str = "",
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     if not reader.fieldnames:
         raise ValueError("CSV 缺少表头")
+    clean_mapping = validate_mapping([str(x) for x in reader.fieldnames], mapping)
     rows: list[DocumentDraft] = []
     for index, row in enumerate(reader, start=1):
         if not isinstance(row, dict):
             continue
-        title = _pick_title(row, f"{source_name} 第 {index} 条")
-        answer = _pick_answer(row, "\n".join(str(v or "") for v in row.values()))
+        fallback = f"{source_name} 第 {index} 条"
+        if clean_mapping:
+            title, answer = _mapped_parts(row, clean_mapping, fallback)
+        else:
+            title = _pick_title(row, fallback)
+            answer = _pick_answer(row, "\n".join(str(v or "") for v in row.values()))
         if not str(answer or "").strip():
             continue
         row_sha = hashlib.sha256(
@@ -234,7 +319,8 @@ def parse_html_bytes(data: bytes, *, source_name: str, sha256: str = "",
 
 
 def parse_file(path: Path, filename: str, *, sha256: str = "",
-               pii_masked: bool = True) -> list[DocumentDraft]:
+               pii_masked: bool = True, mapping: dict[str, Any] | None = None,
+               sheet_name: str = "") -> list[DocumentDraft]:
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(
@@ -242,7 +328,7 @@ def parse_file(path: Path, filename: str, *, sha256: str = "",
     data = path.read_bytes()
     if suffix in CSV_EXTENSIONS:
         docs = parse_csv_bytes(data, source_name=filename, sha256=sha256,
-                               mask_enabled=pii_masked)
+                               mask_enabled=pii_masked, mapping=mapping)
     elif suffix in HTML_EXTENSIONS:
         docs = parse_html_bytes(data, source_name=filename, sha256=sha256,
                                 mask_enabled=pii_masked)
@@ -251,7 +337,8 @@ def parse_file(path: Path, filename: str, *, sha256: str = "",
                                 mask_enabled=pii_masked)
     elif suffix == ".xlsx":
         docs = parse_xlsx_bytes(data, source_name=filename, sha256=sha256,
-                                mask_enabled=pii_masked)
+                                mask_enabled=pii_masked, mapping=mapping,
+                                sheet_name=sheet_name)
     elif suffix == ".pdf":
         docs = parse_pdf_bytes(data, source_name=filename, sha256=sha256,
                                mask_enabled=pii_masked)
@@ -276,17 +363,29 @@ def parse_docx_bytes(data: bytes, *, source_name: str, sha256: str = "",
 
 
 def parse_xlsx_bytes(data: bytes, *, source_name: str, sha256: str = "",
-                     mask_enabled: bool = True) -> list[DocumentDraft]:
+                     mask_enabled: bool = True, mapping: dict[str, Any] | None = None,
+                     sheet_name: str = "") -> list[DocumentDraft]:
     sheets = extract_xlsx(data)
+    if sheet_name:
+        sheets = [x for x in sheets if str(x.get("sheet") or "") == str(sheet_name)]
+        if not sheets:
+            raise ValueError(f"工作表不存在：{sheet_name}")
+    elif mapping and len(sheets) > 1:
+        sheets = sheets[:1]
     docs: list[DocumentDraft] = []
     for sheet in sheets:
         headers = [str(x) for x in sheet.get("headers") or []]
+        clean_mapping = validate_mapping(headers, mapping)
         rows = sheet.get("rows") or []
         for index, values in enumerate(rows, start=1):
             row = {headers[i] if i < len(headers) else f"列{i + 1}": str(value or "")
                    for i, value in enumerate(values)}
-            title = _pick_title(row, f"{source_name} / {sheet['sheet']} 第 {index} 条")
-            answer = _pick_answer(row, "\n".join(row.values()))
+            fallback = f"{source_name} / {sheet['sheet']} 第 {index} 条"
+            if clean_mapping:
+                title, answer = _mapped_parts(row, clean_mapping, fallback)
+            else:
+                title = _pick_title(row, fallback)
+                answer = _pick_answer(row, "\n".join(row.values()))
             if not str(answer or "").strip():
                 continue
             row_sha = hashlib.sha256(
@@ -345,3 +444,51 @@ def parse_paste(text: str, *, title: str = "", source_name: str = "粘贴文本"
         (line.strip() for line in raw.splitlines() if line.strip()), source_name)
     return [_document_from_text(title_value, raw, source_name=source_name,
                                 source_type="paste", title_hint=title_value)]
+
+
+def preview_import_bytes(data: bytes, *, filename: str, mask_enabled: bool = True) -> dict[str, Any]:
+    """只读预览：表头、猜测映射、前 20 行脱敏样本；不落库。"""
+    suffix = Path(filename).suffix.lower()
+    if suffix in CSV_EXTENSIONS:
+        text, encoding = decode_text(data)
+        text = text.lstrip("\ufeff")
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        headers = [str(x) for x in (reader.fieldnames or [])]
+        rows = []
+        for index, row in enumerate(reader):
+            if index >= 20:
+                break
+            rows.append({str(k): (mask_pii(str(v or ""))[0] if mask_enabled else str(v or ""))
+                         for k, v in row.items()})
+        return {"format": "csv", "encoding": encoding,
+                "delimiter": getattr(dialect, "delimiter", ","), "headers": headers,
+                "guessed_mapping": guessed_mapping(headers), "rows": rows,
+                "sample_count": len(rows)}
+    if suffix == ".xlsx":
+        sheets = []
+        for sheet in extract_xlsx(data):
+            headers = [str(x) for x in sheet.get("headers") or []]
+            rows = []
+            for values in (sheet.get("rows") or [])[:20]:
+                rows.append({headers[i] if i < len(headers) else f"列{i + 1}":
+                             (mask_pii(str(value or ""))[0] if mask_enabled
+                              else str(value or ""))
+                             for i, value in enumerate(values)})
+            sheets.append({"sheet": sheet.get("sheet"), "headers": headers,
+                           "guessed_mapping": guessed_mapping(headers), "rows": rows,
+                           "sample_count": len(rows)})
+        return {"format": "xlsx", "sheets": sheets,
+                "headers": sheets[0]["headers"] if sheets else [],
+                "guessed_mapping": sheets[0]["guessed_mapping"] if sheets else {},
+                "rows": sheets[0]["rows"] if sheets else []}
+    raise ValueError("列映射预览仅支持 CSV / XLSX")
+
+
+def preview_import_file(path: Path, filename: str, *, mask_enabled: bool = True) -> dict[str, Any]:
+    return preview_import_bytes(Path(path).read_bytes(), filename=filename,
+                                mask_enabled=mask_enabled)

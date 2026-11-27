@@ -2,11 +2,11 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 140,
-    "action_instances": 316,
-    "buttons_all": 282,
-    "buttons_page": 265,
-    "modal_calls": 33,
+    "distinct_actions": 154,
+    "action_instances": 331,
+    "buttons_all": 297,
+    "buttons_page": 280,
+    "modal_calls": 34,
     "forms": 21
   },
   "actions": [
@@ -70,6 +70,13 @@
     },
     {
       "action": "audit-filter",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "auto-publish",
       "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
@@ -188,7 +195,7 @@
     },
     {
       "action": "close",
-      "instances": 18,
+      "instances": 19,
       "files": [
         "web/assets/js/app.js",
         "web/assets/js/page_admin.js",
@@ -356,6 +363,13 @@
       ]
     },
     {
+      "action": "dup-preview",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "edit",
       "instances": 1,
       "files": [
@@ -370,6 +384,34 @@
       ]
     },
     {
+      "action": "eval-delete",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "eval-import",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "eval-run",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "eval-view",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "example",
       "instances": 1,
       "files": [
@@ -381,6 +423,13 @@
       "instances": 1,
       "files": [
         "web/assets/js/page_admin.js"
+      ]
+    },
+    {
+      "action": "export-report",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -504,6 +553,13 @@
       ]
     },
     {
+      "action": "merge",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "metric",
       "instances": 2,
       "files": [
@@ -604,6 +660,13 @@
       "files": [
         "web/assets/js/page_admin.js",
         "web/assets/js/page_usage.js"
+      ]
+    },
+    {
+      "action": "preview-mapping",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -945,6 +1008,41 @@
       "instances": 1,
       "files": [
         "web/assets/js/page_task_detail.js"
+      ]
+    },
+    {
+      "action": "term-delete",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "term-edit",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "term-import",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "term-reset",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "term-save",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {

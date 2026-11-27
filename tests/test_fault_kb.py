@@ -238,7 +238,7 @@ class KBServiceTests(unittest.TestCase):
             svc.shutdown()
 
     def test_schema_and_sample_import(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 26)
+        self.assertEqual(SCHEMA_VERSION, 27)
         for table in ("kb_documents", "kb_cases", "kb_import_jobs", "kb_drafts",
                       "kb_doc_versions", "kb_query_logs", "kb_feedback", "kb_index_meta"):
             row = self.db.one("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
