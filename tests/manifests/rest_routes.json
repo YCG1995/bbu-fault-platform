@@ -1,0 +1,6602 @@
+{
+  "schema": 1,
+  "generated_by": "tools/gen_manifests.py",
+  "total": 243,
+  "routes": [
+    {
+      "id": "route-001",
+      "method": "GET",
+      "path": "/api/health",
+      "regex": "/api/health",
+      "handler": "h_health",
+      "auth": "public",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-001-happy",
+        "rest-001-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-002",
+      "method": "GET",
+      "path": "/api/public/config",
+      "regex": "/api/public/config",
+      "handler": "h_public_config",
+      "auth": "public",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-002-happy",
+        "rest-002-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-003",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "regex": "/api/auth/login",
+      "handler": "h_login",
+      "auth": "public",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "username",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        401
+      ],
+      "case_ids": [
+        "rest-003-happy",
+        "rest-003-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-004",
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "regex": "/api/auth/logout",
+      "handler": "h_logout",
+      "auth": "public",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-004-happy",
+        "rest-004-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-005",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "regex": "/api/auth/me",
+      "handler": "h_me",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-005-happy",
+        "rest-005-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-006",
+      "method": "POST",
+      "path": "/api/auth/password",
+      "regex": "/api/auth/password",
+      "handler": "h_change_password",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "new_password",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "old_password",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-006-happy",
+        "rest-006-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-007",
+      "method": "POST",
+      "path": "/api/auth/activate",
+      "regex": "/api/auth/activate",
+      "handler": "h_activate",
+      "auth": "public",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "code",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-007-happy",
+        "rest-007-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-008",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "regex": "/api/auth/register",
+      "handler": "h_register",
+      "auth": "public",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "display_name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "domain",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "username",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403
+      ],
+      "case_ids": [
+        "rest-008-happy",
+        "rest-008-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-009",
+      "method": "POST",
+      "path": "/api/auth/refresh",
+      "regex": "/api/auth/refresh",
+      "handler": "h_session_refresh",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-009-happy",
+        "rest-009-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-010",
+      "method": "GET",
+      "path": "/api/auth/sessions",
+      "regex": "/api/auth/sessions",
+      "handler": "h_sessions",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-010-happy",
+        "rest-010-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-011",
+      "method": "POST",
+      "path": "/api/auth/sessions/revoke-others",
+      "regex": "/api/auth/sessions/revoke-others",
+      "handler": "h_revoke_other_sessions",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-011-happy",
+        "rest-011-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-012",
+      "method": "DELETE",
+      "path": "/api/auth/sessions/{session_id}",
+      "regex": "/api/auth/sessions/(?P<session_id>[a-f0-9]{12})",
+      "handler": "h_revoke_session",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400,
+        404
+      ],
+      "case_ids": [
+        "rest-012-happy",
+        "rest-012-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-013",
+      "method": "GET",
+      "path": "/api/stats",
+      "regex": "/api/stats",
+      "handler": "h_stats",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-013-happy",
+        "rest-013-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-014",
+      "method": "GET",
+      "path": "/api/metrics",
+      "regex": "/api/metrics",
+      "handler": "h_metrics",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-014-happy",
+        "rest-014-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-015",
+      "method": "GET",
+      "path": "/api/metrics/prometheus",
+      "regex": "/api/metrics/prometheus",
+      "handler": "h_metrics_prometheus",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "token",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-015-happy",
+        "rest-015-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-016",
+      "method": "GET",
+      "path": "/api/usage/overview",
+      "regex": "/api/usage/overview",
+      "handler": "h_usage_overview",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-016-happy",
+        "rest-016-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-017",
+      "method": "GET",
+      "path": "/api/usage/tasks",
+      "regex": "/api/usage/tasks",
+      "handler": "h_usage_tasks",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "page_size",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-017-happy",
+        "rest-017-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-018",
+      "method": "GET",
+      "path": "/mcp",
+      "regex": "/mcp",
+      "handler": "h_mcp_http",
+      "auth": "public",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-018-happy",
+        "rest-018-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-019",
+      "method": "POST",
+      "path": "/mcp",
+      "regex": "/mcp",
+      "handler": "h_mcp_http",
+      "auth": "public",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-019-happy",
+        "rest-019-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-020",
+      "method": "GET",
+      "path": "/api/assistant/status",
+      "regex": "/api/assistant/status",
+      "handler": "h_assistant_status",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-020-happy",
+        "rest-020-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-021",
+      "method": "GET",
+      "path": "/api/assistant/suggestions",
+      "regex": "/api/assistant/suggestions",
+      "handler": "h_assistant_suggestions",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-021-happy",
+        "rest-021-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-022",
+      "method": "POST",
+      "path": "/api/assistant/chat",
+      "regex": "/api/assistant/chat",
+      "handler": "h_assistant_chat",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "messages",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-022-happy",
+        "rest-022-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-023",
+      "method": "POST",
+      "path": "/api/assistant/actions/{action_id}/confirm",
+      "regex": "/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/confirm",
+      "handler": "h_assistant_confirm",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "action_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-023-happy",
+        "rest-023-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-024",
+      "method": "POST",
+      "path": "/api/assistant/actions/{action_id}/cancel",
+      "regex": "/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/cancel",
+      "handler": "h_assistant_cancel",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "action_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-024-happy",
+        "rest-024-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-025",
+      "method": "GET",
+      "path": "/api/kb/status",
+      "regex": "/api/kb/status",
+      "handler": "h_kb_status",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-025-happy",
+        "rest-025-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-026",
+      "method": "GET",
+      "path": "/api/kb/libraries",
+      "regex": "/api/kb/libraries",
+      "handler": "h_kb_libraries_list",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "include_archived",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-026-happy",
+        "rest-026-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-027",
+      "method": "POST",
+      "path": "/api/kb/libraries",
+      "regex": "/api/kb/libraries",
+      "handler": "h_kb_library_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "description",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kind",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "visibility",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-027-happy",
+        "rest-027-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-028",
+      "method": "PUT",
+      "path": "/api/kb/libraries/{kb_id}",
+      "regex": "/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_library_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "kb_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-028-happy",
+        "rest-028-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-029",
+      "method": "POST",
+      "path": "/api/kb/libraries/{kb_id}/archive",
+      "regex": "/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)/archive",
+      "handler": "h_kb_library_archive",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "kb_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-029-happy",
+        "rest-029-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-030",
+      "method": "GET",
+      "path": "/api/kb/libraries/{kb_id}/backup",
+      "regex": "/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)/backup",
+      "handler": "h_kb_library_backup",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "kb_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-030-happy",
+        "rest-030-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-031",
+      "method": "POST",
+      "path": "/api/kb/libraries/restore",
+      "regex": "/api/kb/libraries/restore",
+      "handler": "h_kb_library_restore",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400,
+        413
+      ],
+      "case_ids": [
+        "rest-031-happy",
+        "rest-031-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-032",
+      "method": "GET",
+      "path": "/api/kb/operations",
+      "regex": "/api/kb/operations",
+      "handler": "h_kb_operations",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "kb_id",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-032-happy",
+        "rest-032-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-033",
+      "method": "GET",
+      "path": "/api/kb/facets",
+      "regex": "/api/kb/facets",
+      "handler": "h_kb_facets",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-033-happy",
+        "rest-033-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-034",
+      "method": "GET",
+      "path": "/api/kb/docs",
+      "regex": "/api/kb/docs",
+      "handler": "h_kb_docs",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "board",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "domain",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "q",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "size",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-034-happy",
+        "rest-034-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-035",
+      "method": "POST",
+      "path": "/api/kb/docs",
+      "regex": "/api/kb/docs",
+      "handler": "h_kb_doc_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "content",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "text",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "title",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        413
+      ],
+      "case_ids": [
+        "rest-035-happy",
+        "rest-035-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-036",
+      "method": "GET",
+      "path": "/api/kb/docs/{doc_id}",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_doc_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-036-happy",
+        "rest-036-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-037",
+      "method": "GET",
+      "path": "/api/kb/cases/{case_id}",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_case_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-037-happy",
+        "rest-037-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-038",
+      "method": "PUT",
+      "path": "/api/kb/cases/{case_id}",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_case_update",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-038-happy",
+        "rest-038-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-039",
+      "method": "POST",
+      "path": "/api/kb/cases/{case_id}/status",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/status",
+      "handler": "h_kb_case_status",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-039-happy",
+        "rest-039-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-040",
+      "method": "GET",
+      "path": "/api/kb/cases/{case_id}/revisions",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions",
+      "handler": "h_kb_case_revisions",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "size",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-040-happy",
+        "rest-040-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-041",
+      "method": "GET",
+      "path": "/api/kb/cases/{case_id}/revisions/verify",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/verify",
+      "handler": "h_kb_case_verify",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-041-happy",
+        "rest-041-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-042",
+      "method": "GET",
+      "path": "/api/kb/cases/{case_id}/revisions/{revision}",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)",
+      "handler": "h_kb_case_revision",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-042-happy",
+        "rest-042-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-043",
+      "method": "POST",
+      "path": "/api/kb/cases/{case_id}/revisions/{revision}/restore",
+      "regex": "/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)/restore",
+      "handler": "h_kb_case_restore",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-043-happy",
+        "rest-043-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-044",
+      "method": "GET",
+      "path": "/api/kb/search",
+      "regex": "/api/kb/search",
+      "handler": "h_kb_search",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "q",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "query",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-044-happy",
+        "rest-044-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-045",
+      "method": "PUT",
+      "path": "/api/kb/docs/{doc_id}",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_doc_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-045-happy",
+        "rest-045-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-046",
+      "method": "POST",
+      "path": "/api/kb/docs/{doc_id}/status",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/status",
+      "handler": "h_kb_doc_status",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-046-happy",
+        "rest-046-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-047",
+      "method": "POST",
+      "path": "/api/kb/docs/{doc_id}/restore",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/restore",
+      "handler": "h_kb_doc_restore_alias",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "version",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "version_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-047-happy",
+        "rest-047-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-048",
+      "method": "DELETE",
+      "path": "/api/kb/docs/{doc_id}",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_doc_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-048-happy",
+        "rest-048-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-049",
+      "method": "GET",
+      "path": "/api/kb/docs/{doc_id}/versions",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions",
+      "handler": "h_kb_doc_versions",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-049-happy",
+        "rest-049-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-050",
+      "method": "POST",
+      "path": "/api/kb/docs/{doc_id}/versions/{version_id}/restore",
+      "regex": "/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions/(?P<version_id>[A-Za-z0-9_-]+)/restore",
+      "handler": "h_kb_doc_restore",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "doc_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "version_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-050-happy",
+        "rest-050-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-051",
+      "method": "GET",
+      "path": "/api/kb/files/{file_id}",
+      "regex": "/api/kb/files/(?P<file_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_file",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "file_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        403
+      ],
+      "case_ids": [
+        "rest-051-happy",
+        "rest-051-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-052",
+      "method": "POST",
+      "path": "/api/kb/import/preview",
+      "regex": "/api/kb/import/preview",
+      "handler": "h_kb_import_preview",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-052-happy",
+        "rest-052-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-053",
+      "method": "POST",
+      "path": "/api/kb/import",
+      "regex": "/api/kb/import",
+      "handler": "h_kb_import",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-053-happy",
+        "rest-053-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-054",
+      "method": "GET",
+      "path": "/api/kb/import/jobs",
+      "regex": "/api/kb/import/jobs",
+      "handler": "h_kb_jobs",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-054-happy",
+        "rest-054-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-055",
+      "method": "GET",
+      "path": "/api/kb/import/jobs/{job_id}",
+      "regex": "/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_job",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-055-happy",
+        "rest-055-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-056",
+      "method": "POST",
+      "path": "/api/kb/import/jobs/{job_id}/cancel",
+      "regex": "/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)/cancel",
+      "handler": "h_kb_job_cancel",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-056-happy",
+        "rest-056-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-057",
+      "method": "POST",
+      "path": "/api/kb/import/jobs/rollback",
+      "regex": "/api/kb/import/jobs/rollback",
+      "handler": "h_kb_jobs_rollback",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-057-happy",
+        "rest-057-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-058",
+      "method": "POST",
+      "path": "/api/kb/import/jobs/delete",
+      "regex": "/api/kb/import/jobs/delete",
+      "handler": "h_kb_jobs_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-058-happy",
+        "rest-058-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-059",
+      "method": "POST",
+      "path": "/api/kb/import/jobs/retry",
+      "regex": "/api/kb/import/jobs/retry",
+      "handler": "h_kb_jobs_retry",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-059-happy",
+        "rest-059-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-060",
+      "method": "GET",
+      "path": "/api/kb/drafts",
+      "regex": "/api/kb/drafts",
+      "handler": "h_kb_drafts",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-060-happy",
+        "rest-060-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-061",
+      "method": "GET",
+      "path": "/api/kb/drafts/{draft_id}",
+      "regex": "/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_draft",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-061-happy",
+        "rest-061-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-062",
+      "method": "PUT",
+      "path": "/api/kb/drafts/{draft_id}",
+      "regex": "/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_draft_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-062-happy",
+        "rest-062-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-063",
+      "method": "POST",
+      "path": "/api/kb/drafts/{draft_id}/approve",
+      "regex": "/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/approve",
+      "handler": "h_kb_draft_approve",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-063-happy",
+        "rest-063-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-064",
+      "method": "POST",
+      "path": "/api/kb/drafts/{draft_id}/reject",
+      "regex": "/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/reject",
+      "handler": "h_kb_draft_reject",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-064-happy",
+        "rest-064-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-065",
+      "method": "POST",
+      "path": "/api/kb/chat",
+      "regex": "/api/kb/chat",
+      "handler": "h_kb_chat",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "filters",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "message",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "messages",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "query",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        413
+      ],
+      "case_ids": [
+        "rest-065-happy",
+        "rest-065-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-066",
+      "method": "POST",
+      "path": "/api/kb/feedback",
+      "regex": "/api/kb/feedback",
+      "handler": "h_kb_feedback",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "helpful",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "query_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-066-happy",
+        "rest-066-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-067",
+      "method": "POST",
+      "path": "/api/kb/reindex",
+      "regex": "/api/kb/reindex",
+      "handler": "h_kb_reindex",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-067-happy",
+        "rest-067-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-068",
+      "method": "GET",
+      "path": "/api/kb/queries",
+      "regex": "/api/kb/queries",
+      "handler": "h_kb_queries",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-068-happy",
+        "rest-068-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-069",
+      "method": "POST",
+      "path": "/api/kb/sample",
+      "regex": "/api/kb/sample",
+      "handler": "h_kb_sample",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-069-happy",
+        "rest-069-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-070",
+      "method": "GET",
+      "path": "/api/kb/audit",
+      "regex": "/api/kb/audit",
+      "handler": "h_kb_audit",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "action",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "actor",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "format",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "since",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "target",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "until",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-070-happy",
+        "rest-070-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-071",
+      "method": "POST",
+      "path": "/api/kb/export/report",
+      "regex": "/api/kb/export/report",
+      "handler": "h_kb_export_report",
+      "auth": "admin",
+      "mutating": true,
+      "binary": true,
+      "params": [
+        {
+          "in": "body",
+          "name": "case_ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "doc_ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "formats",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reveal",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "title",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-071-happy",
+        "rest-071-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-072",
+      "method": "GET",
+      "path": "/api/kb/duplicates",
+      "regex": "/api/kb/duplicates",
+      "handler": "h_kb_duplicates",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "threshold",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-072-happy",
+        "rest-072-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-073",
+      "method": "GET",
+      "path": "/api/kb/duplicates/preview",
+      "regex": "/api/kb/duplicates/preview",
+      "handler": "h_kb_duplicate_preview",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "source",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "target",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-073-happy",
+        "rest-073-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-074",
+      "method": "POST",
+      "path": "/api/kb/duplicates/merge",
+      "regex": "/api/kb/duplicates/merge",
+      "handler": "h_kb_duplicate_merge",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "merge_token",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "source",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "source_doc_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "target",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "target_doc_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-074-happy",
+        "rest-074-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-075",
+      "method": "GET",
+      "path": "/api/kb/eval/sets",
+      "regex": "/api/kb/eval/sets",
+      "handler": "h_kb_eval_sets",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-075-happy",
+        "rest-075-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-076",
+      "method": "POST",
+      "path": "/api/kb/eval/sets",
+      "regex": "/api/kb/eval/sets",
+      "handler": "h_kb_eval_set_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "content",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "description",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "filename",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kind",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "queries",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-076-happy",
+        "rest-076-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-077",
+      "method": "GET",
+      "path": "/api/kb/eval/sets/{set_id}",
+      "regex": "/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_eval_set",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "set_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-077-happy",
+        "rest-077-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-078",
+      "method": "DELETE",
+      "path": "/api/kb/eval/sets/{set_id}",
+      "regex": "/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_eval_set_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "set_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-078-happy",
+        "rest-078-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-079",
+      "method": "POST",
+      "path": "/api/kb/eval/sets/{set_id}/run",
+      "regex": "/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)/run",
+      "handler": "h_kb_eval_run",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "set_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "top_k",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-079-happy",
+        "rest-079-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-080",
+      "method": "GET",
+      "path": "/api/kb/eval/runs",
+      "regex": "/api/kb/eval/runs",
+      "handler": "h_kb_eval_runs",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "set_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-080-happy",
+        "rest-080-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-081",
+      "method": "GET",
+      "path": "/api/kb/eval/runs/{run_id}",
+      "regex": "/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_eval_run_get",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-081-happy",
+        "rest-081-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-082",
+      "method": "GET",
+      "path": "/api/kb/eval/runs/{run_id}/export",
+      "regex": "/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)/export",
+      "handler": "h_kb_eval_export",
+      "auth": "admin",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "format",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-082-happy",
+        "rest-082-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-083",
+      "method": "GET",
+      "path": "/api/kb/terms",
+      "regex": "/api/kb/terms",
+      "handler": "h_kb_terms",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-083-happy",
+        "rest-083-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-084",
+      "method": "POST",
+      "path": "/api/kb/terms",
+      "regex": "/api/kb/terms",
+      "handler": "h_kb_term_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-084-happy",
+        "rest-084-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-085",
+      "method": "GET",
+      "path": "/api/kb/terms/export",
+      "regex": "/api/kb/terms/export",
+      "handler": "h_kb_terms_export",
+      "auth": "admin",
+      "mutating": false,
+      "binary": true,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-085-happy",
+        "rest-085-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-086",
+      "method": "POST",
+      "path": "/api/kb/terms/import",
+      "regex": "/api/kb/terms/import",
+      "handler": "h_kb_terms_import",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "content",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-086-happy",
+        "rest-086-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-087",
+      "method": "PUT",
+      "path": "/api/kb/terms/{term_id}",
+      "regex": "/api/kb/terms/(?P<term_id>[0-9]+)",
+      "handler": "h_kb_term_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "term_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-087-happy",
+        "rest-087-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-088",
+      "method": "DELETE",
+      "path": "/api/kb/terms/{term_id}",
+      "regex": "/api/kb/terms/(?P<term_id>[0-9]+)",
+      "handler": "h_kb_term_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "term_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-088-happy",
+        "rest-088-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-089",
+      "method": "GET",
+      "path": "/api/kb/stats",
+      "regex": "/api/kb/stats",
+      "handler": "h_kb_stats",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "days",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "format",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-089-happy",
+        "rest-089-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-090",
+      "method": "GET",
+      "path": "/api/kb/reviews/auto-publish/dry-run",
+      "regex": "/api/kb/reviews/auto-publish/dry-run",
+      "handler": "h_kb_auto_publish_dry_run",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-090-happy",
+        "rest-090-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-091",
+      "method": "GET",
+      "path": "/api/kb/reviews",
+      "regex": "/api/kb/reviews",
+      "handler": "h_kb_reviews",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "target_type",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-091-happy",
+        "rest-091-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-092",
+      "method": "GET",
+      "path": "/api/kb/reviews/{review_id}",
+      "regex": "/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)",
+      "handler": "h_kb_review",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "review_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-092-happy",
+        "rest-092-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-093",
+      "method": "POST",
+      "path": "/api/kb/reviews",
+      "regex": "/api/kb/reviews",
+      "handler": "h_kb_review_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "run",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "stage",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "target_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "target_type",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "targets",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-093-happy",
+        "rest-093-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-094",
+      "method": "POST",
+      "path": "/api/kb/reviews/run",
+      "regex": "/api/kb/reviews/run",
+      "handler": "h_kb_reviews_run",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "limit",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-094-happy",
+        "rest-094-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-095",
+      "method": "POST",
+      "path": "/api/kb/reviews/batch-decision",
+      "regex": "/api/kb/reviews/batch-decision",
+      "handler": "h_kb_reviews_batch_decision",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "apply_patch",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "decision",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "note",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "review_ids",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-095-happy",
+        "rest-095-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-096",
+      "method": "POST",
+      "path": "/api/kb/reviews/batch-retry",
+      "regex": "/api/kb/reviews/batch-retry",
+      "handler": "h_kb_reviews_batch_retry",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "review_ids",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-096-happy",
+        "rest-096-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-097",
+      "method": "POST",
+      "path": "/api/kb/reviews/{review_id}/decision",
+      "regex": "/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/decision",
+      "handler": "h_kb_review_decision",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "review_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "apply_patch",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "decision",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "note",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-097-happy",
+        "rest-097-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-098",
+      "method": "POST",
+      "path": "/api/kb/reviews/{review_id}/auto-publish",
+      "regex": "/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/auto-publish",
+      "handler": "h_kb_auto_publish",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "review_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-098-happy",
+        "rest-098-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-099",
+      "method": "POST",
+      "path": "/api/kb/reviews/{review_id}/retry",
+      "regex": "/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/retry",
+      "handler": "h_kb_review_retry",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "review_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-099-happy",
+        "rest-099-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-100",
+      "method": "GET",
+      "path": "/api/mcp/info",
+      "regex": "/api/mcp/info",
+      "handler": "h_mcp_info",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-100-happy",
+        "rest-100-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-101",
+      "method": "POST",
+      "path": "/api/mcp/token",
+      "regex": "/api/mcp/token",
+      "handler": "h_mcp_token_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "mode",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-101-happy",
+        "rest-101-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-102",
+      "method": "DELETE",
+      "path": "/api/mcp/token",
+      "regex": "/api/mcp/token",
+      "handler": "h_mcp_token_delete",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-102-happy",
+        "rest-102-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-103",
+      "method": "GET",
+      "path": "/api/cases",
+      "regex": "/api/cases",
+      "handler": "h_cases",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "assigned",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "review_status",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "split",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-103-happy",
+        "rest-103-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-104",
+      "method": "GET",
+      "path": "/api/cases/{case_id}",
+      "regex": "/api/cases/(?P<case_id>[A-Za-z0-9_-]+)",
+      "handler": "h_case_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-104-happy",
+        "rest-104-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-105",
+      "method": "POST",
+      "path": "/api/cases/{case_id}/label",
+      "regex": "/api/cases/(?P<case_id>[A-Za-z0-9_-]+)/label",
+      "handler": "h_case_label",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "action",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "decision_note",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "excluded_roots",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "expected_roots",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "labels",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "review_status",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-105-happy",
+        "rest-105-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-106",
+      "method": "POST",
+      "path": "/api/cases/{case_id}/assign-reviewer",
+      "regex": "/api/cases/(?P<case_id>[A-Za-z0-9_-]+)/assign-reviewer",
+      "handler": "h_case_assign",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "note",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reviewer_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-106-happy",
+        "rest-106-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-107",
+      "method": "GET",
+      "path": "/api/cases/{case_id}/history",
+      "regex": "/api/cases/(?P<case_id>[A-Za-z0-9_-]+)/history",
+      "handler": "h_case_history",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "case_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-107-happy",
+        "rest-107-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-108",
+      "method": "GET",
+      "path": "/api/evaluations",
+      "regex": "/api/evaluations",
+      "handler": "h_evaluations",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-108-happy",
+        "rest-108-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-109",
+      "method": "POST",
+      "path": "/api/evaluations/run",
+      "regex": "/api/evaluations/run",
+      "handler": "h_evaluation_run",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "case_ids",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "llm_mode",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_config_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "split",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403
+      ],
+      "case_ids": [
+        "rest-109-happy",
+        "rest-109-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-110",
+      "method": "GET",
+      "path": "/api/search",
+      "regex": "/api/search",
+      "handler": "h_global_search",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "q",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-110-happy",
+        "rest-110-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-111",
+      "method": "GET",
+      "path": "/api/notifications",
+      "regex": "/api/notifications",
+      "handler": "h_notifications",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "unread",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-111-happy",
+        "rest-111-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-112",
+      "method": "POST",
+      "path": "/api/notifications/{note_id}/read",
+      "regex": "/api/notifications/(?P<note_id>[A-Za-z0-9_-]+)/read",
+      "handler": "h_notification_read",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "note_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-112-happy",
+        "rest-112-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-113",
+      "method": "POST",
+      "path": "/api/notifications/read-all",
+      "regex": "/api/notifications/read-all",
+      "handler": "h_notifications_read_all",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-113-happy",
+        "rest-113-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-114",
+      "method": "GET",
+      "path": "/api/task-drafts/current",
+      "regex": "/api/task-drafts/current",
+      "handler": "h_task_draft_current",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-114-happy",
+        "rest-114-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-115",
+      "method": "POST",
+      "path": "/api/task-drafts",
+      "regex": "/api/task-drafts",
+      "handler": "h_task_draft_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-115-happy",
+        "rest-115-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-116",
+      "method": "PUT",
+      "path": "/api/task-drafts/{draft_id}",
+      "regex": "/api/task-drafts/(?P<draft_id>[Dd][A-Za-z0-9_-]+)",
+      "handler": "h_task_draft_update",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-116-happy",
+        "rest-116-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-117",
+      "method": "DELETE",
+      "path": "/api/task-drafts/{draft_id}",
+      "regex": "/api/task-drafts/(?P<draft_id>[Dd][A-Za-z0-9_-]+)",
+      "handler": "h_task_draft_delete",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-117-happy",
+        "rest-117-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-118",
+      "method": "POST",
+      "path": "/api/task-drafts/{draft_id}/files",
+      "regex": "/api/task-drafts/(?P<draft_id>[Dd][A-Za-z0-9_-]+)/files",
+      "handler": "h_task_draft_file",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-118-happy",
+        "rest-118-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-119",
+      "method": "DELETE",
+      "path": "/api/task-drafts/{draft_id}/files/{file_id}",
+      "regex": "/api/task-drafts/(?P<draft_id>[Dd][A-Za-z0-9_-]+)/files/(?P<file_id>[A-Za-z0-9_-]+)",
+      "handler": "h_task_draft_file_delete",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "file_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-119-happy",
+        "rest-119-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-120",
+      "method": "GET",
+      "path": "/api/tasks",
+      "regex": "/api/tasks",
+      "handler": "h_tasks",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "page_size",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "q",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "review_status",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-120-happy",
+        "rest-120-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-121",
+      "method": "POST",
+      "path": "/api/tasks",
+      "regex": "/api/tasks",
+      "handler": "h_task_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400,
+        429
+      ],
+      "case_ids": [
+        "rest-121-happy",
+        "rest-121-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-122",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)",
+      "handler": "h_task_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-122-happy",
+        "rest-122-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-123",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/questions",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/questions",
+      "handler": "h_task_questions",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-123-happy",
+        "rest-123-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-124",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/session",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/session",
+      "handler": "h_task_session",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-124-happy",
+        "rest-124-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-125",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/evidence",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/evidence",
+      "handler": "h_task_evidence",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "offset",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-125-happy",
+        "rest-125-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-126",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/agent-trace",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/agent-trace",
+      "handler": "h_agent_trace",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-126-happy",
+        "rest-126-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-127",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/recovery-runs",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/recovery-runs",
+      "handler": "h_recovery_runs",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-127-happy",
+        "rest-127-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-128",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/recovery-runs",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/recovery-runs",
+      "handler": "h_recovery_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "before",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "source",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        409
+      ],
+      "case_ids": [
+        "rest-128-happy",
+        "rest-128-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-129",
+      "method": "POST",
+      "path": "/api/recovery-runs/{run_id}/observe",
+      "regex": "/api/recovery-runs/(?P<run_id>[A-Za-z0-9_-]+)/observe",
+      "handler": "h_recovery_observe",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "after",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        404,
+        409
+      ],
+      "case_ids": [
+        "rest-129-happy",
+        "rest-129-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-130",
+      "method": "POST",
+      "path": "/api/recovery-runs/{run_id}/review",
+      "regex": "/api/recovery-runs/(?P<run_id>[A-Za-z0-9_-]+)/review",
+      "handler": "h_recovery_review",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "decision",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "note",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-130-happy",
+        "rest-130-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-131",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/inputs",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/inputs",
+      "handler": "h_task_inputs",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "answers",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        409,
+        429
+      ],
+      "case_ids": [
+        "rest-131-happy",
+        "rest-131-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-132",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/continue",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/continue",
+      "handler": "h_task_continue",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400,
+        409,
+        429
+      ],
+      "case_ids": [
+        "rest-132-happy",
+        "rest-132-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-133",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/events",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/events",
+      "handler": "h_task_events",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "after",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-133-happy",
+        "rest-133-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-134",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/stream",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/stream",
+      "handler": "h_task_stream",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "after",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-134-happy",
+        "rest-134-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-135",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/cancel",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/cancel",
+      "handler": "h_task_cancel",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-135-happy",
+        "rest-135-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-136",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/retry",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/retry",
+      "handler": "h_task_retry",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400,
+        429
+      ],
+      "case_ids": [
+        "rest-136-happy",
+        "rest-136-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-137",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/release",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/release",
+      "handler": "h_task_release",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-137-happy",
+        "rest-137-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-138",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/storage-jobs",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/storage-jobs",
+      "handler": "h_task_storage_jobs",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-138-happy",
+        "rest-138-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-139",
+      "method": "GET",
+      "path": "/api/storage/overview",
+      "regex": "/api/storage/overview",
+      "handler": "h_storage_overview",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-139-happy",
+        "rest-139-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-140",
+      "method": "GET",
+      "path": "/api/storage/jobs/{job_id}",
+      "regex": "/api/storage/jobs/(?P<job_id>[A-Za-z0-9_-]+)",
+      "handler": "h_storage_job",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-140-happy",
+        "rest-140-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-141",
+      "method": "GET",
+      "path": "/api/backups",
+      "regex": "/api/backups",
+      "handler": "h_backups",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-141-happy",
+        "rest-141-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-142",
+      "method": "DELETE",
+      "path": "/api/backups/{name}",
+      "regex": "/api/backups/(?P<name>[A-Za-z0-9._-]+)",
+      "handler": "h_backup_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-142-happy",
+        "rest-142-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-143",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/report",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/report",
+      "handler": "h_task_report",
+      "auth": "user",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "download",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "format",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-143-happy",
+        "rest-143-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-144",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/review",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/review",
+      "handler": "h_task_review",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400,
+        403
+      ],
+      "case_ids": [
+        "rest-144-happy",
+        "rest-144-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-145",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/assign-reviewer",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/assign-reviewer",
+      "handler": "h_task_assign_reviewer",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "reviewer_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        404
+      ],
+      "case_ids": [
+        "rest-145-happy",
+        "rest-145-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-146",
+      "method": "GET",
+      "path": "/api/quality",
+      "regex": "/api/quality",
+      "handler": "h_quality",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-146-happy",
+        "rest-146-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-147",
+      "method": "GET",
+      "path": "/api/tasks/{task_id}/skills/{skill}/report",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/skills/(?P<skill>[A-Za-z0-9_-]+)/report",
+      "handler": "h_skill_report",
+      "auth": "user",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "skill",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "download",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "format",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-147-happy",
+        "rest-147-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-148",
+      "method": "GET",
+      "path": "/api/skills",
+      "regex": "/api/skills",
+      "handler": "h_skills",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-148-happy",
+        "rest-148-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-149",
+      "method": "GET",
+      "path": "/api/skills/{name}",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)",
+      "handler": "h_skill_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-149-happy",
+        "rest-149-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-150",
+      "method": "POST",
+      "path": "/api/skills/scan",
+      "regex": "/api/skills/scan",
+      "handler": "h_skill_scan",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-150-happy",
+        "rest-150-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-151",
+      "method": "POST",
+      "path": "/api/skills/{name}/disable",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/disable",
+      "handler": "h_skill_disable",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-151-happy",
+        "rest-151-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-152",
+      "method": "POST",
+      "path": "/api/skills/{name}/enable",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/enable",
+      "handler": "h_skill_enable",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-152-happy",
+        "rest-152-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-153",
+      "method": "POST",
+      "path": "/api/skills/import",
+      "regex": "/api/skills/import",
+      "handler": "h_skill_import",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400,
+        409,
+        422
+      ],
+      "case_ids": [
+        "rest-153-happy",
+        "rest-153-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-154",
+      "method": "GET",
+      "path": "/api/skills/{name}/tool",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/tool",
+      "handler": "h_skill_tool",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-154-happy",
+        "rest-154-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-155",
+      "method": "GET",
+      "path": "/api/skills/{name}/manifest",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest",
+      "handler": "h_skill_manifest",
+      "auth": "user",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-155-happy",
+        "rest-155-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-156",
+      "method": "POST",
+      "path": "/api/skills/{name}/manifest/sign",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest/sign",
+      "handler": "h_skill_manifest_sign",
+      "auth": "admin",
+      "mutating": true,
+      "binary": true,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-156-happy",
+        "rest-156-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-157",
+      "method": "GET",
+      "path": "/api/tool-calls",
+      "regex": "/api/tool-calls",
+      "handler": "h_tool_calls",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "task_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-157-happy",
+        "rest-157-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-158",
+      "method": "GET",
+      "path": "/api/traces",
+      "regex": "/api/traces",
+      "handler": "h_traces",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "kind",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "ref_id",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-158-happy",
+        "rest-158-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-159",
+      "method": "GET",
+      "path": "/api/traces/{run_id}/summary",
+      "regex": "/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/summary",
+      "handler": "h_trace_summary",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-159-happy",
+        "rest-159-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-160",
+      "method": "GET",
+      "path": "/api/traces/{run_id}/events",
+      "regex": "/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/events",
+      "handler": "h_trace_events",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "after",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "only_failed",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "phase",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "type",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-160-happy",
+        "rest-160-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-161",
+      "method": "GET",
+      "path": "/api/traces/{run_id}/download",
+      "regex": "/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/download",
+      "handler": "h_trace_download",
+      "auth": "admin",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "run_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-161-happy",
+        "rest-161-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-162",
+      "method": "GET",
+      "path": "/api/tool-approvals",
+      "regex": "/api/tool-approvals",
+      "handler": "h_tool_approvals",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-162-happy",
+        "rest-162-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-163",
+      "method": "POST",
+      "path": "/api/tasks/{task_id}/tool-approvals",
+      "regex": "/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/tool-approvals",
+      "handler": "h_tool_approval_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "skill",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-163-happy",
+        "rest-163-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-164",
+      "method": "POST",
+      "path": "/api/tool-approvals/{approval_id}/decide",
+      "regex": "/api/tool-approvals/(?P<approval_id>[A-Za-z0-9_-]+)/decide",
+      "handler": "h_tool_approval_decide",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "approved",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        409
+      ],
+      "case_ids": [
+        "rest-164-happy",
+        "rest-164-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-165",
+      "method": "GET",
+      "path": "/api/skills/{name}/export",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/export",
+      "handler": "h_skill_export",
+      "auth": "user",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-165-happy",
+        "rest-165-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-166",
+      "method": "POST",
+      "path": "/api/skills/{name}/rollback",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/rollback",
+      "handler": "h_skill_rollback",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "version",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-166-happy",
+        "rest-166-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-167",
+      "method": "POST",
+      "path": "/api/skills/{name}/channel",
+      "regex": "/api/skills/(?P<name>[A-Za-z0-9_-]+)/channel",
+      "handler": "h_skill_channel",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "name",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "channel",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-167-happy",
+        "rest-167-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-168",
+      "method": "GET",
+      "path": "/api/workshop/recipes",
+      "regex": "/api/workshop/recipes",
+      "handler": "h_workshop_recipes",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-168-happy",
+        "rest-168-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-169",
+      "method": "GET",
+      "path": "/api/workshop/drafts",
+      "regex": "/api/workshop/drafts",
+      "handler": "h_workshop_list",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-169-happy",
+        "rest-169-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-170",
+      "method": "GET",
+      "path": "/api/workshop/drafts/{draft_id}/provenance",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/provenance",
+      "handler": "h_workshop_provenance",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-170-happy",
+        "rest-170-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-171",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/provenance/lock",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/provenance/lock",
+      "handler": "h_workshop_provenance_lock",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "locked",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "paths",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "reason",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "source_revision",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        409
+      ],
+      "case_ids": [
+        "rest-171-happy",
+        "rest-171-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-172",
+      "method": "POST",
+      "path": "/api/workshop/drafts",
+      "regex": "/api/workshop/drafts",
+      "handler": "h_workshop_create",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "defer",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_override",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403
+      ],
+      "case_ids": [
+        "rest-172-happy",
+        "rest-172-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-173",
+      "method": "GET",
+      "path": "/api/workshop/drafts/{draft_id}",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)",
+      "handler": "h_workshop_detail",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-173-happy",
+        "rest-173-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-174",
+      "method": "PUT",
+      "path": "/api/workshop/drafts/{draft_id}",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)",
+      "handler": "h_workshop_update",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-174-happy",
+        "rest-174-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-175",
+      "method": "DELETE",
+      "path": "/api/workshop/drafts/{draft_id}",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)",
+      "handler": "h_workshop_delete",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-175-happy",
+        "rest-175-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-176",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/logs",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/logs",
+      "handler": "h_workshop_logs",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "query",
+          "name": "auto_cases",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-176-happy",
+        "rest-176-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-177",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/analyze",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/analyze",
+      "handler": "h_workshop_analyze",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-177-happy",
+        "rest-177-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-178",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/refine",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/refine",
+      "handler": "h_workshop_refine",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "answers",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_override",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "text",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-178-happy",
+        "rest-178-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-179",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/check",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/check",
+      "handler": "h_workshop_check",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-179-happy",
+        "rest-179-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-180",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/rules/try",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/rules/try",
+      "handler": "h_workshop_rules_try",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-180-happy",
+        "rest-180-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-181",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/verify-rules",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/verify-rules",
+      "handler": "h_workshop_verify_rules",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-181-happy",
+        "rest-181-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-182",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/build",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/build",
+      "handler": "h_workshop_build",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-182-happy",
+        "rest-182-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-183",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/publish",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/publish",
+      "handler": "h_workshop_publish",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "approvals",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "channel",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "emergency_reason",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "override_reason",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-183-happy",
+        "rest-183-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-184",
+      "method": "POST",
+      "path": "/api/workshop/drafts/{draft_id}/case",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/case",
+      "handler": "h_workshop_case",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-184-happy",
+        "rest-184-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-185",
+      "method": "GET",
+      "path": "/api/workshop/drafts/{draft_id}/cases",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/cases",
+      "handler": "h_workshop_cases",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-185-happy",
+        "rest-185-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-186",
+      "method": "GET",
+      "path": "/api/workshop/jobs/{job_id}",
+      "regex": "/api/workshop/jobs/(?P<job_id>[A-Za-z0-9_-]+)",
+      "handler": "h_workshop_job",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-186-happy",
+        "rest-186-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-187",
+      "method": "GET",
+      "path": "/api/workshop/drafts/{draft_id}/jobs",
+      "regex": "/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/jobs",
+      "handler": "h_workshop_jobs",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "draft_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-187-happy",
+        "rest-187-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-188",
+      "method": "GET",
+      "path": "/api/calibration",
+      "regex": "/api/calibration",
+      "handler": "h_calibration",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-188-happy",
+        "rest-188-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-189",
+      "method": "GET",
+      "path": "/api/case-matrix",
+      "regex": "/api/case-matrix",
+      "handler": "h_case_matrix",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "skill",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-189-happy",
+        "rest-189-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-190",
+      "method": "POST",
+      "path": "/api/case-matrix/rebuild",
+      "regex": "/api/case-matrix/rebuild",
+      "handler": "h_case_matrix_rebuild",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "build_sha",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "compatibility",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "skill",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-190-happy",
+        "rest-190-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-191",
+      "method": "GET",
+      "path": "/api/experience-candidates",
+      "regex": "/api/experience-candidates",
+      "handler": "h_experience_candidates",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-191-happy",
+        "rest-191-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-192",
+      "method": "POST",
+      "path": "/api/experience-candidates/{candidate_id}/decide",
+      "regex": "/api/experience-candidates/(?P<candidate_id>[A-Za-z0-9_-]+)/decide",
+      "handler": "h_candidate_decide",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "candidate_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "note",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-192-happy",
+        "rest-192-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-193",
+      "method": "POST",
+      "path": "/api/calibration/fit",
+      "regex": "/api/calibration/fit",
+      "handler": "h_calibration_fit",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-193-happy",
+        "rest-193-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-194",
+      "method": "GET",
+      "path": "/api/skill-versions",
+      "regex": "/api/skill-versions",
+      "handler": "h_versions",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "skill",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-194-happy",
+        "rest-194-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-195",
+      "method": "GET",
+      "path": "/api/models",
+      "regex": "/api/models",
+      "handler": "h_models",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        403
+      ],
+      "case_ids": [
+        "rest-195-happy",
+        "rest-195-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-196",
+      "method": "POST",
+      "path": "/api/models",
+      "regex": "/api/models",
+      "handler": "h_model_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        409
+      ],
+      "case_ids": [
+        "rest-196-happy",
+        "rest-196-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-197",
+      "method": "PUT",
+      "path": "/api/models/{model_id}",
+      "regex": "/api/models/(?P<model_id>[0-9]+)",
+      "handler": "h_model_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        409
+      ],
+      "case_ids": [
+        "rest-197-happy",
+        "rest-197-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-198",
+      "method": "DELETE",
+      "path": "/api/models/{model_id}",
+      "regex": "/api/models/(?P<model_id>[0-9]+)",
+      "handler": "h_model_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-198-happy",
+        "rest-198-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-199",
+      "method": "POST",
+      "path": "/api/models/discover",
+      "regex": "/api/models/discover",
+      "handler": "h_model_discover",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "api_key",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "base_url",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "extra",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model_id",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "provider",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "timeout_sec",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403,
+        413,
+        502,
+        503,
+        504
+      ],
+      "case_ids": [
+        "rest-199-happy",
+        "rest-199-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-200",
+      "method": "POST",
+      "path": "/api/models/test",
+      "regex": "/api/models/test",
+      "handler": "h_model_test_draft",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "model_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-200-happy",
+        "rest-200-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-201",
+      "method": "POST",
+      "path": "/api/models/{model_id}/test",
+      "regex": "/api/models/(?P<model_id>[0-9]+)/test",
+      "handler": "h_model_test",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-201-happy",
+        "rest-201-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-202",
+      "method": "POST",
+      "path": "/api/models/{model_id}/capabilities",
+      "regex": "/api/models/(?P<model_id>[0-9]+)/capabilities",
+      "handler": "h_model_capabilities",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-202-happy",
+        "rest-202-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-203",
+      "method": "POST",
+      "path": "/api/models/{model_id}/relay-test",
+      "regex": "/api/models/(?P<model_id>[0-9]+)/relay-test",
+      "handler": "h_model_relay_test",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-203-happy",
+        "rest-203-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-204",
+      "method": "GET",
+      "path": "/api/models/{model_id}/relay-test/{test_id}",
+      "regex": "/api/models/(?P<model_id>[0-9]+)/relay-test/(?P<test_id>[A-Za-z0-9_-]+)",
+      "handler": "h_model_relay_test_get",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "model_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "test_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        403,
+        404
+      ],
+      "case_ids": [
+        "rest-204-happy",
+        "rest-204-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-205",
+      "method": "GET",
+      "path": "/api/relay/status",
+      "regex": "/api/relay/status",
+      "handler": "h_relay_status",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "window_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-205-happy",
+        "rest-205-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-206",
+      "method": "GET",
+      "path": "/api/relay/calls",
+      "regex": "/api/relay/calls",
+      "handler": "h_relay_calls",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "call_id",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "wait",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "window_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-206-happy",
+        "rest-206-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-207",
+      "method": "POST",
+      "path": "/api/relay/calls/{call_id}/result",
+      "regex": "/api/relay/calls/(?P<call_id>[A-Za-z0-9_-]+)/result",
+      "handler": "h_relay_result",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "call_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "body_text",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "error_kind",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "latency_ms",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "status",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "truncated",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-207-happy",
+        "rest-207-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-208",
+      "method": "POST",
+      "path": "/api/relay/release",
+      "regex": "/api/relay/release",
+      "handler": "h_relay_release",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "window_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-208-happy",
+        "rest-208-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-209",
+      "method": "GET",
+      "path": "/api/users",
+      "regex": "/api/users",
+      "handler": "h_users",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "page_size",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-209-happy",
+        "rest-209-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-210",
+      "method": "GET",
+      "path": "/api/users/invites",
+      "regex": "/api/users/invites",
+      "handler": "h_invites",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "status",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-210-happy",
+        "rest-210-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-211",
+      "method": "POST",
+      "path": "/api/users/invites",
+      "regex": "/api/users/invites",
+      "handler": "h_invite_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "display_name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "hours",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "role",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "username",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-211-happy",
+        "rest-211-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-212",
+      "method": "DELETE",
+      "path": "/api/users/invites/{invite_id}",
+      "regex": "/api/users/invites/(?P<invite_id>[A-Za-z0-9_-]+)",
+      "handler": "h_invite_revoke",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "invite_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-212-happy",
+        "rest-212-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-213",
+      "method": "POST",
+      "path": "/api/users/batch-disable",
+      "regex": "/api/users/batch-disable",
+      "handler": "h_users_batch_disable",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "ids",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-213-happy",
+        "rest-213-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-214",
+      "method": "GET",
+      "path": "/api/users/{user_id}",
+      "regex": "/api/users/(?P<user_id>[0-9]+)",
+      "handler": "h_user_detail",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "user_id",
+          "in": "path",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-214-happy",
+        "rest-214-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-215",
+      "method": "POST",
+      "path": "/api/users/{user_id}/force-logout",
+      "regex": "/api/users/(?P<user_id>[0-9]+)/force-logout",
+      "handler": "h_user_force_logout",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "user_id",
+          "in": "path",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "expected_errors": [
+        404
+      ],
+      "case_ids": [
+        "rest-215-happy",
+        "rest-215-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-216",
+      "method": "POST",
+      "path": "/api/users",
+      "regex": "/api/users",
+      "handler": "h_user_create",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "display_name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "domain",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "expires_at",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "role",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "username",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        409
+      ],
+      "case_ids": [
+        "rest-216-happy",
+        "rest-216-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-217",
+      "method": "PUT",
+      "path": "/api/users/{user_id}",
+      "regex": "/api/users/(?P<user_id>[0-9]+)",
+      "handler": "h_user_update",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "user_id",
+          "in": "path",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "active",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "display_name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "domain",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "expires_at",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "password",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "role",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        404
+      ],
+      "case_ids": [
+        "rest-217-happy",
+        "rest-217-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-218",
+      "method": "GET",
+      "path": "/api/profile",
+      "regex": "/api/profile",
+      "handler": "h_profile",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-218-happy",
+        "rest-218-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-219",
+      "method": "PUT",
+      "path": "/api/profile",
+      "regex": "/api/profile",
+      "handler": "h_profile_update",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "display_name",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "notification_prefs",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-219-happy",
+        "rest-219-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-220",
+      "method": "GET",
+      "path": "/api/profile/model-key",
+      "regex": "/api/profile/model-key",
+      "handler": "h_profile_model_key",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-220-happy",
+        "rest-220-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-221",
+      "method": "PUT",
+      "path": "/api/profile/model-key",
+      "regex": "/api/profile/model-key",
+      "handler": "h_profile_model_key_update",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "api_key",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "model",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-221-happy",
+        "rest-221-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-222",
+      "method": "DELETE",
+      "path": "/api/profile/model-key",
+      "regex": "/api/profile/model-key",
+      "handler": "h_profile_model_key_delete",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-222-happy",
+        "rest-222-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-223",
+      "method": "POST",
+      "path": "/api/profile/model-key/test",
+      "regex": "/api/profile/model-key/test",
+      "handler": "h_profile_model_key_test",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-223-happy",
+        "rest-223-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-224",
+      "method": "GET",
+      "path": "/api/audit",
+      "regex": "/api/audit",
+      "handler": "h_audit",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "in": "query",
+          "name": "page",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "page_size",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-224-happy",
+        "rest-224-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-225",
+      "method": "GET",
+      "path": "/api/audit/export",
+      "regex": "/api/audit/export",
+      "handler": "h_audit_export",
+      "auth": "admin",
+      "mutating": false,
+      "binary": true,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-225-happy",
+        "rest-225-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-226",
+      "method": "GET",
+      "path": "/api/system/info",
+      "regex": "/api/system/info",
+      "handler": "h_system_info",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-226-happy",
+        "rest-226-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-227",
+      "method": "GET",
+      "path": "/api/system/runtime-config",
+      "regex": "/api/system/runtime-config",
+      "handler": "h_runtime_config",
+      "auth": "user",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        403
+      ],
+      "case_ids": [
+        "rest-227-happy",
+        "rest-227-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-228",
+      "method": "PUT",
+      "path": "/api/system/runtime-config",
+      "regex": "/api/system/runtime-config",
+      "handler": "h_runtime_config_save",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "values",
+          "required": false
+        }
+      ],
+      "expected_errors": [
+        400,
+        403
+      ],
+      "case_ids": [
+        "rest-228-happy",
+        "rest-228-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-229",
+      "method": "POST",
+      "path": "/api/system/restart",
+      "regex": "/api/system/restart",
+      "handler": "h_system_restart",
+      "auth": "user",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        403,
+        409
+      ],
+      "case_ids": [
+        "rest-229-happy",
+        "rest-229-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-230",
+      "method": "POST",
+      "path": "/api/system/updates/upload",
+      "regex": "/api/system/updates/upload",
+      "handler": "h_update_upload",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-230-happy",
+        "rest-230-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-231",
+      "method": "GET",
+      "path": "/api/system/updates",
+      "regex": "/api/system/updates",
+      "handler": "h_update_list",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-231-happy",
+        "rest-231-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-232",
+      "method": "GET",
+      "path": "/api/system/updates/{update_id}",
+      "regex": "/api/system/updates/(?P<update_id>[Uu][A-Za-z0-9_-]+)",
+      "handler": "h_update_detail",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-232-happy",
+        "rest-232-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-233",
+      "method": "POST",
+      "path": "/api/system/updates/{update_id}/verify",
+      "regex": "/api/system/updates/(?P<update_id>[Uu][A-Za-z0-9_-]+)/verify",
+      "handler": "h_update_verify",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "in": "body",
+          "name": "allow_same_version",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "sha256",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-233-happy",
+        "rest-233-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-234",
+      "method": "POST",
+      "path": "/api/system/updates/{update_id}/apply",
+      "regex": "/api/system/updates/(?P<update_id>[Uu][A-Za-z0-9_-]+)/apply",
+      "handler": "h_update_apply",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-234-happy",
+        "rest-234-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-235",
+      "method": "POST",
+      "path": "/api/system/updates/rollback",
+      "regex": "/api/system/updates/rollback",
+      "handler": "h_update_rollback",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "backup_dir",
+          "required": false
+        },
+        {
+          "in": "body",
+          "name": "job_id",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-235-happy",
+        "rest-235-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-236",
+      "method": "GET",
+      "path": "/api/system/migrations",
+      "regex": "/api/system/migrations",
+      "handler": "h_migrations",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-236-happy",
+        "rest-236-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-237",
+      "method": "POST",
+      "path": "/api/system/migrations/workspace/preflight",
+      "regex": "/api/system/migrations/workspace/preflight",
+      "handler": "h_migration_preflight",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "target_root",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-237-happy",
+        "rest-237-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-238",
+      "method": "POST",
+      "path": "/api/system/migrations/workspace",
+      "regex": "/api/system/migrations/workspace",
+      "handler": "h_migration_workspace",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "in": "body",
+          "name": "target_root",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-238-happy",
+        "rest-238-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-239",
+      "method": "POST",
+      "path": "/api/system/migrations/export",
+      "regex": "/api/system/migrations/export",
+      "handler": "h_migration_export",
+      "auth": "admin",
+      "mutating": true,
+      "binary": true,
+      "params": [
+        {
+          "in": "body",
+          "name": "passphrase",
+          "required": false
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-239-happy",
+        "rest-239-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-240",
+      "method": "POST",
+      "path": "/api/system/migrations/import",
+      "regex": "/api/system/migrations/import",
+      "handler": "h_migration_import",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [],
+      "expected_errors": [
+        400
+      ],
+      "case_ids": [
+        "rest-240-happy",
+        "rest-240-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-241",
+      "method": "GET",
+      "path": "/api/system/migrations/{migration_id}",
+      "regex": "/api/system/migrations/(?P<migration_id>[Uu][A-Za-z0-9_-]+)",
+      "handler": "h_migration_detail",
+      "auth": "admin",
+      "mutating": false,
+      "binary": false,
+      "params": [
+        {
+          "name": "migration_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-241-happy",
+        "rest-241-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-242",
+      "method": "GET",
+      "path": "/api/system/migrations/{migration_id}/download",
+      "regex": "/api/system/migrations/(?P<migration_id>[Uu][A-Za-z0-9_-]+)/download",
+      "handler": "h_migration_download",
+      "auth": "admin",
+      "mutating": false,
+      "binary": true,
+      "params": [
+        {
+          "name": "migration_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-242-happy",
+        "rest-242-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    },
+    {
+      "id": "route-243",
+      "method": "DELETE",
+      "path": "/api/system/migrations/{migration_id}",
+      "regex": "/api/system/migrations/(?P<migration_id>[Uu][A-Za-z0-9_-]+)",
+      "handler": "h_migration_delete",
+      "auth": "admin",
+      "mutating": true,
+      "binary": false,
+      "params": [
+        {
+          "name": "migration_id",
+          "in": "path",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_errors": [],
+      "case_ids": [
+        "rest-243-happy",
+        "rest-243-auth"
+      ],
+      "notes": "由 tools/gen_manifests.py 从 bbu/api.py 路由与处理函数 AST 生成"
+    }
+  ]
+}

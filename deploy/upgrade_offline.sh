@@ -111,6 +111,27 @@ if not m:
 print(m.group(1))
 PY
 }
+patch_helper_trigger() {
+  [ "$MANAGE_SERVICE" -eq 1 ] || return 0
+  local installed="/usr/local/bin/bbu-upgrade-helper-trigger"
+  [ -f "$installed" ] || return 0
+  [ -f "$ROOT_DIR/deploy/bbu-upgrade-helper-trigger" ] || return 0
+  install -m 0755 "$ROOT_DIR/deploy/bbu-upgrade-helper-trigger" "$installed"
+  log "已更新升级助手触发器（兼容 /usr/bin 与 /bin 下的 systemctl）"
+}
+
+patch_service_unit_nnp() {
+  [ "$MANAGE_SERVICE" -eq 1 ] || return 0
+  local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+  [ -f "$unit" ] || return 0
+  if grep -qE '^[[:space:]]*NoNewPrivileges[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$' "$unit"; then
+    cp -p "$unit" "$BACKUP_DIR/${SERVICE_NAME}.service.before-${NEW_VERSION}" 2>/dev/null || true
+    sed -i -E '/^[[:space:]]*NoNewPrivileges[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' "$unit"
+    systemctl daemon-reload
+    log "已移除服务单元的 NoNewPrivileges=true（会阻止受限 sudo 升级助手）"
+  fi
+}
+
 OLD_VERSION="$(read_version "$PREFIX")"
 NEW_VERSION="$(read_version "$ROOT_DIR")"
 [ "$OLD_VERSION" != "$NEW_VERSION" ] || log "版本号同为 $NEW_VERSION；将按同版修复/重新部署执行"
@@ -219,6 +240,9 @@ if ! mv "$STAGE_DIR" "$PREFIX"; then
 fi
 STAGE_DIR=""
 CODE_SWAPPED=1
+
+patch_service_unit_nnp
+patch_helper_trigger
 
 if [ "$MANAGE_SERVICE" -eq 1 ]; then
   chown -R root:root "$PREFIX"

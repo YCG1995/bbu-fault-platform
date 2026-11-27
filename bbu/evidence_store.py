@@ -55,11 +55,12 @@ class EvidenceStore:
             return None
         return self._public(row)
 
-    def list(self, session_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+    def list(self, session_id: str, limit: int = 1000,
+             offset: int = 0) -> list[dict[str, Any]]:
         rows = self.db.all(
             "SELECT * FROM evidence_events WHERE session_id=? "
-            "ORDER BY created_at,evidence_id LIMIT ?",
-            (session_id, max(1, min(10000, limit))))
+            "ORDER BY created_at,evidence_id LIMIT ? OFFSET ?",
+            (session_id, max(1, min(10000, limit)), max(0, int(offset))))
         return [self._public(row) for row in rows]
 
     def count(self, session_id: str) -> int:

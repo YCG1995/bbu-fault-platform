@@ -1,4 +1,4 @@
-# 运行数据与敏感文件，绝不入库
+# 运行数据、现场数据与运行时状态，不入库
 /data/
 /cases/
 /skills/
@@ -6,29 +6,41 @@
 /build/
 /updates/
 /dist/
+/testlab/
 /evaluations/runs/
 /evaluations/real-runs/
 /evaluations/artifacts/
 /evaluations/recordings/
 /evaluations/reports/
-/testlab/
+/data/eval_runs/
+
+# 配置和密钥
 config.json
 config.json.bak
 master.key
 *.key
 *.pem
 *.db
+*.sqlite
+*.sqlite3
 .env
 .env.*
+初始管理员密码.txt
+
+# 日志和临时文件
 *.log
 !/tests/fixtures/**/*.log
-初始管理员密码.txt
+*.tmp
+*.temp
+/tmp/
 
 # Python 与测试缓存
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
 
 # 编辑器/系统临时文件
 .DS_Store

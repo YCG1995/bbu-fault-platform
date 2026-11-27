@@ -18,18 +18,32 @@ function statusText(data) {
   return { tone: 'warn', label: '暂无可用模型', text: '管理员默认模型不可用，请配置个人 Key 后重试' };
 }
 
+let personalModalState = 'idle';
+
 export async function openPersonalModelModal(onDone) {
+  // 异步拉取期间如果用户连续点击，不能并发创建多个相同弹窗；否则关闭时
+  // 一次只移除最上层，用户会感觉“点很多下才关掉”。
+  if (personalModalState !== 'idle') {
+    const existing = document.querySelector('.modal-mask[data-modal="personal-model"]');
+    if (existing) existing.querySelector('[data-act="close"]')?.focus();
+    return;
+  }
+  personalModalState = 'loading';
   let data;
   try {
     data = await api('/api/profile/model-key');
-  } catch (err) { toast(err.message, 'error'); return; }
+  } catch (err) {
+    personalModalState = 'idle';
+    toast(err.message, 'error');
+    return;
+  }
   const status = statusText(data);
   const configured = !!data.configured;
   const models = data.models || [];
   const options = models.map((m) => `<option value="${esc(m)}" ${m === data.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
   const notice = data.status?.notice;
   const m = modal({
-    title: '个人模型配置（企业内网 MaaS）',
+    title: '个人模型配置（公司内网 MaaS）',
     wide: true,
     body: `
       ${notice ? `<div class="alert danger">${icon('alert')}<div>
@@ -44,7 +58,7 @@ export async function openPersonalModelModal(onDone) {
           <input class="input mono" value="${esc(data.base_url || '')}" disabled></div>
         <div class="form-row"><label class="label">模型</label>
           <select class="input" name="model">${options}</select>
-          <div class="help">仅列出管理员预置的企业内网模型；如需新增，请联系管理员。</div></div>
+          <div class="help">仅列出管理员预置的公司内网模型；如需新增，请联系管理员。</div></div>
         <div class="form-row"><label class="label">个人 API Key</label>
           <input class="input mono" name="api_key" type="password" autocomplete="off"
             placeholder="${configured ? `已保存 ${esc(data.api_key_masked || '****')}，留空表示不修改` : '粘贴个人 MaaS API Key'}">
@@ -65,7 +79,10 @@ export async function openPersonalModelModal(onDone) {
       <button class="btn" data-act="close">关闭</button>
       <button class="btn" data-act="test-key">测试连接</button>
       <button class="btn btn-primary" data-act="save-key">保存</button>`,
+    onClose: () => { personalModalState = 'idle'; },
   });
+  m.mask.dataset.modal = 'personal-model';
+  personalModalState = 'open';
 
   const save = async (button, silent = false) => {
     const keyInput = m.body.querySelector('[name="api_key"]');
@@ -89,8 +106,15 @@ export async function openPersonalModelModal(onDone) {
     }
   };
 
+  // 关闭按钮用捕获阶段处理：即使按钮内部有图标/文本子节点，或点击事件
+  // 继续向页面冒泡，也只触发一次并立即销毁当前弹窗。
+  m.mask.addEventListener('click', (e) => {
+    if (!e.target.closest('[data-act="close"]')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    m.close();
+  }, true);
   m.mask.addEventListener('click', async (e) => {
-    if (e.target.closest('[data-act="close"]')) m.close();
     if (e.target.closest('[data-act="save-key"]')) {
       await save(e.target.closest('[data-act="save-key"]'));
     }

@@ -1,0 +1,117 @@
+skill:
+  name: bbu-fault-vsw
+  title: VSW 管理通道异常
+  version: 0.1.0
+  execution_mode: script
+category: 硬件故障
+fault:
+  name: VSW 管理通道异常
+  aliases:
+    - VSW 管理通道异常
+    - 单板通讯链路断
+    - 原因码：管理通道
+  alarm_codes: []
+  domain:
+    device_types: [BBU/OSS]
+    boards: [VSWc, VSWd, VSWe]
+symptoms:
+  observable:
+    - "单板通讯链路断告警"
+    - "原因码：管理通道"
+  description_keywords:
+    - 单板通讯链路断
+    - 管理通道
+    - IPMI 通道
+  lookalikes: []
+  impact: 主控与基带/环境板/风扇等管理通道中断
+  time_pattern: 故障出现后通常持续
+diagnostic_reasoning:
+  strategy: 先按通道比较多次采样，只有证据能区分竞争假设时才下结论。
+  decision_order:
+    - order: 1
+      action: 按站点/通道比较 IPMI Channel Status、Tx/Rx 与报文长度异常计数
+      rule_ids: [E1]
+      if_hit: 继续核对对应根因条件
+      if_miss: 记录证据缺失，不用缺失反推根因
+  hypotheses:
+    - id: H1
+      root_cause: R1
+      name: 基带板异常或 IPMI 通道完全断开
+      condition: E1
+      supporting_rules: [E1]
+      excluding_rules: []
+      expected_evidence: [E1]
+      why: Rx 不增长、Rx 为 0 或报文长度异常累计超门限
+  discriminators: []
+  checks:
+    - Rx Success Count 为 0 或不增长
+    - Rx Over 32 Bytes / Rx less 7 Bytes 累计超过 500
+  pitfalls:
+    - 告警和文件名只用于路由，不能替代日志证据
+    - 缺少 BspMoni 日志时不能把未检查当成阴性证据
+  stop_conditions:
+    - 所有通道条件不成立：输出 unmatched
+  data_needed:
+    - BspMoni 日志
+analysis:
+  steps:
+    - id: S1
+      title: 按通道比较 IPMI 统计
+      objective: 从块记录中抽取每通道多次采样，比较 Tx/Rx 与报文长度异常计数
+      targets:
+        - globs: ['**/BspMoni.log*']
+          format: text
+          encoding: auto
+      rules:
+        - id: E1
+          type: record_delta
+          description: 通道级 IPMI 统计异常（Rx 零/停滞或长度异常累计超门限）
+          globs: ['**/BspMoni.log*']
+          encoding: auto
+          format: text
+          record:
+            start: '\*{6}Channel No\. :(?P<channel>\d+)\*{6}'
+            fields:
+              state: 'IPMI Channel Status:(?P<value>Open|Closed)'
+              tx: 'Tx Count:(?P<value>\d+)'
+              rx: 'Rx Success Count:(?P<value>\d+)'
+              over32: 'Rx Over 32 Bytes \(Per Frame\) Count:(?P<value>\d+)'
+              less7: 'Rx less 7 Bytes \(Per Frame\) Count:(?P<value>\d+)'
+            entity: [site, channel]
+            require:
+              state: Open
+              tx: increasing
+            any:
+              rx: zero_or_not_increasing
+              over32: 'last_gt:500'
+              less7: 'last_gt:500'
+          min_matches: 1
+          context_lines: 2
+          verified: true
+      decision:
+        on_hit:
+          conclusion: 发现通道级异常证据，按根因条件判定
+        on_miss:
+          conclusion: 未命中通道异常证据，输出 unmatched 或 insufficient_data
+root_causes:
+  - id: R1
+    name: 基带板异常或 IPMI 通道完全断开
+    condition: E1
+    mechanism: 通道 Tx 有增长但 Rx 为 0/不增长，或报文长度异常累计超门限
+    confidence: medium
+    actions:
+      - 检查基带板工作状态与背板连接（主控-背板、基带-背板）
+      - 检查背板是否存在积灰、腐蚀或接触不良
+    prerequisites: []
+    risks: 操作前备份现场日志
+    rollback: []
+    verify:
+      - globs: ['**/BspMoni.log*']
+        patterns: ['IPMI Channel Status:Open', 'Rx Success Count']
+        expect: present
+        hold_time: 连续 3 次采样
+    escalation: 若多通道持续异常，升级硬件更换
+components:
+  unpack: true
+  search: true
+  report: true

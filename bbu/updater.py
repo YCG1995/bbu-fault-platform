@@ -12,8 +12,10 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -26,7 +28,7 @@ from .util import iso_now, new_id, sha256_file, within_directory
 JOB_ID_RE = re.compile(r"^U[A-Za-z0-9_-]{6,40}$")
 TERMINAL_PHASES = {"succeeded", "failed", "rolled_back"}
 EXECUTION_PHASES = {"queued", "backup", "migrating", "restarting", "health_check", "rolling_back"}
-ALL_PHASES = EXECUTION_PHASES | {"uploaded", "verifying", "ready"} | TERMINAL_PHASES
+ALL_PHASES = EXECUTION_PHASES | {"uploaded", "verifying", "ready", "waiting_restart"} | TERMINAL_PHASES
 REQUIRED_FILES = {
     "run.py", "bbu/__init__.py", "web/index.html",
     "vendor/yaml/__init__.py", "deploy/upgrade_offline.sh",
@@ -36,11 +38,39 @@ MAX_MEMBERS = 30000
 MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024
 
 
+def _custom_helper(app) -> str:
+    return str(app.config.get("upgrade_helper_cmd") or "").strip() if app is not None else ""
+
+
 def supported(app=None) -> bool:
-    """Windows 默认不支持 root/systemd 网页升级；配置自定义助手命令后可启用。"""
+    """网页上传/预检在所有平台可用；Windows 无助手时走“准备重启生效”。"""
+    return True
+
+
+def apply_mode(app=None) -> str:
+    """helper：执行器立即升级；restart：Windows 落盘后等待重启生效。"""
     if os.name != "nt":
-        return True
-    return bool(app is not None and str(app.config.get("upgrade_helper_cmd") or "").strip())
+        return "helper"
+    return "helper" if _custom_helper(app) else "restart"
+
+
+def rollback_supported(app=None) -> bool:
+    return apply_mode(app) == "helper"
+
+
+def _pending_path(app) -> Path | None:
+    root = str(app.config.get("_root") or "").strip() if app is not None else ""
+    if not root:
+        return None
+    return Path(root) / "pending_maintenance.json"
+
+
+def pending_update(app) -> dict[str, Any] | None:
+    path = _pending_path(app)
+    if not path or not path.is_file():
+        return None
+    data = _read_json(path, None)
+    return data if isinstance(data, dict) and data.get("action") == "update" else None
 
 
 class UpdateError(Exception):
@@ -147,9 +177,7 @@ def _safe_member_name(name: str) -> tuple[str, ...]:
     return parts
 
 
-def inspect_archive(path: Path, release_dir: Path, current: str,
-                    expected_sha256: str = "", allow_same: bool = False) -> dict[str, Any]:
-    """校验包结构/哈希/版本并安全解压；返回目标版本、SHA、说明。"""
+def _archive_identity(path: Path, expected_sha256: str) -> tuple[int, str]:
     if not path.is_file():
         raise UpdateError("升级包不存在")
     size = path.stat().st_size
@@ -159,6 +187,34 @@ def inspect_archive(path: Path, release_dir: Path, current: str,
     expected = (expected_sha256 or "").strip().lower()
     if expected and expected != actual:
         raise UpdateError("SHA256 不匹配，升级包可能被篡改")
+    return size, actual
+
+
+def _finalize_release(root: Path, current: str, allow_same: bool,
+                      actual: str, size: int, entries: int,
+                      total: int) -> dict[str, Any]:
+    if not root.is_dir():
+        raise UpdateError("升级包顶层目录不存在")
+    version_file = root / "bbu" / "__init__.py"
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text(encoding="utf-8"))
+    if not match:
+        raise UpdateError("无法从 bbu/__init__.py 读取版本")
+    target = match.group(1)
+    _version_tuple(target)
+    if not version_newer(target, current) and not (allow_same and target == current):
+        raise UpdateError(f"只允许升级到更高版本：当前 {current}，目标 {target}")
+    notes = ""
+    for note in sorted((root / "docs").glob(f"版本说明-{target}.md")):
+        notes = note.read_text(encoding="utf-8", errors="replace")[:6000]
+        break
+    return {"target_version": target, "sha256": actual, "size": size,
+            "source_dir": str(root), "release_notes": notes,
+            "entries": entries, "uncompressed": total}
+
+
+def _inspect_tar(path: Path, release_dir: Path, current: str,
+                 expected_sha256: str, allow_same: bool) -> dict[str, Any]:
+    size, actual = _archive_identity(path, expected_sha256)
     top_levels: set[str] = set()
     found: set[str] = set()
     total = 0
@@ -186,41 +242,81 @@ def inspect_archive(path: Path, release_dir: Path, current: str,
             raise UpdateError("升级包缺少必需文件：" + "、".join(sorted(missing)))
         release_dir.mkdir(parents=True, exist_ok=True)
         tar.extractall(release_dir, filter="data")
-    root = release_dir / next(iter(top_levels))
-    if not root.is_dir():
-        raise UpdateError("升级包顶层目录不存在")
-    version_file = root / "bbu" / "__init__.py"
-    match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text(encoding="utf-8"))
-    if not match:
-        raise UpdateError("无法从 bbu/__init__.py 读取版本")
-    target = match.group(1)
-    _version_tuple(target)
-    if not version_newer(target, current) and not (allow_same and target == current):
-        raise UpdateError(f"只允许升级到更高版本：当前 {current}，目标 {target}")
-    notes = ""
-    for note in sorted((root / "docs").glob(f"版本说明-{target}.md")):
-        notes = note.read_text(encoding="utf-8", errors="replace")[:6000]
-        break
-    return {"target_version": target, "sha256": actual, "size": size,
-            "source_dir": str(root), "release_notes": notes,
-            "entries": len(members), "uncompressed": total}
+    return _finalize_release(release_dir / next(iter(top_levels)), current, allow_same,
+                             actual, size, len(members), total)
+
+
+def _inspect_zip(path: Path, release_dir: Path, current: str,
+                 expected_sha256: str, allow_same: bool) -> dict[str, Any]:
+    size, actual = _archive_identity(path, expected_sha256)
+    top_levels: set[str] = set()
+    found: set[str] = set()
+    total = 0
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        if len(members) > MAX_MEMBERS:
+            raise UpdateError(f"压缩包条目过多（>{MAX_MEMBERS}）")
+        for member in members:
+            parts = _safe_member_name(member.filename)
+            top_levels.add(parts[0])
+            mode = (member.external_attr >> 16) & 0o170000
+            if mode == stat.S_IFLNK:
+                raise UpdateError("压缩包包含符号链接，已拒绝")
+            if mode not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise UpdateError("压缩包包含设备/特殊文件，已拒绝")
+            if not member.is_dir() and not member.filename.endswith("/"):
+                total += max(0, member.file_size)
+                if total > MAX_UNCOMPRESSED:
+                    raise UpdateError("压缩包解压后体积超过上限")
+            rel = "/".join(parts[1:])
+            if rel in REQUIRED_FILES:
+                found.add(rel)
+        if len(top_levels) != 1:
+            raise UpdateError("升级包必须只有一个顶层目录")
+        missing = REQUIRED_FILES - found
+        if missing:
+            raise UpdateError("升级包缺少必需文件：" + "、".join(sorted(missing)))
+        release_dir.mkdir(parents=True, exist_ok=True)
+        archive.extractall(release_dir)
+    return _finalize_release(release_dir / next(iter(top_levels)), current, allow_same,
+                             actual, size, len(members), total)
+
+
+def inspect_archive(path: Path, release_dir: Path, current: str,
+                    expected_sha256: str = "", allow_same: bool = False) -> dict[str, Any]:
+    """校验包结构/哈希/版本并安全解压；支持 .tar.gz/.tgz 与 Windows .zip。"""
+    if path.name.lower().endswith(".zip"):
+        return _inspect_zip(path, release_dir, current, expected_sha256, allow_same)
+    return _inspect_tar(path, release_dir, current, expected_sha256, allow_same)
+
+
+def _package_file(job: Path) -> Path:
+    for name in ("package.tar.gz", "package.zip"):
+        path = job / name
+        if path.is_file():
+            return path
+    raise UpdateError("升级包文件不存在")
 
 
 def create_job(app, uploaded_path: Path, filename: str, expected_sha256: str = "",
                allow_same: bool = False) -> dict[str, Any]:
-    if not supported(app):
-        raise UpdateError("Windows 版默认不支持网页自动升级；请停止服务后覆盖程序目录并保留 data/config.json")
     suffix = Path(filename or "").name.lower()
-    if not suffix.endswith(".tar.gz"):
-        raise UpdateError("仅支持 .tar.gz 离线升级包")
+    if suffix.endswith((".tar.gz", ".tgz")):
+        package_name = "package.tar.gz"
+    elif suffix.endswith(".zip"):
+        package_name = "package.zip"
+    else:
+        raise UpdateError("仅支持 .tar.gz / .tgz / .zip 离线升级包")
     max_mb = int(app.config.get("max_update_mb", 512))
     if uploaded_path.stat().st_size > max_mb * 1024 * 1024:
         raise UpdateError(f"升级包超过上限（{max_mb} MB）")
     with _lock(app):
+        if _pending_path(app) and _pending_path(app).exists():
+            raise UpdateError("已有等待启动生效的维护任务，请先重启平台完成该任务")
         job_id = new_id("U")
         job = _updates_root(app) / job_id
         job.mkdir(parents=True, exist_ok=False)
-        package = job / "package.tar.gz"
+        package = job / package_name
         os.replace(uploaded_path, package)
         status = {
             "id": job_id, "phase": "uploaded", "message": "升级包已上传，等待预检",
@@ -233,7 +329,9 @@ def create_job(app, uploaded_path: Path, filename: str, expected_sha256: str = "
         try:
             result = inspect_archive(package, job / "release", current_version(),
                                      expected_sha256, allow_same)
-            status = _phase(status, "ready", "预检通过，可执行升级", 100,
+            message = ("预检通过，可执行升级" if apply_mode(app) == "helper"
+                       else "预检通过；确认后可准备重启生效")
+            status = _phase(status, "ready", message, 100,
                             target_version=result["target_version"],
                             package_sha256=result["sha256"],
                             source_dir=result["source_dir"],
@@ -253,7 +351,9 @@ def verify_job(app, job_id: str, expected_sha256: str = "", allow_same: bool = F
     status = status_of(app, job_id)
     if status["phase"] in EXECUTION_PHASES:
         raise UpdateError("升级正在执行，不能重复预检")
-    package = job / "package.tar.gz"
+    if status["phase"] == "waiting_restart":
+        raise UpdateError("更新已准备重启生效，不能重复预检")
+    package = _package_file(job)
     shutil.rmtree(job / "release", ignore_errors=True)
     status = _phase(status, "verifying", "正在重新校验升级包", 20)
     _save_status(app, job_id, status)
@@ -270,7 +370,7 @@ def verify_job(app, job_id: str, expected_sha256: str = "", allow_same: bool = F
                     target_version=result["target_version"],
                     package_sha256=result["sha256"], source_dir=result["source_dir"],
                     release_notes=result["release_notes"], size=result["size"], error="")
-    _write_json(job / "job.json", {"filename": "package.tar.gz", **result})
+    _write_json(job / "job.json", {"filename": package.name, **result})
     return _save_status(app, job_id, status)
 
 
@@ -340,6 +440,18 @@ def _request_base(app, job_id: str, action: str) -> dict[str, Any]:
     }
 
 
+def _launch_failure_detail(detail: str) -> str:
+    """Attach a NoNewPrivileges hint for both English and Chinese sudo errors."""
+    lowered = detail.lower()
+    compact = "".join(detail.split()).lower()
+    if ("effective uid is not 0" in lowered
+            or "no new privileges" in lowered
+            or "有效用户id不是0" in compact):
+        detail += ("；请检查主服务 systemd 单元 NoNewPrivileges 是否为 true，"
+                   "并在服务器 root 控制台运行 deploy/fix_upgrade_helper.sh --diagnose")
+    return detail
+
+
 def _launch(app, job_id: str, request: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
     _write_json(_job_dir(app, job_id) / "request.json", request)
     status = _phase(status, "queued", "已提交给 root 助手，等待执行", 10, error="")
@@ -347,7 +459,8 @@ def _launch(app, job_id: str, request: dict[str, Any], status: dict[str, Any]) -
     try:
         result = subprocess.run(_helper_command(app, job_id), capture_output=True, text=True, timeout=20)
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "未知错误").strip()[-500:]
+            detail = _launch_failure_detail(
+                (result.stderr or result.stdout or "未知错误").strip()[-500:])
             status = _phase(status, "failed", "无法启动 root 升级助手", 100,
                             error=f"助手启动失败：{detail}")
             _save_status(app, job_id, status)
@@ -359,9 +472,46 @@ def _launch(app, job_id: str, request: dict[str, Any], status: dict[str, Any]) -
     return status
 
 
+def prepare_restart_job(app, job_id: str) -> dict[str, Any]:
+    """Windows 手动启动模式：只做落盘准备，下一次启动时由 startup 替换代码。"""
+    with _lock(app):
+        job = _job_dir(app, job_id)
+        status = status_of(app, job_id)
+        if status.get("phase") != "ready":
+            raise UpdateError("升级包尚未通过预检，不能准备重启")
+        source = Path(str(status.get("source_dir") or "")).resolve()
+        if not source.is_dir() or not within_directory(job.resolve() / "release", source):
+            raise UpdateError("升级包解压目录越界或不存在")
+        root = Path(str(app.config.get("_root") or "")).resolve()
+        if not root.is_dir():
+            raise UpdateError("无法定位程序目录")
+        pending = root / "pending_maintenance.json"
+        if pending.exists():
+            raise UpdateError("已有等待启动生效的维护任务，请先重启平台完成该任务")
+        assert_can_execute(app, int(status.get("size") or 0))
+        pending_data = {
+            "action": "update",
+            "job_id": job_id,
+            "job_dir": str(job),
+            "source_dir": str(source),
+            "target_version": str(status.get("target_version") or ""),
+            "package_sha256": str(status.get("package_sha256") or ""),
+            "prefix": str(root),
+            "state_dir": str(app.config.data_dir.parent),
+            "created_at": iso_now(),
+        }
+        _write_json(pending, pending_data)
+        status = _phase(status, "waiting_restart",
+                        "已准备；关闭当前平台并重新启动，启动时自动替换代码", 100,
+                        requires_restart=True, error="")
+        return _save_status(app, job_id, status)
+
+
 def apply_job(app, job_id: str) -> dict[str, Any]:
+    if apply_mode(app) == "restart":
+        return prepare_restart_job(app, job_id)
     if not supported(app):
-        raise UpdateError("Windows 版默认不支持网页自动升级")
+        raise UpdateError("当前环境不支持网页升级")
     with _lock(app):
         job = _job_dir(app, job_id)
         status = status_of(app, job_id)
@@ -391,8 +541,10 @@ def _valid_backup(path: Path, state_dir: Path) -> Path:
 
 
 def rollback_job(app, job_id: str = "", backup_dir: str = "") -> dict[str, Any]:
+    if not rollback_supported(app):
+        raise UpdateError("Windows 网页更新使用重启生效模式，暂不支持网页回滚；请用备份目录手动恢复程序")
     if not supported(app):
-        raise UpdateError("Windows 版默认不支持网页自动回滚")
+        raise UpdateError("当前环境不支持网页回滚")
     with _lock(app):
         state_dir = app.config.data_dir.parent
         if backup_dir:
@@ -438,4 +590,5 @@ def cleanup_job(app, job_id: str) -> None:
     if status.get("phase") not in TERMINAL_PHASES:
         raise UpdateError("只能清理已结束的升级任务")
     shutil.rmtree(job / "release", ignore_errors=True)
-    (job / "package.tar.gz").unlink(missing_ok=True)
+    for name in ("package.tar.gz", "package.zip"):
+        (job / name).unlink(missing_ok=True)

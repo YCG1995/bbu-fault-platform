@@ -18,7 +18,8 @@ TimeoutStopSec=30
 KillSignal=SIGTERM
 LimitNOFILE=65535
 UMask=0077
-NoNewPrivileges=true
+# 不要设置 NoNewPrivileges=true：网页升级需要 bbu 用户通过受限 sudo 启动 root helper；
+# NNP 会让 setuid sudo 失效并报 effective uid is not 0。权限边界仍由 sudoers 固定触发器约束。
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

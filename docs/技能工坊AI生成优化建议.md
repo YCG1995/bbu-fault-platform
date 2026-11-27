@@ -4,7 +4,7 @@
 
 - 工坊草稿：`bbu-fault-vsw-usbflash-ai`
 - 输入：用现场样例构造的 USB FLASH 日志包（normal + 写保护 + sdb I/O error + SMART）
-- 模型：`gpt-4o-mini`
+- 模型：`deepseek-flash`
 - 流程：创建草稿 → 上传日志 → `analyze` → `check` → `build`
 
 ## 2. 实际结果

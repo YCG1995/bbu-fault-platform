@@ -34,9 +34,10 @@ def local_display(iso: str | None) -> str:
         return iso
 
 
-def new_id(prefix: str, with_time: bool = True) -> str:
+def new_id(prefix: str, with_time: bool = True, entropy: int = 3) -> str:
     stamp = datetime.now(CST).strftime("%Y%m%d-%H%M%S") if with_time else ""
-    rand = secrets.token_hex(3)
+    # 默认 3 字节沿用旧格式；知识库批量导入显式用 8 字节，避免短 ID 生日碰撞。
+    rand = secrets.token_hex(max(1, min(16, int(entropy))))
     return f"{prefix}{stamp + '-' if stamp else ''}{rand}"
 
 

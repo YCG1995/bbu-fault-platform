@@ -49,12 +49,15 @@ print("OK")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("OK", result.stdout)
 
-    def test_updater_is_disabled_on_windows_without_custom_helper(self):
+    def test_updater_uses_restart_mode_on_windows_without_custom_helper(self):
         app = SimpleNamespace(config={})
         with patch.object(updater.os, "name", "nt"):
-            self.assertFalse(updater.supported(app))
-            app.config["upgrade_helper_cmd"] = "python helper.py"
             self.assertTrue(updater.supported(app))
+            self.assertEqual(updater.apply_mode(app), "restart")
+            self.assertFalse(updater.rollback_supported(app))
+            app.config["upgrade_helper_cmd"] = "python helper.py"
+            self.assertEqual(updater.apply_mode(app), "helper")
+            self.assertTrue(updater.rollback_supported(app))
 
     def test_updater_is_enabled_on_posix(self):
         app = SimpleNamespace(config={})

@@ -203,7 +203,7 @@ fi
 echo "  程序目录 : $PREFIX"
 echo "  数据目录 : $STATE_DIR"
 echo "  初始密码 : $STATE_DIR/data/初始管理员密码.txt"
-echo "  首次登录 : admin / 初始密码（登录后必须改密）"
+echo "  首次登录 : admin / 初始密码（可直接进入工作台，建议随后改密）"
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
   echo "  服务日志 : journalctl -u ${SERVICE_NAME} -f"
 else

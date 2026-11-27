@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浏览器代理自检 · BBU FaultScope</title>
+<link rel="stylesheet" href="/assets/css/app.css">
+<style>
+  body { background: var(--bg, #f3f5f7); }
+  .check-shell { max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }
+  .check-head { display:flex; align-items:flex-start; gap:16px; justify-content:space-between; margin-bottom:18px; }
+  .check-head h1 { margin:0 0 6px; font-size:24px; }
+  .check-head p { margin:0; color:var(--muted); font-size:13px; max-width:680px; line-height:1.7; }
+  .check-card { background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 10px rgba(15,23,42,.04); }
+  .check-card .card-body { padding:22px; }
+  .check-form .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .check-actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+  .check-status { display:flex; flex-direction:column; gap:10px; }
+  .check-row { display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border-radius:8px;
+    background:#f8fafc; border:1px solid #e2e8f0; }
+  .check-row .dot { width:9px; height:9px; border-radius:50%; margin-top:5px; flex:none; background:#94a3b8; }
+  .check-row.ok { background:#ecfdf5; border-color:#a7f3d0; }
+  .check-row.ok .dot { background:#10b981; }
+  .check-row.warn { background:#fffbeb; border-color:#fde68a; }
+  .check-row.warn .dot { background:#f59e0b; }
+  .check-row.danger { background:#fef2f2; border-color:#fecaca; }
+  .check-row.danger .dot { background:#ef4444; }
+  .check-row .txt strong { display:block; font-size:13px; }
+  .check-row .txt span { display:block; font-size:12px; color:#64748b; margin-top:2px; line-height:1.55; }
+  .check-summary { margin-bottom:14px; padding:14px 16px; border-radius:10px; font-size:13px;
+    background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; line-height:1.6; }
+  .check-summary.bad { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+  .check-summary.good { background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
+  .check-foot { margin-top:18px; color:#64748b; font-size:12px; line-height:1.7; }
+  .check-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px;
+    word-break: break-all; color:#64748b; }
+  .check-badge { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px;
+    font-size:11px; font-weight:600; background:#f1f5f9; color:#475569; }
+  .check-badge.ok { background:#d1fae5; color:#047857; }
+  .check-badge.warn { background:#fef3c7; color:#92400e; }
+  .check-badge.danger { background:#fee2e2; color:#b91c1c; }
+  @media (max-width: 720px) {
+    .check-form .form-grid { grid-template-columns: 1fr; }
+    .check-head { flex-direction:column; }
+  }
+</style>
+</head>
+<body>
+<main class="check-shell">
+  <div class="check-head">
+    <div>
+      <h1>浏览器代理自检</h1>
+      <p>这个页面不需要登录，也不会调用平台业务接口。它只从当前浏览器直接访问你填写的模型网关，用来区分
+        “网络/代理不可达”和“网关拒绝 CORS”两种现场问题。Key 只存在本页内存，不会写入报告、日志或浏览器存储。</p>
+    </div>
+    <a class="btn" href="/">返回平台</a>
+  </div>
+
+  <section class="check-card">
+    <div class="card-body">
+      <form id="relay-check-form" class="check-form">
+        <div class="form-grid">
+          <div class="form-row">
+            <label class="label" for="check-base">模型 Base URL</label>
+            <input class="input mono" id="check-base" name="base_url" placeholder="https://maas.example.com/v1" autocomplete="url" required>
+            <div class="help">填浏览器视角可达的地址，必须包含 /v1（或完整 /chat/completions、/v1/messages）。</div>
+          </div>
+          <div class="form-row">
+            <label class="label" for="check-model">模型名</label>
+            <input class="input mono" id="check-model" name="model" placeholder="deepseek-v4-flash" autocomplete="off" required>
+          </div>
+          <div class="form-row">
+            <label class="label" for="check-provider">协议</label>
+            <select class="select" id="check-provider" name="provider">
+              <option value="auto">自动尝试</option>
+              <option value="openai">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic 原生</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label class="label" for="check-key">API Key</label>
+            <input class="input mono" id="check-key" name="api_key" type="password" autocomplete="new-password" placeholder="sk-…">
+            <div class="help">仅用于本页发起一次测试请求；不写入报告，不保存到 localStorage。</div>
+          </div>
+        </div>
+        <div class="check-actions">
+          <button class="btn btn-primary" id="check-start" type="submit">开始自检</button>
+          <button class="btn" id="check-export" type="button" disabled>导出报告（不含 Key）</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section class="check-card" style="margin-top:16px">
+    <div class="card-body">
+      <div id="check-summary" class="check-summary">填写网关地址后开始自检。建议同事先在浏览器里直接打开模型网关的
+        <span class="check-code">/models</span> 地址确认代理是否生效。</div>
+      <div id="check-status" class="check-status"></div>
+      <div class="check-foot">
+        <div><strong>现场判定口径：</strong></div>
+        <div>1. <span class="check-badge danger">网络不可达</span>：连 <code>no-cors</code> 探针都失败，通常是系统代理、PAC、证书、防火墙或 DNS 问题。</div>
+        <div>2. <span class="check-badge warn">CORS 拒绝</span>：网络探针成功，但带认证头的请求被浏览器拦截；需要网关允许平台 Origin 与预检头。</div>
+        <div>3. <span class="check-badge warn">认证失败</span>：请求到达网关但返回 401/403；检查 Key、认证样式和模型权限。</div>
+        <div>4. 混合内容：平台是 HTTPS 而网关是 HTTP 时浏览器会直接阻断；需要网关 HTTPS 或把平台部署在同一 HTTP 内网环境。</div>
+      </div>
+    </div>
+  </section>
+</main>
+<script type="module" src="/assets/js/relay_check.js"></script>
+</body>
+</html>

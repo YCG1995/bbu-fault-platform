@@ -8,22 +8,30 @@ import { renderTaskDetail } from './page_task_detail.js';
 import { renderSkills } from './page_skills.js';
 import { renderWorkshop } from './page_workshop.js';
 import { renderModels, renderUsers, renderAudit, renderSystem } from './page_admin.js';
+import { renderTraceDetail, renderTraces } from './page_traces.js';
 import { renderCases, renderCaseDetail } from './page_cases.js';
+import { renderKb, renderKbDocs, renderKbDoc } from './page_kb.js';
+import { renderUsage } from './page_usage.js';
 import { openPersonalModelModal } from './personal_model.js';
 import { mountAssistant, unmountAssistant } from './assistant.js';
+import { startRelay, stopRelay } from './relay.js';
 
 const NAV = [
   { href: '#/dashboard', label: '总览', icon: 'dashboard' },
   { href: '#/tasks/new', label: '新建诊断', icon: 'plus' },
   { href: '#/tasks', label: '任务记录', icon: 'list' },
+  { href: '#/usage', label: '用量统计', icon: 'activity' },
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
+  { href: '#/kb', label: '故障问答', icon: 'search' },
+  { href: '#/kb/docs?tab=overview', label: '知识库管理', icon: 'layers', adminOnly: true },
 ];
 const ADMIN_NAV = [
   { href: '#/models', label: '模型接入', icon: 'cpu' },
   { href: '#/users', label: '用户管理', icon: 'users' },
   { href: '#/audit', label: '审计日志', icon: 'shield' },
+  { href: '#/traces', label: '执行轨迹', icon: 'history' },
   { href: '#/system', label: '系统信息', icon: 'info' },
 ];
 
@@ -113,7 +121,9 @@ function updateNav() {
   const path = currentPath();
   document.querySelectorAll('#nav a').forEach((a) => {
     const href = a.getAttribute('href');
-    const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path));
+    const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path))
+      || (href === '#/kb' && path === '#/kb')
+      || (href.startsWith('#/kb/docs') && path.startsWith('#/kb/docs'));
     a.classList.toggle('active', active);
   });
 }
@@ -123,14 +133,10 @@ function renderShell() {
   if (loginRoot) { loginRoot.remove(); loginRoot = null; }
   const admin = state.user?.role === 'admin';
   const reviewer = state.user?.role === 'reviewer';
-  const baseNav = reviewer
-    ? [{ href: '#/dashboard', label: '工作台', icon: 'dashboard' },
-       { href: '#/tasks', label: '复核任务', icon: 'shield' },
-       { href: '#/cases', label: '真实案例', icon: 'inbox' }]
-    : NAV;
+  const baseNav = NAV;
   const nav = document.getElementById('nav');
-  nav.innerHTML = `<div class="nav-section">${reviewer ? '专家复核' : '诊断'}</div>
-    ${baseNav.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}
+  nav.innerHTML = `<div class="nav-section">${reviewer ? '诊断与复核' : '诊断'}</div>
+    ${baseNav.filter((n) => !n.adminOnly || admin).map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}
     ${admin ? `<div class="nav-section">管理</div>
     ${ADMIN_NAV.map((n) => `<a href="${n.href}">${icon(n.icon)}${n.label}</a>`).join('')}` : ''}`;
   const display = state.user?.display_name || state.user?.username || '用户';
@@ -139,6 +145,7 @@ function renderShell() {
     <div class="user-meta"><strong>${esc(display)}</strong><span>${roleLabel(state.user?.role)}</span></div>
     <button class="btn btn-ghost btn-sm" data-act="search" title="全局搜索">${icon('search')}</button>
     <button class="btn btn-ghost btn-sm" data-act="notifications" title="站内通知" id="notif-btn" style="position:relative">${icon('bell')}<span id="notif-badge" class="badge danger" hidden style="position:absolute;top:-2px;right:-2px;padding:1px 5px;font-size:10px"></span></button>
+    <button class="badge muted relay-pill" id="relay-pill" data-act="relay-check" title="浏览器代理状态"><i class="dot"></i>浏览器代理 未连接</button>
     <button class="btn btn-ghost btn-sm" data-act="profile" title="个人中心">${icon('users')}</button>
     <button class="btn btn-ghost btn-sm" data-act="password" title="修改密码">${icon('lock')}</button>
     <button class="btn btn-ghost btn-sm" data-act="logout" title="退出登录">${icon('logout')}</button>`;
@@ -150,6 +157,7 @@ function renderShell() {
   bindTopbar();
   updateNav();
   mountAssistant();
+  startRelay();
 }
 
 function bindTopbar() {
@@ -161,6 +169,7 @@ function bindTopbar() {
     if (!btn) return;
     if (btn.dataset.act === 'search') openSearch();
     if (btn.dataset.act === 'notifications') openNotifications();
+    if (btn.dataset.act === 'relay-check') window.open('/relay-check.html', '_blank', 'noopener');
     if (btn.dataset.act === 'profile') openProfile();
     if (btn.dataset.act === 'password') openChangePassword(false);
     if (btn.dataset.act === 'logout') {
@@ -168,6 +177,7 @@ function bindTopbar() {
       state.user = null;
       state.sessionExpires = null;
       unmountAssistant();
+      stopRelay();
       stopSessionTimer();
       toast('已退出登录', 'ok');
       renderLogin();
@@ -458,10 +468,6 @@ function renderLogin(message = '') {
       state.user = data.user;
       state.csrf = data.csrf;
       state.sessionExpires = data.expires_at;
-      if (data.user.must_change) {
-        showPasswordSetup(password);
-        return;
-      }
       scheduleSessionWarning();
       toast(`欢迎回来，${data.user.display_name || data.user.username}`, 'ok');
       renderShell();
@@ -616,7 +622,7 @@ async function openProfile() {
     <div class="card" style="margin-top:14px;box-shadow:none;border-color:#dbe4ee">
       <div class="card-body">
         <div class="between">
-          <div><strong>企业内网模型（个人 Key）</strong>
+          <div><strong>公司内网模型（个人 Key）</strong>
             <div class="small muted">${modelConfig.configured
               ? `已配置 ${esc(modelConfig.model)} · ${modelConfig.status?.personal?.available ? '当前可用' : '暂不可用，自动回退默认模型'}`
               : '未配置，当前使用管理员默认模型'}</div></div>
@@ -712,10 +718,6 @@ function openReauth(message = '登录已过期，请重新登录') {
       reauthOpen = false;
       m.close();
       rememberUsername(username, true);
-      if (data.user.must_change) {
-        showPasswordSetup(password);
-        return;
-      }
       scheduleSessionWarning();
       renderShell();
       toast('已恢复登录，页面内容保留', 'ok');
@@ -777,21 +779,28 @@ function route() {
   const path = currentPath();
   updateNav();
   if (path === '#/dashboard' || path === '#/') return renderDashboard();
-  if (path === '#/tasks') return renderTaskList();
-  if (path === '#/tasks/new') return state.user.role === 'reviewer' ? denied() : renderNewTask();
+  if (path === '#/tasks' || path.startsWith('#/tasks?tab=kb')) return renderTaskList();
+  if (path === '#/usage') return renderUsage();
+  if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();
+  if (path === '#/kb' || path === '#/kb/') return renderKb();
+  if (path === '#/kb/docs' || path.startsWith('#/kb/docs?')) return renderKbDocs();
+  const kbDocMatch = path.match(/^#\/kb\/docs\/([^/?]+)$/);
+  if (kbDocMatch) return renderKbDoc(decodeURIComponent(kbDocMatch[1]));
   const caseMatch = path.match(/^#\/cases\/([^/]+)$/);
   if (caseMatch) return renderCaseDetail(decodeURIComponent(caseMatch[1]));
   const taskMatch = path.match(/^#\/tasks\/([^/]+)$/);
   if (taskMatch) return renderTaskDetail(decodeURIComponent(taskMatch[1]));
-  if (state.user.role === 'reviewer' && ['#/skills', '#/workshop', '#/models', '#/users',
-      '#/audit', '#/system'].includes(path)) return denied();
   if (path === '#/skills') return renderSkills();
   if (path === '#/workshop') return renderWorkshop();
   if (path === '#/models') return state.user.role === 'admin' ? renderModels() : denied();
   if (path === '#/users') return state.user.role === 'admin' ? renderUsers() : denied();
   if (path === '#/audit') return state.user.role === 'admin' ? renderAudit() : denied();
-  if (path === '#/system') return state.user.role === 'admin' ? renderSystem() : denied();
+  if (path === '#/traces') return state.user.role === 'admin' ? renderTraces() : denied();
+  const traceMatch = path.match(/^#\/traces\/([^/]+)$/);
+  if (traceMatch) return state.user.role === 'admin'
+    ? renderTraceDetail(decodeURIComponent(traceMatch[1])) : denied();
+  if (path === '#/system') return renderSystem();
   location.hash = '#/dashboard';
 }
 
@@ -824,11 +833,6 @@ async function boot() {
     state.user = data.user;
     state.csrf = data.csrf;
     state.sessionExpires = data.session_expires;
-    if (data.user.must_change) {
-      // 会话仍在，但必须改密；提示重新登录以完成改密流程
-      renderLogin('请先登录并修改初始密码');
-      return;
-    }
     scheduleSessionWarning();
     renderShell();
     route();

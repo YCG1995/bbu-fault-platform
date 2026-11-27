@@ -72,6 +72,7 @@ export async function renderSkills() {
         </div>
         ${reasons.length ? `<div class="alert ${s.status === 'incompatible' ? 'danger' : 'warn'}" style="padding:8px 10px;font-size:11px">${icon('alert')}<div>${esc(reasons[0])}</div></div>` : ''}
         <div class="actions">
+          ${['ready', 'degraded'].includes(s.status) ? `<button class="btn btn-sm btn-primary" data-act="diagnose" data-name="${esc(s.name)}">${icon('play')}用此技能诊断</button>` : ''}
           <button class="btn btn-sm" data-act="detail" data-name="${esc(s.name)}">${icon('eye')}详情</button>
           ${s.status !== 'incompatible' && isAdmin ? `<button class="btn btn-sm ${s.status === 'disabled' ? '' : 'btn-danger'}" data-act="toggle" data-name="${esc(s.name)}" data-status="${s.status}">${s.status === 'disabled' ? '启用' : '停用'}</button>` : ''}
           ${isAdmin ? `<button class="btn btn-sm" data-act="channel" data-name="${esc(s.name)}" data-channel="${s.channel || 'stable'}">${s.channel === 'canary' ? '转稳定' : '灰度'}</button>` : ''}
@@ -101,6 +102,10 @@ export async function renderSkills() {
     },
     import: () => openImportModal(() => renderSkills()),
     detail: (el) => openSkillDrawer(el.dataset.name, () => renderSkills()),
+    diagnose: (el) => {
+      try { sessionStorage.setItem('bbu.diagnose_skill', el.dataset.name); } catch { /* ignore */ }
+      location.hash = '#/tasks/new';
+    },
     channel: async (el) => {
       const name = el.dataset.name;
       const next = el.dataset.channel === 'canary' ? 'stable' : 'canary';
@@ -242,6 +247,7 @@ async function openSkillDrawer(name, onChanged) {
       </div>
     </div>
     <div class="drawer-foot">
+      <button class="btn btn-primary" data-act="diagnose-skill">${icon('play')}用此技能诊断</button>
       <a class="btn" href="/api/skills/${encodeURIComponent(data.name)}/export">${icon('download')}导出 zip</a>
       ${isAdmin ? `<button class="btn ${data.status === 'disabled' ? 'btn-primary' : 'btn-danger'}" data-act="toggle">
         ${data.status === 'disabled' ? '启用' : '停用'}</button>` : ''}
@@ -252,6 +258,12 @@ async function openSkillDrawer(name, onChanged) {
   const close = () => drawer.remove();
   drawer.addEventListener('click', async (e) => {
     if (e.target === drawer || e.target.closest('[data-act="close"]')) close();
+    if (e.target.closest('[data-act="diagnose-skill"]')) {
+      try { sessionStorage.setItem('bbu.diagnose_skill', data.name); } catch { /* ignore */ }
+      close();
+      location.hash = '#/tasks/new';
+      return;
+    }
     const toggle = e.target.closest('[data-act="toggle"]');
     if (toggle) {
       const disabled = data.status === 'disabled';

@@ -46,10 +46,11 @@ class _Config:
     def __init__(self, root: Path) -> None:
         self.data_dir = root
         self.values = {
-            "personal_model_base_url": "https://maas.example.com/v1",
-            "personal_model_default": "gpt-4o-mini",
-            "personal_model_models": ["gpt-4o-mini", "enterprise-lite-v7.0"],
-            "personal_api_key_url": "https://maas.example.com/personal-api-key",
+            "personal_model_base_url": "https://nebulacoder-maas.zte.com.cn/v1",
+            "personal_model_default": "deepseek-v4-flash",
+            "personal_model_models": ["deepseek-v4-flash", "nebulacoder-lite-v7.0"],
+            "personal_api_key_url": "https://maas.zte.com.cn/zte-paas-zcloud-maasui/personal-api-key",
+            "model_discovery_allow_private": True,
         }
 
     def get(self, key: str, default=None):
@@ -88,22 +89,22 @@ class PersonalModelTests(unittest.TestCase):
         self.gateway = AIGateway(self.db, self.cfg, secret_box=self.box)
         _MockHandler.seen.clear()
 
-    def _admin_model(self, provider="mock", name="管理员默认"):
+    def _admin_model(self, provider="mock", name="管理员默认", roles=None, priority=0):
         now = "2026-11-25T00:00:00Z"
         self.db.execute(
             "INSERT INTO model_configs(name,provider,base_url,api_key,model,roles,max_tokens,"
             "temperature,timeout_sec,enabled,priority,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, provider, f"http://127.0.0.1:{self.port}/v1", self.box.encrypt("admin-key"),
-             "admin-model", json.dumps(["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
+             "admin-model", json.dumps(roles or ["default"]), 4096, 0.2, 5, 1, priority, "{}", now, now))
 
-    def _personal_model(self, uid, model="gpt-4o-mini", key="personal-secret-key"):
+    def _personal_model(self, uid, model="deepseek-v4-flash", key="personal-secret-key"):
         now = "2026-11-25T00:00:00Z"
         self.db.execute(
             "INSERT INTO user_model_configs(user_id,name,provider,base_url,api_key,model,"
             "max_tokens,temperature,timeout_sec,enabled,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (uid, "个人 MaaS", "openai", "https://maas.example.com/v1",
+            (uid, "个人 MaaS", "openai", "https://nebulacoder-maas.zte.com.cn/v1",
              self.box.encrypt(key), model, 4096, 0.2, 180, 1, "{}", now, now))
 
     def test_personal_config_is_encrypted_and_preferred(self):
@@ -113,7 +114,7 @@ class PersonalModelTests(unittest.TestCase):
         self.assertNotIn("personal-secret-key", row["api_key"])
         chosen = self.gateway.choose("default", user_id=self.uid)
         self.assertEqual(chosen[0]["source"], "personal")
-        self.assertEqual(chosen[0]["model"], "gpt-4o-mini")
+        self.assertEqual(chosen[0]["model"], "deepseek-v4-flash")
         self.assertIn("api_key", chosen[0])
         # 其他成员不会串用该 Key
         self.assertEqual(self.gateway.choose("default", user_id=self.other)[0]["source"], "admin")
@@ -145,6 +146,17 @@ class PersonalModelTests(unittest.TestCase):
             self.gateway.set_user(previous)
         self.assertEqual(chosen[0]["source"], "personal")
         self.assertEqual(self.gateway.choose("default")[0]["source"], "admin")
+
+    def test_workshop_uses_admin_priority_before_personal_model(self):
+        """技能工坊自动选择必须听管理员 priority，而不是被个人模型永久压住。"""
+        self._admin_model(name="工坊高优先", roles=["workshop"], priority=0)
+        self._admin_model(name="工坊低优先", roles=["workshop"], priority=5)
+        self._personal_model(self.uid)
+        chosen = self.gateway.choose("workshop", user_id=self.uid)
+        self.assertEqual(chosen[0]["source"], "admin")
+        self.assertEqual(chosen[0]["name"], "工坊高优先")
+        # 通用诊断链路仍保持个人优先，避免改变个人额度的既有语义。
+        self.assertEqual(self.gateway.choose("default", user_id=self.uid)[0]["source"], "personal")
 
     def test_no_personal_and_no_default_returns_friendly_key_notice(self):
         status = self.gateway.model_status(self.uid)
@@ -184,13 +196,35 @@ class PersonalModelTests(unittest.TestCase):
             "INSERT INTO user_model_configs(user_id,name,provider,base_url,api_key,model,"
             "max_tokens,temperature,timeout_sec,enabled,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (self.uid, "个人 MaaS", "openai", "https://maas.example.com/v1",
-             "enc:v1:broken", "gpt-4o-mini", 4096, 0.2, 180, 1, "{}", now, now))
+            (self.uid, "个人 MaaS", "openai", "https://nebulacoder-maas.zte.com.cn/v1",
+             "enc:v1:broken", "deepseek-v4-flash", 4096, 0.2, 180, 1, "{}", now, now))
         status = self.gateway.model_status(self.uid)
         self.assertTrue(status["personal"]["configured"])
         self.assertFalse(status["personal"]["available"])
         self.assertEqual(status["source"], "admin")
         self.assertEqual(self.gateway.choose("default", user_id=self.uid)[0]["source"], "admin")
+
+    def test_non_default_global_model_does_not_make_default_usable(self):
+        self._admin_model(roles=["workshop"])
+        status = self.gateway.model_status(self.uid)
+        self.assertFalse(status["usable"])
+        self.assertFalse(status["default"]["configured"])
+        self.assertFalse(status["default"]["available"])
+        self.assertEqual(self.gateway.choose("default", user_id=self.uid), [])
+        self.assertEqual([m["name"] for m in self.gateway.choose("workshop", user_id=self.uid)],
+                         ["管理员默认"])
+
+    def test_broken_global_key_is_configured_not_usable(self):
+        self._admin_model()
+        self.db.execute(
+            "UPDATE model_configs SET api_key=? WHERE name=?",
+            ("enc:v1:broken", "管理员默认"))
+        status = self.gateway.model_status(self.uid)
+        self.assertFalse(status["usable"])
+        self.assertTrue(status["default"]["configured"])
+        self.assertFalse(status["default"]["available"])
+        self.assertEqual(status["notice"]["code"], "default_model_error")
+        self.assertIn("暂时不可用", status["notice"]["title"])
 
 
 if __name__ == "__main__":

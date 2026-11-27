@@ -6,7 +6,7 @@ engineer fixture, and sends a fixed suite of questions through
 AssistantService.chat() using the configured real model.
 
 Usage:
-    python3 evaluations/real_assistant_eval.py --model gpt-4o-mini
+    python3 evaluations/real_assistant_eval.py --model deepseek-flash
 
 Results are written to evaluations/runs/assistant-real-model-<date>.json.
 The source database and project data are not modified.
@@ -333,7 +333,7 @@ def run_case(assistant: Any, user: dict[str, Any], case: dict[str, Any]) -> dict
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--model", default="deepseek-flash")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
 

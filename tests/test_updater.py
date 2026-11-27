@@ -7,6 +7,7 @@ import shutil
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,7 @@ CURRENT_VERSION = re.search(
     (ROOT / "bbu" / "__init__.py").read_text(encoding="utf-8")).group(1)
 
 
-def build_package(path: Path, version: str, *, extra=None, symlink=False) -> Path:
+def build_tree(path: Path, version: str, *, extra=None) -> Path:
     root = path.parent / f"src-{version}-{path.name}"
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
@@ -38,6 +39,11 @@ def build_package(path: Path, version: str, *, extra=None, symlink=False) -> Pat
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+    return root
+
+
+def build_package(path: Path, version: str, *, extra=None, symlink=False) -> Path:
+    root = build_tree(path, version, extra=extra)
     with tarfile.open(path, "w:gz") as tar:
         tar.add(root, arcname="bbu-fault-platform")
         if symlink:
@@ -45,6 +51,15 @@ def build_package(path: Path, version: str, *, extra=None, symlink=False) -> Pat
             info.type = tarfile.SYMTYPE
             info.linkname = "/etc/passwd"
             tar.addfile(info)
+    return path
+
+
+def build_zip(path: Path, version: str, *, extra=None) -> Path:
+    root = build_tree(path, version, extra=extra)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item in root.rglob("*"):
+            if item.is_file():
+                archive.write(item, f"bbu-fault-platform/{item.relative_to(root).as_posix()}")
     return path
 
 
@@ -95,6 +110,39 @@ class UpdaterPreflightTests(unittest.TestCase):
             tar.add(root, arcname="bbu-fault-platform")
         with self.assertRaises(updater.UpdateError):
             updater.inspect_archive(path, self.tmp / "release7", CURRENT_VERSION)
+
+    def test_zip_preflight_create_job_and_prepare_restart(self):
+        package = build_zip(self.tmp / "u5.zip", "9.9.9")
+        result = updater.inspect_archive(package, self.tmp / "release-zip", CURRENT_VERSION)
+        self.assertEqual(result["target_version"], "9.9.9")
+        cfg = Config(self.tmp / "cfg-zip")
+        class _DB:
+            def one(self, _sql):
+                return {"n": 0}
+            def running_tasks_for_user(self, _user):
+                return 0
+        app = SimpleNamespace(config=cfg, db=_DB())
+        status = updater.create_job(app, package, "u5.zip")
+        self.assertEqual(status["phase"], "ready")
+        job = cfg.root / "updates" / status["id"]
+        self.assertTrue((job / "package.zip").is_file())
+        prepared = updater.prepare_restart_job(app, status["id"])
+        self.assertEqual(prepared["phase"], "waiting_restart")
+        pending = cfg.root / "pending_maintenance.json"
+        self.assertTrue(pending.is_file())
+        data = json.loads(pending.read_text(encoding="utf-8"))
+        self.assertEqual(data["action"], "update")
+        self.assertEqual(updater.pending_update(app)["job_id"], status["id"])
+
+    def test_zip_symlink_is_rejected(self):
+        package = build_zip(self.tmp / "bad.zip", "9.9.9")
+        with zipfile.ZipFile(package, "a") as archive:
+            info = zipfile.ZipInfo("bbu-fault-platform/evil-link")
+            info.create_system = 3
+            info.external_attr = (0o120777 << 16)
+            archive.writestr(info, "/etc/passwd")
+        with self.assertRaises(updater.UpdateError):
+            updater.inspect_archive(package, self.tmp / "release-bad-zip", CURRENT_VERSION)
 
     def test_create_job_writes_ready_status_and_rejects_big_package(self):
         cfg_root = self.tmp / "cfg"

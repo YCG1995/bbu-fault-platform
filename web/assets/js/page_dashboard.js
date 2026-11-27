@@ -40,10 +40,10 @@ function checklistCard(stats) {
     items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
       text: '上传日志包，验证上传、规划和报告闭环。', link: '#/tasks/new', action: '新建诊断' });
   } else if (role === 'reviewer') {
-    items.push({ done: (stats.tasks_total || 0) > 0, label: '接收复核任务',
-      text: '管理员在任务详情分配专家后，这里会出现待办。', link: '#/tasks', action: '查看任务' });
+    items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
+      text: '专家也可以上传日志诊断；被管理员分配的任务另外出现在待复核。', link: '#/tasks/new', action: '新建诊断' });
     items.push({ done: (stats.pending_reviews || 0) === 0, label: '处理待复核',
-      text: '确认、改判或驳回；提交后会写入审计。', link: '#/tasks', action: '去复核' });
+      text: '确认、改判或驳回；不能复核自己创建的任务。', link: '#/tasks', action: '去复核' });
   } else {
     items.push({ done: (stats.tasks_total || 0) > 0, label: '创建首个诊断任务',
       text: '上传现场日志包，平台会自动盘点并调度技能。', link: '#/tasks/new', action: '新建诊断' });
@@ -62,13 +62,18 @@ function checklistCard(stats) {
 }
 
 export async function renderDashboard() {
-  const canCreate = state.user?.role !== 'reviewer';
-  const view = mount('总览', canCreate ? '平台运行状态与最近的诊断任务' : '被分配任务与复核进度',
-    canCreate ? `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>` : '');
+  const view = mount('总览', '平台运行状态、最近的诊断任务与复核进度',
+    `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>`);
   view.innerHTML = `<div class="skeleton" style="height:120px;margin-bottom:16px"></div>`;
   let stats;
+  let kbStatus = null;
   try {
-    stats = await api('/api/stats');
+    const [statsResp, kbResp] = await Promise.all([
+      api('/api/stats'),
+      api('/api/kb/status').catch(() => null),
+    ]);
+    stats = statsResp;
+    kbStatus = kbResp?.status || null;
   } catch (err) {
     view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return;
@@ -141,6 +146,23 @@ export async function renderDashboard() {
             ${bad ? `<div class="alert warn" style="margin-top:12px">${icon('alert')}<div>有 ${bad} 个技能不可用/停用，可能导致计划后无法执行。到技能库查看原因。</div></div>` : ''}
           </div>
         </div>
+        ${kbStatus ? `<div class="card kb-dashboard-card">
+          <div class="card-head"><h2>故障知识库</h2>
+            <a class="tiny" href="#/kb" style="margin-left:auto">去查故障</a></div>
+          <div class="card-body">
+            <div class="grid grid-2" style="gap:10px">
+              <div class="mini-stat"><strong>${kbStatus.documents || 0}</strong><span>生效文档</span></div>
+              <div class="mini-stat"><strong>${kbStatus.cases || 0}</strong><span>可引用案例</span></div>
+              <div class="mini-stat"><strong>${kbStatus.index?.terms || 0}</strong><span>索引词项</span></div>
+              <div class="mini-stat"><strong>${kbStatus.drafts || 0}</strong><span>待审核</span></div>
+            </div>
+            <div class="tiny muted" style="margin-top:10px">索引 ${esc(kbStatus.index?.status || 'empty')} · ${kbStatus.index?.build_ms || 0} ms · ${kbStatus.index?.bytes ? `${Math.round(kbStatus.index.bytes / 1024)} KB` : '尚未构建'}</div>
+            <div class="inline" style="margin-top:12px">
+              <a class="btn btn-sm" href="#/kb">故障问答</a>
+              <a class="btn btn-sm" href="${kbStatus.can_admin ? '#/kb/docs?tab=overview' : '#/kb/docs?tab=docs'}">${kbStatus.can_admin ? '知识库管理' : '浏览文档库'}</a>
+              <a class="btn btn-sm btn-ghost" href="#/tasks?tab=kb">操作记录</a>
+            </div>
+          </div></div>` : ''}
         ${quality ? qualityCard(quality) : ''}
       </div>
     </div>

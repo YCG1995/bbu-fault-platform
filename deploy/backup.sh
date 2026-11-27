@@ -19,19 +19,37 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 [ -n "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3 || true)"
 
+MODE=""
+VERIFY=""
+DRILL=""
 usage() {
-  echo "用法: bash backup.sh [--state-dir DIR] --out /path/backup.tar.gz"
+  echo "用法: bash backup.sh [--state-dir DIR] [--daily|--weekly] [--out PATH]"
+  echo "      bash backup.sh --verify PATH | --restore-drill PATH"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
+    --daily) MODE="daily"; shift ;;
+    --weekly) MODE="weekly"; shift ;;
+    --verify) VERIFY="${2:-}"; shift 2 ;;
+    --restore-drill) DRILL="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
 
+if [ -n "$VERIFY" ] || [ -n "$DRILL" ]; then
+  [ -n "$PYTHON_BIN" ] || { echo "未找到 python3" >&2; exit 1; }
+  if [ -n "$VERIFY" ]; then
+    exec "$PYTHON_BIN" "$(dirname "$0")/../tools/backup_ops.py" --verify "$VERIFY"
+  fi
+  exec "$PYTHON_BIN" "$(dirname "$0")/../tools/backup_ops.py" --restore-drill "$DRILL"
+fi
+if [ -n "$MODE" ]; then
+  OUT="${OUT:-$(dirname "$STATE_DIR")/backups/${MODE}-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
+fi
 [ -n "$OUT" ] || { usage; exit 1; }
 [ -n "$PYTHON_BIN" ] || { echo "未找到 python3" >&2; exit 1; }
 [ -d "$STATE_DIR" ] || { echo "数据目录不存在: $STATE_DIR" >&2; exit 1; }

@@ -60,8 +60,8 @@ deploy\windows\set_pip_mirror.bat
 
 ```ini
 [global]
-index-url = https://artifactory.example.com/artifactory/api/pypi/public-pypi-virtual/simple
-trusted-host = artifactory.example.com
+index-url = https://artsz.zte.com.cn/artifactory/api/pypi/public-pypi-virtual/simple
+trusted-host = artsz.zte.com.cn
 timeout = 60
 retries = 3
 ```
@@ -116,12 +116,19 @@ data\初始管理员密码.txt
 | 技能超时/取消时调用 `os.killpg` | Windows 改用 `taskkill /PID <pid> /T /F` 结束进程树；POSIX 保持进程组信号 |
 | 子进程 `start_new_session=True` | 仅 POSIX 传入；Windows 不传，避免不支持参数 |
 
-Windows 下「系统信息 → 离线升级」默认不可用，页面会提示手动更新。更新方法：
+### 网页上传更新（1.24.7 起，1.24.8 继续适用）
 
-1. 停止平台；
-2. 备份 `data\` 和 `config.json`；
-3. 解压新版本，覆盖程序目录（保留 `data\`、`config.json`）；
-4. 重新启动。
+> 首次从 1.24.6 升级到 1.24.7 时，旧版还没有网页重启模式，请先按手动流程覆盖一次程序目录；装到 1.24.7 后，后续更新可使用下面的网页流程。
+
+Windows 无 root/systemd 助手时，「系统信息 → 离线升级」使用 **网页上传 + 下次启动生效**：
+
+1. 管理员在网页选择 Windows 分发包 `.zip`（也兼容 `.tar.gz`），点击「上传并预检」；
+2. 服务端只校验 SHA256、版本、顶层目录和必需文件，并解压到 `updates/<任务>/release`，不执行包内脚本；
+3. 预检通过后点击「准备重启生效」，服务端写入程序根 `pending_maintenance.json`，任务状态变为「待重启生效」；
+4. 关闭当前平台窗口，重新运行 `deploy\windows\start_platform.bat` 或 `python run.py`；
+5. 启动时自动备份旧程序到 `backups/update-<任务ID>`，替换程序代码，保留 `data\`、`skills\`、`cases\`、`updates\`、`backups\` 与 `config.json`，随后重新执行入口加载新版本。
+
+失败时服务端会恢复旧代码，任务状态标记为失败；如需回退，可使用该任务备份目录手动恢复程序。Windows 重启模式暂不提供网页一键回滚。
 
 ## 5.1 工作目录切换与迁移包（1.10.0）
 
@@ -147,7 +154,7 @@ Windows 下「系统信息 → 离线升级」默认不可用，页面会提示�
 | 启动报端口占用 | `python run.py --port 8090` |
 | 无法写数据库 | 换到可写目录，不要放 Program Files |
 | 中文乱码 | 设置 `PYTHONUTF8=1` 后重启命令行 |
-| pip 源证书错误 | 确认已配置 `trusted-host = artifactory.example.com`，并在办公网/VPN |
+| pip 源证书错误 | 确认已配置 `trusted-host = artsz.zte.com.cn`，并在办公网/VPN |
 | 需要后台服务 | 可用 NSSM 等工具把 `python run.py` 注册为服务；平台不自带 Windows 服务安装器 |
 | 切换工作目录后页面提示等待重启 | 这是 Windows 的正常流程；停止 `python run.py` 后重新启动，`pending_maintenance.json` 会在启动前自动应用 |
 | 重启后任务显示「重启导致迁移任务中断」 | 检查 `pending_maintenance.json` 是否还在；应用失败会保留旧目录并把任务标为失败，修复目标目录权限后重新提交 |

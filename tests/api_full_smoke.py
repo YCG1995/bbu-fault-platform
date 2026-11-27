@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 CURRENT_VERSION = re.search(
@@ -52,6 +53,8 @@ EXPECTED_ROUTES = {
     "GET /api/search",
     "GET /api/metrics",
     "GET /api/metrics/prometheus",
+    "GET /api/usage/overview",
+    "GET /api/usage/tasks",
     "GET /api/cases",
     "GET /api/cases/{id}",
     "POST /api/cases/{id}/label",
@@ -118,6 +121,7 @@ EXPECTED_ROUTES = {
     "POST /api/workshop/drafts/{id}/refine",
     "POST /api/workshop/drafts/{id}/check",
     "POST /api/workshop/drafts/{id}/verify-rules",
+    "POST /api/workshop/drafts/{id}/rules/try",
     "POST /api/workshop/drafts/{id}/build",
     "POST /api/workshop/drafts/{id}/publish",
     "POST /api/workshop/drafts/{id}/case",
@@ -137,6 +141,13 @@ EXPECTED_ROUTES = {
     "DELETE /api/models/{id}",
     "POST /api/models/{id}/test",
     "POST /api/models/{id}/capabilities",
+    "POST /api/models/{id}/relay-test",
+    "GET /api/models/{id}/relay-test/{test_id}",
+    "GET /api/relay/status",
+    "GET /api/relay/calls",
+    "POST /api/relay/calls/{call_id}/result",
+    "POST /api/relay/release",
+    "POST /api/models/discover",
     "POST /api/models/test",
     "GET /api/users",
     "POST /api/users",
@@ -155,6 +166,10 @@ EXPECTED_ROUTES = {
     "POST /api/profile/model-key/test",
     "GET /api/audit",
     "GET /api/audit/export",
+    "GET /api/traces",
+    "GET /api/traces/{run_id}/summary",
+    "GET /api/traces/{run_id}/events",
+    "GET /api/traces/{run_id}/download",
     "GET /api/tool-calls",
     "GET /api/tool-approvals",
     "POST /api/tool-approvals/{id}/decide",
@@ -169,6 +184,14 @@ EXPECTED_ROUTES = {
     "POST /api/system/updates/{id}/verify",
     "POST /api/system/updates/{id}/apply",
     "POST /api/system/updates/rollback",
+    "GET /api/system/migrations",
+    "POST /api/system/migrations/workspace/preflight",
+    "POST /api/system/migrations/workspace",
+    "POST /api/system/migrations/export",
+    "POST /api/system/migrations/import",
+    "GET /api/system/migrations/{migration_id}",
+    "GET /api/system/migrations/{migration_id}/download",
+    "DELETE /api/system/migrations/{migration_id}",
     "GET /mcp",
     "POST /mcp",
     "GET /api/assistant/status",
@@ -176,6 +199,81 @@ EXPECTED_ROUTES = {
     "POST /api/assistant/chat",
     "POST /api/assistant/actions/{id}/confirm",
     "POST /api/assistant/actions/{id}/cancel",
+    "GET /api/kb/status",
+    "GET /api/kb/operations",
+    "GET /api/kb/facets",
+    "GET /api/kb/docs",
+    "POST /api/kb/docs",
+    "GET /api/kb/docs/{id}",
+    "POST /api/kb/docs/{id}/restore",
+    "GET /api/kb/cases/{case_id}",
+    "PUT /api/kb/cases/{case_id}",
+    "POST /api/kb/cases/{case_id}/status",
+    "GET /api/kb/cases/{case_id}/revisions",
+    "GET /api/kb/cases/{case_id}/revisions/{revision}",
+    "POST /api/kb/cases/{case_id}/revisions/{revision}/restore",
+    "GET /api/kb/cases/{case_id}/revisions/verify",
+    "PUT /api/kb/docs/{id}",
+    "POST /api/kb/docs/{id}/status",
+    "DELETE /api/kb/docs/{id}",
+    "GET /api/kb/docs/{id}/versions",
+    "POST /api/kb/docs/{id}/versions/{version_id}/restore",
+    "GET /api/kb/files/{id}",
+    "POST /api/kb/import",
+    "GET /api/kb/import/jobs",
+    "GET /api/kb/import/jobs/{id}",
+    "POST /api/kb/import/jobs/{id}/cancel",
+    "POST /api/kb/import/jobs/rollback",
+    "POST /api/kb/import/jobs/delete",
+    "POST /api/kb/import/jobs/retry",
+    "GET /api/kb/libraries",
+    "POST /api/kb/libraries",
+    "PUT /api/kb/libraries/{kb_id}",
+    "POST /api/kb/libraries/{kb_id}/archive",
+    "GET /api/kb/libraries/{kb_id}/backup",
+    "POST /api/kb/libraries/restore",
+    "GET /api/kb/drafts",
+    "GET /api/kb/drafts/{id}",
+    "PUT /api/kb/drafts/{id}",
+    "POST /api/kb/drafts/{id}/approve",
+    "POST /api/kb/drafts/{id}/reject",
+    "POST /api/kb/chat",
+    "POST /api/kb/feedback",
+    "POST /api/kb/reindex",
+    "GET /api/kb/queries",
+    "POST /api/kb/sample",
+    "GET /api/kb/audit",
+    "POST /api/kb/export/report",
+    "GET /api/kb/duplicates",
+    "GET /api/kb/duplicates/preview",
+    "POST /api/kb/duplicates/merge",
+    "GET /api/kb/eval/sets",
+    "POST /api/kb/eval/sets",
+    "GET /api/kb/eval/sets/{id}",
+    "DELETE /api/kb/eval/sets/{id}",
+    "POST /api/kb/eval/sets/{id}/run",
+    "GET /api/kb/eval/runs",
+    "GET /api/kb/eval/runs/{id}",
+    "GET /api/kb/eval/runs/{id}/export",
+    "GET /api/kb/terms",
+    "POST /api/kb/terms",
+    "GET /api/kb/terms/export",
+    "POST /api/kb/terms/import",
+    "PUT /api/kb/terms/{id}",
+    "DELETE /api/kb/terms/{id}",
+    "POST /api/kb/import/preview",
+    "GET /api/kb/reviews/auto-publish/dry-run",
+    "POST /api/kb/reviews/{id}/auto-publish",
+    "GET /api/kb/stats",
+    "GET /api/kb/reviews",
+    "GET /api/kb/reviews/{review_id}",
+    "POST /api/kb/reviews",
+    "POST /api/kb/reviews/run",
+    "POST /api/kb/reviews/batch-decision",
+    "POST /api/kb/reviews/batch-retry",
+    "POST /api/kb/reviews/{review_id}/decision",
+    "POST /api/kb/reviews/{review_id}/retry",
+    "GET /api/kb/search",
     "GET /api/mcp/info",
     "POST /api/mcp/token",
     "DELETE /api/mcp/token",
@@ -266,6 +364,12 @@ class Client:
 
 
 class _OpenAIMock(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        if self.path.rstrip("/").endswith("/models"):
+            self._send({"data": [{"id": "test-model"}, {"id": "test-model-2"}]})
+            return
+        self.send_error(404)
+
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
@@ -423,6 +527,7 @@ def main() -> int:
                 "BBU_MAX_WORKERS": "1", "PYTHONUNBUFFERED": "1",
                 "BBU_CONFIG_FILE": str(work / "config.json"),
                 "BBU_PERSONAL_MODEL_BASE_URL": "http://127.0.0.1:1/v1",
+                "BBU_MODEL_DISCOVERY_ALLOW_PRIVATE": "1",
                 "BBU_UPGRADE_HELPER_CMD": f"{sys.executable} {fake_helper}"})
     log_file = open(work / "server.log", "w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, "run.py", "--host", host, "--port", str(port)],
@@ -454,9 +559,9 @@ def main() -> int:
         admin_id = me["user"]["id"]
         hit("GET /api/auth/me")
         status, raw, _ = admin_client.request("GET", "/api/tasks")
-        assert status == 403
-        assert json.loads(raw)["detail"]["code"] == "password_change_required"
-        hit("GET /api/tasks")  # 初始密码未修改时被服务端拦截
+        assert status == 200
+        assert json.loads(raw)["items"] == []
+        hit("GET /api/tasks")  # 首次登录不再强制改密，可直接进入工作台
         _, changed = admin_client.json("POST", "/api/auth/password",
                                        {"old_password": initial_password,
                                         "new_password": "Platform!2026x"})
@@ -516,12 +621,66 @@ def main() -> int:
         })
         assert draft_tested["ok"], draft_tested
         hit("POST /api/models/test")
+        _, discovered = admin_client.json("POST", "/api/models/discover", {
+            "provider": "openai", "base_url": f"http://127.0.0.1:{openai_port}/v1",
+            "api_key": "api-test-key",
+        })
+        assert discovered["models"] == ["test-model", "test-model-2"], discovered
+        _, discovered_existing = admin_client.json("POST", "/api/models/discover", {
+            "model_id": model_id, "provider": "openai",
+            "base_url": f"http://127.0.0.1:{openai_port}/v1",
+        })
+        assert discovered_existing["models"] == ["test-model", "test-model-2"], discovered_existing
+        hit("POST /api/models/discover")
         _, updated = admin_client.json("PUT", f"/api/models/{model_id}",
                                        {"name": "api-openai-updated", "priority": 1})
         assert updated["model"]["name"] == "api-openai-updated"
         hit("PUT /api/models/{id}")
         admin_client.json("DELETE", f"/api/models/{model_id}")
         hit("DELETE /api/models/{id}")
+
+        # 浏览器代理：状态/长轮询/回传/释放/管理员自检
+        _, relay_status = admin_client.json("GET", "/api/relay/status")
+        assert relay_status["enabled"] is True and relay_status["window"]["window_id"]
+        relay_window = relay_status["window"]["window_id"]
+        hit("GET /api/relay/status")
+        status, _, _ = admin_client.request(
+            "GET", f"/api/relay/calls?window_id={relay_window}&wait=0")
+        assert status == 204, status
+        hit("GET /api/relay/calls")
+        admin_client.json("POST", "/api/relay/release",
+                          {"window_id": relay_window})
+        hit("POST /api/relay/release")
+        admin_client.json("POST", "/api/relay/calls/not-a-call/result",
+                          {"body_text": "", "status": 0}, expected=404)
+        hit("POST /api/relay/calls/{call_id}/result")
+        _, browser_model = admin_client.json("POST", "/api/models", {
+            "name": "api-browser-relay", "provider": "openai",
+            "base_url": "https://maas.example.com/v1",
+            "api_key": "browser-test-key", "model": "browser-model",
+            "roles": ["default"],
+            "extra": {"transport": "browser",
+                      "browser_relay": {"max_concurrent": 1,
+                                        "claim_timeout_sec": 5,
+                                        "exec_timeout_sec": 30,
+                                        "allow_roles": []}},
+        }, expected=201)
+        browser_id = browser_model["model"]["id"]
+        _, relay_test = admin_client.json(
+            "POST", f"/api/models/{browser_id}/relay-test", expected=202)
+        assert relay_test["state"] == "pending" and relay_test["test_id"]
+        hit("POST /api/models/{id}/relay-test")
+        relay_test_id = relay_test["test_id"]
+        for _ in range(20):
+            _, relay_test_detail = admin_client.json(
+                "GET", f"/api/models/{browser_id}/relay-test/{relay_test_id}")
+            if relay_test_detail["state"] != "pending":
+                break
+            time.sleep(0.1)
+        assert relay_test_detail["state"] in ("failed", "done"), relay_test_detail
+        hit("GET /api/models/{id}/relay-test/{test_id}")
+        admin_client.json("DELETE", f"/api/models/{browser_id}")
+
         planner_server, planner_port = start_mock(_PlannerMock)
         _, created = admin_client.json("POST", "/api/models", {
             "name": "api-planner", "provider": "openai",
@@ -591,11 +750,17 @@ def main() -> int:
         run_id = recovery["run"]["id"]
         assert recovery["run"]["before"], recovery
         hit("POST /api/tasks/{id}/recovery-runs")
-        _, observed = admin_client.json("POST", f"/api/recovery-runs/{run_id}/observe", {
-            "after": {"verdict": {"status": "matched", "root_cause_name": ""},
-                      "evidence": [{"rule_id": "E1", "file": "after-clock.log",
-                                    "line_no": 3, "text": "clock stable"}]}})
+        _, observed = admin_client.multipart(f"/api/recovery-runs/{run_id}/observe", {
+            "after": json.dumps({"verdict": {"status": "matched", "root_cause_name": ""},
+                                 "evidence": [{"rule_id": "E1", "file": "after-clock.log",
+                                               "line_no": 3}]}, ensure_ascii=False),
+        }, [("file", "after-clock.log", b"clock stable\nPLL locked\n", "text/plain")],
+            expected=200)
         assert observed["run"]["comparison"]["status"] == "recovered", observed
+        uploaded = observed["run"]["after"]["evidence"][0]
+        assert uploaded["uploaded"] is True and uploaded["sha256"]
+        assert uploaded["file"] == "after-clock.log" and uploaded["size"] > 0
+        assert "clock stable" in uploaded["text"]
         hit("POST /api/recovery-runs/{id}/observe")
         _, recovery_review = admin_client.json("POST", f"/api/recovery-runs/{run_id}/review",
                                                {"decision": "confirmed", "note": "现场已恢复"})
@@ -688,6 +853,14 @@ def main() -> int:
         status, raw, headers = admin_client.request("GET", "/api/metrics/prometheus")
         assert status == 200 and b"bbu_queue_depth" in raw and "text/plain" in headers.get("content-type", "")
         hit("GET /api/metrics/prometheus")
+        _, usage = admin_client.json("GET", "/api/usage/overview?days=7")
+        assert "totals" in usage and isinstance(usage["daily"], list)
+        assert len(usage["daily"]) == 7 and "directory" in usage
+        assert isinstance(usage["user_daily"], list)
+        hit("GET /api/usage/overview")
+        _, usage_tasks = admin_client.json("GET", "/api/usage/tasks?days=7&page=1&page_size=10")
+        assert usage_tasks["page"] == 1 and isinstance(usage_tasks["items"], list)
+        hit("GET /api/usage/tasks")
         _, events = admin_client.json("GET", f"/api/tasks/{clock}/events?after=0")
         assert events["items"]
         hit("GET /api/tasks/{id}/events")
@@ -785,6 +958,9 @@ def main() -> int:
         hit("POST /api/workshop/drafts/{id}/logs")
         admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/analyze")
         hit("POST /api/workshop/drafts/{id}/analyze")
+        _, tried_auto = admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/rules/try")
+        assert tried_auto["ok"], tried_auto
+        hit("POST /api/workshop/drafts/{id}/rules/try")
         admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/check", {})
         hit("POST /api/workshop/drafts/{id}/check")
         _, verified = admin_client.json("POST", f"/api/workshop/drafts/{auto_id}/verify-rules",
@@ -958,7 +1134,7 @@ def main() -> int:
         assert "personal-api-key" in key0["maas_url"]
         hit("GET /api/profile/model-key")
         _, key1 = admin_client.json("PUT", "/api/profile/model-key", {
-            "api_key": "maas-test-secret-key", "model": "gpt-4o-mini",
+            "api_key": "maas-test-secret-key", "model": "deepseek-v4-flash",
         })
         assert key1["configured"] is True
         assert "maas-test-secret-key" not in json.dumps(key1, ensure_ascii=False)
@@ -968,7 +1144,7 @@ def main() -> int:
         assert key_test["ok"] is False and key_test["error"]
         hit("POST /api/profile/model-key/test")
         _, key2 = admin_client.json("GET", "/api/profile/model-key")
-        assert key2["configured"] is True and key2["model"] == "gpt-4o-mini"
+        assert key2["configured"] is True and key2["model"] == "deepseek-v4-flash"
         _, deleted_key = admin_client.json("DELETE", "/api/profile/model-key")
         assert deleted_key["ok"] is True
         hit("DELETE /api/profile/model-key")
@@ -998,18 +1174,21 @@ def main() -> int:
         reviewer.login("api_reviewer", "Reviewer!2026x")
         _, reviewer_tasks = reviewer.json("GET", "/api/tasks")
         assert any(item["id"] == clock for item in reviewer_tasks["items"])
+        reviewer.json("GET", "/api/traces", expected=403)
         _, reviewer_detail = reviewer.json("GET", f"/api/tasks/{clock}")
         assert reviewer_detail["reviewer_id"] == reviewer_id
         reviewer.json("GET", "/api/users", expected=403)
         reviewer.json("GET", "/api/audit", expected=403)
         reviewer.json("GET", "/api/models", expected=403)
-        reviewer.json("GET", "/api/system/info", expected=403)
+        _, reviewer_system = reviewer.json("GET", "/api/system/info")
+        assert reviewer_system["version"]
         reviewer.json("GET", "/api/system/updates", expected=403)
         _, reviewer_profile = reviewer.json("GET", "/api/profile")
         assert reviewer_profile["user"]["role"] == "reviewer"
         _, reviewer_search = reviewer.json("GET", "/api/search?q=API")
-        assert reviewer_search["users"] == [] and reviewer_search["skills"] == []
-        assert reviewer_search["cases"] == []
+        assert reviewer_search["users"] == []
+        assert isinstance(reviewer_search["skills"], list)
+        assert isinstance(reviewer_search["cases"], list)
         assert all(item["id"] == clock for item in reviewer_search["tasks"])
 
         _, bulk_user = admin_client.json("POST", "/api/users", {
@@ -1083,6 +1262,31 @@ def main() -> int:
         admin_client.json("DELETE", f"/api/task-drafts/{draft2['draft']['id']}")
         hit("DELETE /api/task-drafts/{id}")
 
+        _, traces = admin_client.json(
+            "GET", f"/api/traces?kind=diagnosis&ref_id={clock}&limit=10")
+        assert traces["items"], "诊断任务完成后没有执行轨迹"
+        trace_run = traces["items"][0]
+        assert trace_run["status"] in ("success", "needs_data", "failed"), trace_run
+        assert trace_run["trace_path"].endswith(".jsonl")
+        hit("GET /api/traces")
+        _, trace_summary = admin_client.json(
+            "GET", f"/api/traces/{trace_run['id']}/summary")
+        assert trace_summary["run"]["id"] == trace_run["id"]
+        assert "first_error" in trace_summary
+        hit("GET /api/traces/{run_id}/summary")
+        _, trace_events = admin_client.json(
+            "GET", f"/api/traces/{trace_run['id']}/events?limit=50")
+        assert trace_events["items"], "轨迹没有事件"
+        assert any(e["type"] == "model_request" for e in trace_events["items"])
+        assert any(e["type"] == "model_response" for e in trace_events["items"])
+        hit("GET /api/traces/{run_id}/events")
+        status, raw, headers = admin_client.request(
+            "GET", f"/api/traces/{trace_run['id']}/download")
+        assert status == 200 and "ndjson" in headers.get("content-type", "")
+        assert raw and b'"run_id"' in raw
+        hit("GET /api/traces/{run_id}/download")
+        admin_client.json("GET", "/api/traces/NOTATRACE/summary", expected=404)
+
         _, audit = admin_client.json("GET", "/api/audit?page=1&page_size=10")
         assert audit["total"] > 0
         hit("GET /api/audit")
@@ -1095,9 +1299,11 @@ def main() -> int:
         hit("GET /api/audit/export")
         _, system = admin_client.json("GET", "/api/system/info")
         assert system["config"]["planner_enabled"] is True
+        assert "cpu" in system["system"] and "process" in system["system"]
         hit("GET /api/system/info")
         _, stats = admin_client.json("GET", "/api/stats")
         assert stats["today"] >= 1 and "pending_reviews" in stats
+        assert "system" not in stats, "系统资源应只在 /api/system/info 返回"
         hit("GET /api/stats")
         _, notes = admin_client.json("GET", "/api/notifications")
         assert "items" in notes and "unread" in notes
@@ -1202,7 +1408,7 @@ def main() -> int:
         engineer = Client(host, port)
         engineer.login("api_engineer", "Engineer!2026")
         status, _, _ = engineer.request("GET", "/api/tasks")
-        assert status == 403
+        assert status == 200
         _, engineer_changed = engineer.json("POST", "/api/auth/password", {
             "old_password": "Engineer!2026", "new_password": "EngineerApi!2026",
         })
@@ -1388,6 +1594,365 @@ def main() -> int:
         _, revoked = admin_client.json("DELETE", "/api/mcp/token")
         assert revoked["mcp"]["configured"] is False
         hit("DELETE /api/mcp/token")
+
+        # 故障知识库：状态、导入、检索、问答、审核、版本和文件下载
+        _, kb_status = admin_client.json("GET", "/api/kb/status")
+        assert kb_status["status"]["enabled"] is True
+        hit("GET /api/kb/status")
+        _, kb_ops = admin_client.json("GET", "/api/kb/operations")
+        assert isinstance(kb_ops.get("items"), list)
+        hit("GET /api/kb/operations")
+        _, kb_facets = admin_client.json("GET", "/api/kb/facets")
+        assert "boards" in kb_facets and "domains" in kb_facets
+        hit("GET /api/kb/facets")
+        _, sample = admin_client.json("POST", "/api/kb/sample", {})
+        assert sample["documents"] >= 1
+        hit("POST /api/kb/sample")
+        _, kb_docs = admin_client.json("GET", "/api/kb/docs?size=10&status=all")
+        assert kb_docs["items"]
+        doc_id = kb_docs["items"][0]["id"]
+        hit("GET /api/kb/docs")
+        _, kb_detail = admin_client.json("GET", f"/api/kb/docs/{doc_id}")
+        assert kb_detail["doc"]["cases"]
+        hit("GET /api/kb/docs/{id}")
+        _, kb_search = admin_client.json("GET", "/api/kb/search?q=" + quote("看门狗复位"))
+        assert kb_search["items"]
+        hit("GET /api/kb/search")
+        _, kb_chat = admin_client.json("POST", "/api/kb/chat", {"query": "看门狗复位"})
+        assert kb_chat["query_id"]
+        hit("POST /api/kb/chat")
+        admin_client.json("POST", "/api/kb/feedback", {
+            "query_id": kb_chat["query_id"], "helpful": True, "reason": "api-smoke",
+        })
+        hit("POST /api/kb/feedback")
+        admin_client.json("POST", "/api/kb/reindex", {})
+        hit("POST /api/kb/reindex")
+        admin_client.json("GET", "/api/kb/queries")
+        hit("GET /api/kb/queries")
+
+        _, created_doc = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 粘贴案例",
+            "text": "【详细描述:单板复位】\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
+        }, expected=201)
+        doc_created_id = created_doc["doc_id"]
+        case_created_id = created_doc["cases"][0]["id"]
+        hit("POST /api/kb/docs")
+        admin_client.json("PUT", f"/api/kb/docs/{doc_created_id}",
+                          {"title": "API 粘贴案例-改名"})
+        hit("PUT /api/kb/docs/{id}")
+        _, versions = admin_client.json("GET", f"/api/kb/docs/{doc_created_id}/versions")
+        assert versions["items"]
+        hit("GET /api/kb/docs/{id}/versions")
+        admin_client.json("POST",
+                          f"/api/kb/docs/{doc_created_id}/versions/{versions['items'][0]['id']}/restore",
+                          {})
+        hit("POST /api/kb/docs/{id}/versions/{version_id}/restore")
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/restore",
+                          {"version_id": versions["items"][0]["id"]})
+        hit("POST /api/kb/docs/{id}/restore")
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "disabled"})
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "active"})
+        hit("POST /api/kb/docs/{id}/status")
+
+        # 案例级修订、哈希链、恢复与审计
+        _, case_detail = admin_client.json("GET", f"/api/kb/cases/{case_created_id}")
+        assert case_detail["case"]["id"] == case_created_id
+        hit("GET /api/kb/cases/{case_id}")
+        _, case_updated = admin_client.json("PUT", f"/api/kb/cases/{case_created_id}", {
+            "solution": "升级逻辑并复盘", "reason": "api-smoke 修订",
+        })
+        assert case_updated["case"]["revision"] >= 2
+        hit("PUT /api/kb/cases/{case_id}")
+        _, revisions = admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions")
+        assert revisions["items"] and revisions["total"] >= 2
+        hit("GET /api/kb/cases/{case_id}/revisions")
+        admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions/1")
+        hit("GET /api/kb/cases/{case_id}/revisions/{revision}")
+        _, verified = admin_client.json("GET", f"/api/kb/cases/{case_created_id}/revisions/verify")
+        assert verified["ok"] is True and verified["checked"] >= 1
+        hit("GET /api/kb/cases/{case_id}/revisions/verify")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/revisions/1/restore",
+                          {"reason": "api-smoke 恢复"})
+        hit("POST /api/kb/cases/{case_id}/revisions/{revision}/restore")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "disabled", "reason": "api-smoke"})
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "active", "reason": "api-smoke"})
+        hit("POST /api/kb/cases/{case_id}/status")
+
+        _, stats = admin_client.json("GET", "/api/kb/stats?days=30")
+        assert "inventory" in stats and "usage" in stats
+        hit("GET /api/kb/stats")
+        _, audit = admin_client.json("GET", "/api/kb/audit?limit=20")
+        assert audit["items"]
+        hit("GET /api/kb/audit")
+        status, body, headers = admin_client.request("GET", "/api/kb/audit?format=csv")
+        assert status == 200 and b"created_at" in body
+        status, body, headers = admin_client.request("GET", "/api/kb/stats?format=csv")
+        assert status == 200 and b"group,metric" in body
+
+        # 第二波：报告、近重复、评测台、术语、导入映射与自动发布
+        report_bytes = b""
+        status, report_bytes, _ = admin_client.request(
+            "POST", "/api/kb/export/report",
+            json.dumps({"kb_id": 1, "doc_ids": [doc_id, doc_created_id],
+                        "formats": ["html", "md", "csv", "docx"]}).encode(),
+            {"Content-Type": "application/json", "X-CSRF": admin_client.csrf})
+        assert status == 200 and report_bytes[:2] == b"PK"
+        assert b"report.docx" in report_bytes
+        hit("POST /api/kb/export/report")
+
+        _, dup_a = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 冒烟重复文档",
+            "text": "【故障现象】单板反复复位\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
+        }, expected=201)
+        _, dup_b = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 冒烟重复文档",
+            "text": "【故障现象】单板反复复位\n【原因分析】喂狗异常\n【处理方案】升级逻辑版本",
+        }, expected=201)
+        _, duplicates = admin_client.json("GET", "/api/kb/duplicates?threshold=0.8&limit=20")
+        assert duplicates["items"]
+        hit("GET /api/kb/duplicates")
+        _, dup_preview = admin_client.json(
+            "GET", f"/api/kb/duplicates/preview?source={dup_a['doc_id']}&target={dup_b['doc_id']}")
+        assert dup_preview["similarity"] >= 0.8
+        hit("GET /api/kb/duplicates/preview")
+        _, dup_merged = admin_client.json("POST", "/api/kb/duplicates/merge", {
+            "source_doc_id": dup_a["doc_id"], "target_doc_id": dup_b["doc_id"],
+            "merge_token": "api-smoke-merge", "reason": "api-smoke",
+        })
+        assert dup_merged["moved_cases"] >= 1
+        hit("POST /api/kb/duplicates/merge")
+
+        _, eval_set = admin_client.json("POST", "/api/kb/eval/sets", {
+            "name": "API 冒烟评测集", "filename": "smoke.jsonl",
+            "description": "smoke", "queries": [
+                {"query": "看门狗复位", "qrels": [case_created_id],
+                 "category": "实体精确", "split": "test"},
+                {"query": "红烧肉怎么做", "qrels": [], "category": "库外无答案", "split": "test"},
+            ],
+        }, expected=201)
+        eval_set_id = eval_set["id"]
+        hit("POST /api/kb/eval/sets")
+        _, eval_sets = admin_client.json("GET", "/api/kb/eval/sets")
+        assert eval_sets["items"]
+        hit("GET /api/kb/eval/sets")
+        admin_client.json("GET", f"/api/kb/eval/sets/{eval_set_id}")
+        hit("GET /api/kb/eval/sets/{id}")
+        _, eval_run = admin_client.json("POST", f"/api/kb/eval/sets/{eval_set_id}/run",
+                                        {"kb_id": 1, "top_k": 10}, expected=201)
+        run_id = eval_run["id"]
+        hit("POST /api/kb/eval/sets/{id}/run")
+        _, eval_runs = admin_client.json(
+            "GET", f"/api/kb/eval/runs?set_id={eval_set_id}")
+        assert eval_runs["items"]
+        hit("GET /api/kb/eval/runs")
+        admin_client.json("GET", f"/api/kb/eval/runs/{run_id}")
+        hit("GET /api/kb/eval/runs/{id}")
+        status, eval_csv, _ = admin_client.request(
+            "GET", f"/api/kb/eval/runs/{run_id}/export?format=csv")
+        assert status == 200 and b"query_id" in eval_csv
+        hit("GET /api/kb/eval/runs/{id}/export")
+        admin_client.json("DELETE", f"/api/kb/eval/sets/{eval_set_id}")
+        hit("DELETE /api/kb/eval/sets/{id}")
+
+        _, term = admin_client.json("POST", "/api/kb/terms", {
+            "term": "冒烟同义词", "aliases": ["冒烟别名"], "kind": "synonym",
+            "weight": 2, "kb_id": 1,
+        })
+        term_id = term["item"]["id"]
+        hit("POST /api/kb/terms")
+        _, terms = admin_client.json("GET", "/api/kb/terms?kb=1")
+        assert terms["items"]
+        hit("GET /api/kb/terms")
+        status, term_csv, _ = admin_client.request("GET", "/api/kb/terms/export?kb=1")
+        if status != 200 or b"term" not in term_csv:
+            print("DEBUG terms export", status, term_csv[:500])
+        assert status == 200 and b"term" in term_csv
+        hit("GET /api/kb/terms/export")
+        term_import_csv = "term,aliases,kind,weight,enabled\n冒烟导入词,冒烟导入别名,synonym,1,1\n".encode("utf-8")
+        admin_client.multipart("/api/kb/terms/import", {"kb_id": "1"},
+                               [("file", "terms.csv", term_import_csv, "text/csv")])
+        hit("POST /api/kb/terms/import")
+        admin_client.json("PUT", f"/api/kb/terms/{term_id}", {"weight": 3})
+        hit("PUT /api/kb/terms/{id}")
+        admin_client.json("DELETE", f"/api/kb/terms/{term_id}")
+        hit("DELETE /api/kb/terms/{id}")
+
+        _, preview = admin_client.multipart(
+            "/api/kb/import/preview", {},
+            [("file", "api-preview.csv",
+              ("问题,现象,原因,方案,板卡\nVBP 复位,反复复位,喂狗异常,升级逻辑,VBPE2\n").encode(),
+              "text/csv")])
+        assert preview["preview"]["headers"] == ["问题", "现象", "原因", "方案", "板卡"]
+        assert preview["preview"]["guessed_mapping"]["方案"] == "solution"
+        hit("POST /api/kb/import/preview")
+
+        _, auto_dry = admin_client.json("GET", "/api/kb/reviews/auto-publish/dry-run?limit=10")
+        assert "would_publish" in auto_dry
+        hit("GET /api/kb/reviews/auto-publish/dry-run")
+        admin_client.json("POST", "/api/kb/reviews/not-a-real-review/auto-publish",
+                          {}, expected=409)
+        hit("POST /api/kb/reviews/{id}/auto-publish")
+
+        _, review = admin_client.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": case_created_id, "stage": "manual", "run": True,
+        }, expected=201)
+        review_id = review["review"]["id"]
+        hit("POST /api/kb/reviews")
+        _, reviews = admin_client.json("GET", "/api/kb/reviews?limit=10")
+        assert reviews["items"]
+        hit("GET /api/kb/reviews")
+        admin_client.json("GET", f"/api/kb/reviews/{review_id}")
+        hit("GET /api/kb/reviews/{review_id}")
+        _, batch_retry = admin_client.json("POST", "/api/kb/reviews/batch-retry",
+                                         {"ids": [review_id]})
+        assert batch_retry["processed"] == 1
+        hit("POST /api/kb/reviews/batch-retry")
+        admin_client.json("POST", f"/api/kb/reviews/{review_id}/retry", {})
+        hit("POST /api/kb/reviews/{review_id}/retry")
+        admin_client.json("POST", f"/api/kb/reviews/{review_id}/decision",
+                          {"decision": "reject", "note": "api-smoke 终审"})
+        hit("POST /api/kb/reviews/{review_id}/decision")
+        _, review2 = admin_client.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": case_created_id, "stage": "manual", "run": False,
+        }, expected=201)
+        _, batch_decision = admin_client.json("POST", "/api/kb/reviews/batch-decision",
+                                              {"ids": [review2["review"]["id"]],
+                                               "decision": "reject", "note": "api-smoke 批量"})
+        assert batch_decision["processed"] == 1
+        hit("POST /api/kb/reviews/batch-decision")
+        admin_client.json("POST", "/api/kb/reviews/run", {"limit": 5})
+        hit("POST /api/kb/reviews/run")
+        admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",
+                          {"status": "active", "reason": "api-smoke 复核通过"})
+
+        admin_client.json("DELETE", f"/api/kb/docs/{doc_created_id}")
+        hit("DELETE /api/kb/docs/{id}")
+
+        # 工程师粘贴进入审核；管理员改标题、批准或退回。
+        _, eng_doc = engineer.json("POST", "/api/kb/docs", {
+            "title": "工程师待审案例",
+            "text": "【详细描述:SSD 只读】\n【原因分析】系统盘写保护\n【处理方案】更换 SSD",
+        }, expected=202)
+        draft_id = eng_doc["draft_id"]
+        _, drafts = admin_client.json("GET", "/api/kb/drafts")
+        assert drafts["items"]
+        hit("GET /api/kb/drafts")
+        admin_client.json("GET", f"/api/kb/drafts/{draft_id}")
+        hit("GET /api/kb/drafts/{id}")
+        admin_client.json("PUT", f"/api/kb/drafts/{draft_id}",
+                          {"title": "工程师待审案例-已改"})
+        hit("PUT /api/kb/drafts/{id}")
+        admin_client.json("POST", f"/api/kb/drafts/{draft_id}/approve", {})
+        hit("POST /api/kb/drafts/{id}/approve")
+        _, eng_doc2 = engineer.json("POST", "/api/kb/docs", {
+            "title": "工程师待退回案例",
+            "text": "【原因分析】待补充\n【处理方案】待补充",
+        }, expected=202)
+        admin_client.json("POST", f"/api/kb/drafts/{eng_doc2['draft_id']}/reject",
+                          {"reason": "资料不足"})
+        hit("POST /api/kb/drafts/{id}/reject")
+
+        # 多知识库：建库、改名、备份、恢复、归档
+        _, libs = admin_client.json("GET", "/api/kb/libraries")
+        assert libs["items"]
+        hit("GET /api/kb/libraries")
+        _, created = admin_client.json("POST", "/api/kb/libraries", {
+            "name": "API 冒烟专家库", "kind": "expert", "description": "smoke",
+        }, expected=201)
+        created_kb = int(created["library"]["id"])
+        hit("POST /api/kb/libraries")
+        admin_client.json("PUT", f"/api/kb/libraries/{created_kb}",
+                          {"description": "smoke-updated"})
+        hit("PUT /api/kb/libraries/{kb_id}")
+        status, backup_bytes, _ = admin_client.request(
+            "GET", f"/api/kb/libraries/{created_kb}/backup")
+        assert status == 200 and backup_bytes[:2] == b"PK"
+        hit("GET /api/kb/libraries/{kb_id}/backup")
+        admin_client.multipart("/api/kb/libraries/restore", {"name": "API 冒烟恢复库"},
+                               [("file", "api-smoke.kbbackup.zip", backup_bytes,
+                                 "application/zip")], expected=201)
+        hit("POST /api/kb/libraries/restore")
+        restored = json.loads(admin_client.request(
+            "GET", "/api/kb/libraries")[1])["items"]
+        restored_kb = next(int(x["id"]) for x in restored if x["name"] == "API 冒烟恢复库")
+        admin_client.json("POST", f"/api/kb/libraries/{restored_kb}/archive", {})
+        hit("POST /api/kb/libraries/{kb_id}/archive")
+
+        # 导入任务 + 文件下载 + 取消 + 批量回退/重试/删除
+        csv_bytes = ("问题,答案\n" + '"VBPE2 复位","【原因分析】逻辑异常' + '\n' +
+                     '【处理方案】升级逻辑"\n').encode("utf-8")
+        _, imported = admin_client.multipart(
+            "/api/kb/import", {"mode": "direct"},
+            [("files", "api-kb.csv", csv_bytes, "text/csv")], expected=202)
+        job_id = imported["job"]["id"]
+        hit("POST /api/kb/import")
+        _, jobs = admin_client.json("GET", "/api/kb/import/jobs")
+        assert any(x["id"] == job_id for x in jobs["items"])
+        hit("GET /api/kb/import/jobs")
+        deadline = time.time() + 20
+        job = imported["job"]
+        while time.time() < deadline:
+            _, job = admin_client.json("GET", f"/api/kb/import/jobs/{job_id}")
+            if job["job"]["status"] in ("completed", "partial", "failed"):
+                break
+            time.sleep(0.3)
+        hit("GET /api/kb/import/jobs/{id}")
+        assert job["job"]["files"]
+        file_id = job["job"]["files"][0]["id"]
+        status, _, _ = admin_client.request("GET", f"/api/kb/files/{file_id}")
+        assert status == 200
+        hit("GET /api/kb/files/{id}")
+        admin_client.json("POST", f"/api/kb/import/jobs/{job_id}/cancel", {})
+        hit("POST /api/kb/import/jobs/{id}/cancel")
+        admin_client.json("POST", "/api/kb/import/jobs/rollback",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/rollback")
+        admin_client.json("POST", "/api/kb/import/jobs/retry",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/retry")
+        admin_client.json("POST", "/api/kb/import/jobs/delete",
+                          {"job_ids": [job_id]})
+        hit("POST /api/kb/import/jobs/delete")
+
+        # 迁移：列表、预检、导出/详情/下载/删除，导入错误路径
+        _, migrations = admin_client.json("GET", "/api/system/migrations")
+        assert "items" in migrations and "allowed_roots" in migrations
+        hit("GET /api/system/migrations")
+        target_root = f"/var/lib/bbu-smoke-{port}-target"
+        _, preflight = admin_client.json("POST", "/api/system/migrations/workspace/preflight",
+                                         {"target_root": target_root})
+        assert preflight["ok"] is True
+        hit("POST /api/system/migrations/workspace/preflight")
+        admin_client.json("POST", "/api/system/migrations/workspace",
+                          {"target_root": "", "password": "Platform!2026x"}, expected=400)
+        hit("POST /api/system/migrations/workspace")
+        _, exported = admin_client.json("POST", "/api/system/migrations/export",
+                                        {"password": "Platform!2026x",
+                                         "passphrase": "Migration!2026x"}, expected=202)
+        migration_id = exported["migration"]["id"]
+        hit("POST /api/system/migrations/export")
+        detail = {}
+        for _ in range(30):
+            _, detail = admin_client.json("GET", f"/api/system/migrations/{migration_id}")
+            if detail["migration"].get("phase") in ("ready", "failed"):
+                break
+            time.sleep(0.2)
+        assert detail["migration"]["phase"] == "ready", detail
+        hit("GET /api/system/migrations/{migration_id}")
+        status, raw, _ = admin_client.request("GET",
+            f"/api/system/migrations/{migration_id}/download")
+        assert status == 200 and raw, raw[:200]
+        hit("GET /api/system/migrations/{migration_id}/download")
+        _, deleted_migration = admin_client.json(
+            "DELETE", f"/api/system/migrations/{migration_id}",
+            {"password": "Platform!2026x"})
+        assert deleted_migration["ok"]
+        hit("DELETE /api/system/migrations/{migration_id}")
+        admin_client.json("POST", "/api/system/migrations/import", {},
+                          expected=400)
+        hit("POST /api/system/migrations/import")
 
         missing = EXPECTED_ROUTES - hits
         assert not missing, f"未覆盖路由: {sorted(missing)}"

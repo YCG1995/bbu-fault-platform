@@ -32,6 +32,41 @@ def _clip(text: Any, limit: int = DOC_EXCERPT_CHARS) -> str:
     return value if len(value) <= limit else value[:limit].rstrip() + '…'
 
 
+_FOLLOWUP_MARKERS = ("它", "这个", "那个", "上述", "前面", "刚才", "那", "呢", "还")
+
+
+def _looks_like_fault(text: str) -> bool:
+    """区分“设备故障”与“平台使用问题”，避免把登录/部署问题送进故障库。"""
+    value = str(text or "").lower()
+    fault_terms = ("故障", "告警", "复位", "重启", "失锁", "失步", "断链", "闪断",
+                   "光功率", "驻波", "过温", "跑死", "无法识别", "无法建立",
+                   "小区退服", "掉电", "误码", "vswr", "watchdog", "core hang",
+                   "ssd", "sfp", "ipmb", "rtc", "1pps", "1588")
+    platform_terms = ("平台", "页面", "登录", "账号", "密码", "部署", "安装",
+                      "升级平台", "模型", "技能", "知识库", "任务", "通知", "权限")
+    if any(term in value for term in platform_terms):
+        return False
+    return any(term in value for term in fault_terms)
+
+
+def _retrieval_query(history: list[dict[str, str]], question: str) -> str:
+    """把“那回滚呢”这类追问补成独立检索问题；无历史时保持原问题。"""
+    q = str(question or "").strip()
+    if not q:
+        return q
+    if len(q) > 28 and not any(marker in q for marker in _FOLLOWUP_MARKERS):
+        return q
+    previous = ""
+    for item in reversed(history[:-1]):
+        if item.get("role") == "user":
+            previous = str(item.get("content") or "").strip()
+            if previous:
+                break
+    if not previous or previous == q:
+        return q
+    return f"{previous} {q}"[:240]
+
+
 class AssistantError(Exception):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -95,7 +130,7 @@ class AssistantService:
             else:
                 raise NoModelError("没有可用模型")
         except (NoModelError, AIError, BudgetExceeded) as exc:
-            response = self._fallback(user, ctx, question, str(exc))
+            response = self._fallback(user, ctx, history, question, str(exc))
         except Exception as exc:  # noqa: BLE001 - 助手不能把堆栈暴露给用户
             self.app.db.audit(user["id"], user["username"], "assistant.chat", "assistant",
                               {"query": question[:200], "error": str(exc)[:300]}, ip)
@@ -174,7 +209,7 @@ class AssistantService:
             "required": ["reply", "calls"],
         }
         budget = Budget(max_calls=4, max_tokens=12000)
-        with self.app.gateway.user_context(user["id"]):
+        with self.app.gateway.usage_context(user["id"], task_kind="assistant"):
             plan_result = self.app.gateway.complete(
                 "assistant", system, user_prompt, json_schema=schema,
                 max_tokens=900, temperature=0.1, purpose="assistant.plan",
@@ -247,11 +282,14 @@ class AssistantService:
 
 你的职责：
 1. 回答平台使用问题（新建诊断、任务状态、技能库、技能工坊、模型接入、通知、部署升级/回滚、账号权限）。
-2. 检索平台站内消息：通知、任务事件、审计/操作记录、外部 IM 适配器消息。
-3. 管理员可执行运维工具：系统状态、备份/空间、升级/回滚、用户、模型、通知偏好。
+2. 检索故障知识库：现场出现看门狗复位、时钟失锁、SSD/光模块/电源/风扇等故障现象，
+   或问“这个故障以前怎么处理”时，必须优先调用 search_fault_kb；需要核对原文时再调用 get_fault_case。
+3. 检索平台站内消息：通知、任务事件、审计/操作记录、外部 IM 适配器消息。
+4. 管理员可执行运维工具：系统状态、备份/空间、升级/回滚、用户、模型、通知偏好。
 
 硬性规则：
 - 平台事实必须来自工具结果或对话历史，不得编造任务 ID、用户、数字、时间或页面路径。
+- 平台“怎么用/怎么部署/怎么配”用 search_docs；现场故障现象和历史处置用 search_fault_kb，不要拿平台文档冒充故障案例。
 - 先判断是否需要工具；需要事实就调用工具，最多 3 个，参数必须是合法 JSON。能直接回答才把 calls 留空。
 - 写操作会自动进入“待确认”，你绝不能声称已经执行；只说明将要做什么并提醒用户确认。
 - 不输出 API Key、密码、Token、master.key 或完整内部堆栈；审计 IP 只在用户明确要求时给出，且不要展开。
@@ -273,6 +311,8 @@ class AssistantService:
                       "\"arguments\":{...}}],\"clarification\":\"需要追问时写\"}。",
                       "如果问题需要查平台数据，优先调用工具；如果只是概念解释，可直接回答。"
                       "如果用户要求执行写操作，调用对应工具即可，系统会转成确认卡片。",
+                      "检索文档时，若当前问题是追问（如“那回滚呢”），先结合对话历史把它改写成"
+                      "独立问题，再调用 search_docs；不要把代词原样当作 query。",
                       "不要调用未列出的工具；arguments 必须严格符合工具参数 Schema。"
                       "枚举字段只能使用 enum 列出的值；整数必须在 minimum/maximum 范围内；"
                       "required 字段必须提供。没有把握时宁可少传可选参数，不要猜枚举。"])
@@ -300,7 +340,7 @@ class AssistantService:
 - 管理员操作给出页面入口；不要输出密钥、密码、Token。
 - 300 字以内，中文。"""
         try:
-            with self.app.gateway.user_context(user["id"]):
+            with self.app.gateway.usage_context(user["id"], task_kind="assistant"):
                 result = self.app.gateway.complete(
                     "assistant", "你是 BBU FaultScope 平台助手，只能依据给定工具结果回答。",
                     prompt, max_tokens=900, temperature=0.2,
@@ -313,11 +353,23 @@ class AssistantService:
         return self._format_results(results)
 
     # ---------------------------------------------------------------- 降级
-    def _fallback(self, user: dict[str, Any], ctx: ToolContext, question: str,
+    def _fallback(self, user: dict[str, Any], ctx: ToolContext,
+                  history: list[dict[str, str]], question: str,
                   reason: str = "") -> dict[str, Any]:
-        docs = self.kb.search(question, 5)
+        docs = self.kb.search(_retrieval_query(history, question), 5)
         tool_results: list[dict[str, Any]] = []
         q_lower = question.lower()
+        fault_intent = _looks_like_fault(question)
+        fault_hit = False
+        if fault_intent and self.registry.fault_kb:
+            try:
+                result = self.registry.execute("search_fault_kb",
+                                               {"query": question, "limit": 6}, ctx)
+                tool_results.append(result)
+                fault_hit = bool(result.get("items")) and not result.get("no_answer")
+            except ToolError as exc:
+                tool_results.append({"tool": "search_fault_kb", "ok": False,
+                                     "error": str(exc)})
         scopes: list[str] = []
         if any(k in q_lower for k in ("未读通知", "我的通知", "查通知", "消息", "提醒")):
             scopes.append("notifications")
@@ -348,8 +400,8 @@ class AssistantService:
         lines: list[str] = []
         if tool_results:
             lines.append(self._format_results(tool_results))
-            # 运维状态类问题先给事实；只有“怎么做”再补文档，避免答非所问。
-            if docs and any(k in q_lower for k in ("怎么", "如何", "配置", "使用", "步骤")):
+            # 故障问题有知识库命中时，不再拿平台文档充当故障资料。
+            if not fault_hit and docs and any(k in q_lower for k in ("怎么", "如何", "配置", "使用", "步骤")):
                 lines.append("")
                 lines.append("相关操作说明：")
                 for item in docs[:2]:
@@ -362,15 +414,19 @@ class AssistantService:
             if reason and "模型" in reason:
                 lines.append("当前没有可用的模型配置，暂时无法进行自然语言推理。"
                              "请管理员在“模型接入”页面配置并启用模型。")
+            elif fault_intent:
+                lines.append("故障知识库没有找到足够相关的历史案例。请补充板卡型号、"
+                             "软件/逻辑版本、告警码和完整现象后再查；不要据此直接下结论。")
             else:
                 lines.append("没有检索到直接相关的平台文档或消息。可以换一种说法，"
                              "或提供任务 ID、用户名、通知标题等关键字。")
         if not self._model_available(user):
             lines.append("\n（当前为本地文档/数据检索模式；配置模型后可进行更完整的问答。）")
         links = self._links(tool_results)
+        kb_sources = self._sources(tool_results)
         return {"message": "\n".join(lines)[:MAX_ANSWER_CHARS],
                 "tool_calls": tool_results, "links": links,
-                "sources": docs, "model": "", "usage": {}}
+                "sources": kb_sources or docs, "model": "", "usage": {}}
 
     def _format_results(self, results: list[dict[str, Any]]) -> str:
         if not results:
@@ -391,6 +447,7 @@ class AssistantService:
                     label = (row.get("title") or row.get("task_title")
                              or row.get("username") or row.get("id") or "")
                     detail = (row.get("body") or row.get("message") or row.get("content")
+                              or row.get("symptom") or row.get("cause")
                               or row.get("action") or "")
                     when = row.get("ts") or row.get("created_at") or ""
                     line = f"  - {label}"

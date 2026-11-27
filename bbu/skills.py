@@ -47,6 +47,86 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
         return {}
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    """把 1.2.3 转成可比较元组；非数字段按 0。"""
+    parts = re.findall(r"\d+", str(value or ""))
+    return tuple(int(x) for x in parts[:3]) or (0,)
+
+
+def _satisfies(version: str, spec: str) -> tuple[bool, str]:
+    """极简 semver 约束：>=1.2,<3；空约束视为通过。"""
+    if not spec:
+        return True, ""
+    v = _version_tuple(version)
+    for item in re.split(r",", str(spec)):
+        item = item.strip()
+        if not item:
+            continue
+        m = re.match(r"(>=|<=|>|<|==|=)?\s*([0-9][0-9.\-_]*)", item)
+        if not m:
+            return False, f"无法解析约束 {item}"
+        op, want = m.group(1) or ">=", _version_tuple(m.group(2))
+        ok = (v >= want if op == ">=" else
+              v <= want if op == "<=" else
+              v > want if op == ">" else
+              v < want if op == "<" else v == want)
+        if not ok:
+            return False, f"{version} 不满足 {item}"
+    return True, ""
+
+
+def manifest_compat_errors(manifest: dict[str, Any]) -> list[str]:
+    """按 manifest 自带版本校验 contract/engine/domain 约束；返回错误码列表。"""
+    if not manifest:
+        return []
+    req = manifest.get("requires") or {}
+    errors: list[str] = []
+    engine = manifest.get("engine") or {}
+    ok, why = _satisfies(str(engine.get("version") or ""), str(req.get("engine") or ""))
+    if not ok:
+        errors.append(f"ENGINE_TOO_OLD: {why}")
+    domain = manifest.get("domain") or {}
+    ok, why = _satisfies(str(domain.get("version") or ""),
+                         str(req.get("domain_pack") or req.get("domain") or ""))
+    if not ok:
+        errors.append(f"DOMAIN_PACK_TOO_OLD: {why}")
+    contract = manifest.get("contract") or {}
+    max_contract = req.get("contract_max")
+    if max_contract and _version_tuple(str(contract.get("profile") or "0")) > _version_tuple(str(max_contract)):
+        errors.append(f"CONTRACT_TOO_NEW: profile {contract.get('profile')} > {max_contract}")
+    min_contract = req.get("contract")
+    if min_contract and _version_tuple(str(contract.get("profile") or "0")) < _version_tuple(str(min_contract)):
+        errors.append(f"CONTRACT_TOO_OLD: profile {contract.get('profile')} < {min_contract}")
+    return errors
+
+
+def _entrypoint_path(entry: dict[str, Any], skill_path: Path) -> Path | None:
+    argv = entry.get("argv") or []
+    for arg in argv:
+        if isinstance(arg, str) and arg.endswith(".py") and not arg.startswith("{"):
+            return skill_path / arg
+    return None
+
+
+def _render_entrypoint(entry: dict[str, Any], inputs: list[Path], description: str,
+                       out_dir: Path) -> list[str]:
+    argv = entry.get("argv") or []
+    if not argv:
+        return []
+    out = str(out_dir)
+    parts: list[str] = []
+    for arg in argv:
+        if not isinstance(arg, str):
+            continue
+        if arg == "{python}":
+            parts.append(sys.executable)
+        elif arg == "{inputs}":
+            parts.extend(str(p) for p in inputs)
+        else:
+            parts.append(arg.replace("{out}", out).replace("{description}", description))
+    return parts
+
+
 @dataclass
 class Skill:
     name: str
@@ -74,6 +154,9 @@ class Skill:
     manifest_status: str = "missing"
     manifest_error: str = ""
     content_sha256: str = ""
+    manifest: dict[str, Any] = field(default_factory=dict)
+    domain_pack: dict[str, Any] = field(default_factory=dict)
+    entrypoints: dict[str, Any] = field(default_factory=dict)
 
     def to_db(self) -> dict[str, Any]:
         return {
@@ -91,6 +174,24 @@ class Skill:
             "source": self.source,
             "channel": self.channel,
             "health_json": json.dumps(self.health, ensure_ascii=False),
+        }
+
+    def index_card(self) -> dict[str, Any]:
+        """P1-3 渐进披露：只给规划器够用的索引卡，不发送完整 profile。"""
+        fault = self.profile.get("fault") or {}
+        triggers = [str(x)[:24] for x in (self.keywords or [])[:4]]
+        one_line = str(self.profile.get("symptoms", {}).get("impact")
+                       or fault.get("name") or self.title or "")[:60]
+        return {
+            "skill": self.name,
+            "title": self.title[:40],
+            "fault": str(fault.get("name") or "")[:40],
+            "category": self.category,
+            "device_types": [str(x)[:20] for x in self.device_types[:3]],
+            "triggers": triggers,
+            "aliases": [str(x)[:16] for x in self.aliases[:4]],
+            "risk": "verified" if self.verified else "unverified",
+            "one_line": one_line,
         }
 
     def catalog_entry(self) -> dict[str, Any]:
@@ -176,27 +277,36 @@ class SkillRegistry:
             profile = read_json(json_path, {}) if json_path.exists() else {}
         profile = profile or {}
 
+        # 新契约：assets/skill-manifest 是宿主第一事实源；旧技能无 manifest 时回退 profile。
+        skill_manifest = load_yaml(path / "assets" / "skill-manifest.yaml") or {}
+        if not skill_manifest:
+            skill_manifest = read_json(path / "assets" / "skill-manifest.json", {}) or {}
+        routing = skill_manifest.get("routing") or {}
+
         p_skill = profile.get("skill") or {}
         fault = profile.get("fault") or {}
         symptoms = profile.get("symptoms") or {}
-        name = str(p_skill.get("name") or fm.get("name") or path.name)
-        title = str(p_skill.get("title") or fm.get("name") or name)
-        version = str(p_skill.get("version") or (fm.get("metadata") or {}).get("profile_version") or "")
-        category = str(profile.get("category") or "")
-        description = str(fm.get("description") or "")
+        name = str(skill_manifest.get("name") or p_skill.get("name") or fm.get("name") or path.name)
+        title = str(skill_manifest.get("title") or p_skill.get("title") or fm.get("name") or name)
+        version = str(skill_manifest.get("version") or p_skill.get("version")
+                      or (fm.get("metadata") or {}).get("profile_version") or "")
+        category = str(routing.get("category") or profile.get("category") or "")
+        description = str(skill_manifest.get("description") or fm.get("description") or "")
         execution_mode = str(p_skill.get("execution_mode") or "script")
         components = profile.get("components") or {}
-        aliases = _str_list(fault.get("aliases")) + _str_list(fault.get("name"))
-        keywords = _str_list(symptoms.get("description_keywords"))
-        alarm_codes = []
-        for item in fault.get("alarm_codes") or []:
-            if isinstance(item, dict) and item.get("code"):
-                alarm_codes.append(str(item["code"]))
-            elif isinstance(item, str):
-                alarm_codes.append(item)
+        aliases = _str_list(routing.get("aliases")) or (
+            _str_list(fault.get("aliases")) + _str_list(fault.get("name")))
+        keywords = _str_list(routing.get("keywords")) or _str_list(symptoms.get("description_keywords"))
+        alarm_codes = _str_list(routing.get("alarm_codes"))
+        if not alarm_codes:
+            for item in fault.get("alarm_codes") or []:
+                if isinstance(item, dict) and item.get("code"):
+                    alarm_codes.append(str(item["code"]))
+                elif isinstance(item, str):
+                    alarm_codes.append(item)
         domain = fault.get("domain") or {}
-        device_types = _str_list(domain.get("device_types"))
-        exclusions = _str_list(fault.get("exclusions"))
+        device_types = _str_list(routing.get("device_types")) or _str_list(domain.get("device_types"))
+        exclusions = _str_list(routing.get("exclusions")) or _str_list(fault.get("exclusions"))
         quick = profile.get("quick_signatures") or []
         qs_path = path / "assets" / "quick-signatures.yaml"
         if qs_path.exists():
@@ -221,9 +331,14 @@ class SkillRegistry:
         if not profile:
             reasons.append("缺少 assets/fault-profile.yaml")
         run_analysis = path / "scripts" / "run_analysis.py"
-        if execution_mode == "agent":
+        run_entry = (skill_manifest.get("entrypoints") or {}).get("run") or {}
+        run_target = _entrypoint_path(run_entry, path)
+        has_run = run_analysis.exists() or bool(run_target and run_target.exists())
+        if skill_manifest and not run_entry:
+            reasons.append("manifest 缺少 entrypoints.run")
+        elif execution_mode == "agent":
             reasons.append("execution_mode=agent：当前平台运行器只支持脚本型子 Skill")
-        elif not run_analysis.exists():
+        elif not has_run:
             reasons.append("缺少 scripts/run_analysis.py（旧版或组件裁剪版），请用技能工坊重建")
         required = [path / "scripts" / "search_evidence.py", path / "scripts" / "render_report.py"]
         for item in required:
@@ -233,10 +348,15 @@ class SkillRegistry:
             reasons.append("没有任何证据规则（evidence-rules 为空）")
         if not root_causes:
             reasons.append("没有根因定义（root_causes 为空）")
+        compat_errors = manifest_compat_errors(skill_manifest)
+        if compat_errors:
+            reasons.extend(compat_errors)
         if reasons:
             status = "incompatible" if any(
-                "缺少 scripts/run_analysis.py" in r or "execution_mode=agent" in r or "缺少 SKILL.md" in r
-                or "fault-profile" in r for r in reasons) else "degraded"
+                "缺少 scripts/run_analysis.py" in r or "entrypoints.run" in r
+                or "execution_mode=agent" in r or "缺少 SKILL.md" in r
+                or "fault-profile" in r for r in reasons
+                or any(r.startswith(("ENGINE_", "DOMAIN_PACK_", "CONTRACT_")) for r in reasons)) else "degraded"
         else:
             status = "ready"
 
@@ -251,10 +371,15 @@ class SkillRegistry:
         manifest_status = str(manifest.get("status") or "missing")
         manifest_error = str(manifest.get("reason") or "")
         verification = manifest.get("verification") or {}
+        attestation = read_json(path / "assets" / "build-attestation.json", {}) or {}
+        attestation_verification = attestation.get("verification") or {}
+        attestation_ok = bool(attestation_verification.get("status") == "case_regression"
+                              and attestation_verification.get("ok"))
         verified = bool(
             semantic_verified and manifest_status == "verified"
             and verification.get("status") == "case_regression"
-            and verification.get("ok"))
+            and verification.get("ok")
+            and (not skill_manifest or attestation_ok))
         if manifest_status == "verified":
             manifest_error = ""
         if self.manifest_mode == "enforce" and manifest_status != "verified":
@@ -272,7 +397,11 @@ class SkillRegistry:
             quick_signatures=quick if isinstance(quick, list) else [],
             root_causes=root_causes if isinstance(root_causes, list) else [],
             rules=rules if isinstance(rules, list) else [],
-            health={"reasons": reasons, "has_run_analysis": run_analysis.exists(),
+            health={"reasons": reasons, "has_run_analysis": has_run,
+                    "skill_manifest": bool(skill_manifest),
+                    "attestation_status": str(attestation_verification.get("status") or ""),
+                    "attestation_ok": attestation_ok,
+                    "domain_pack": dict(skill_manifest.get("domain") or {}),
                     "rules": len(rules), "root_causes": len(root_causes),
                     "manifest_status": manifest_status, "manifest_error": manifest_error,
                     "verification_status": str(verification.get("status") or ""),
@@ -280,6 +409,9 @@ class SkillRegistry:
             source=source, manifest_status=manifest_status,
             manifest_error=manifest_error,
             content_sha256=str(manifest.get("content_sha256") or ""),
+            manifest=skill_manifest,
+            domain_pack=dict(skill_manifest.get("domain") or {}),
+            entrypoints=dict(skill_manifest.get("entrypoints") or {}),
         )
 
     def _persist(self, skill: Skill) -> None:
@@ -570,10 +702,12 @@ class SkillRunner:
             actor_role: str = "engineer", approval_id: str = "") -> dict[str, Any]:
         started = time.time()
         out_dir.mkdir(parents=True, exist_ok=True)
-        entry = skill.path / "scripts" / "run_analysis.py"
+        run_entry = (skill.entrypoints or {}).get("run") or {}
+        entry = _entrypoint_path(run_entry, skill.path) or (skill.path / "scripts" / "run_analysis.py")
         if not entry.exists():
             return {"ok": False, "status": "incompatible",
-                    "error": "缺少 scripts/run_analysis.py，请用技能工坊重建该子 Skill",
+                    "error": "缺少运行入口（manifest entrypoints.run 或 scripts/run_analysis.py），"
+                             "请用技能工坊重建该子 Skill",
                     "duration_ms": 0}
         if skill.status == "disabled":
             return {"ok": False, "status": "disabled", "error": "技能已被停用", "duration_ms": 0}
@@ -600,12 +734,14 @@ class SkillRunner:
         else:
             decision = None
 
-        cmd = [
-            sys.executable, str(entry), *[str(p) for p in inputs],
-            "--description", description,
-            "--out", str(out_dir),
-            "--local-tz-offset", str(self.config.get("local_tz_offset", 8)),
-        ]
+        cmd = _render_entrypoint(run_entry, inputs, description, out_dir)
+        if not cmd:
+            cmd = [
+                sys.executable, str(entry), *[str(p) for p in inputs],
+                "--description", description,
+                "--out", str(out_dir),
+                "--local-tz-offset", str(self.config.get("local_tz_offset", 8)),
+            ]
         env = env_with_vendor()
         preexec = None
         sandbox_meta: dict[str, Any] = {"mode": str(self.config.get("tool_sandbox_mode", "audit"))}
@@ -618,10 +754,12 @@ class SkillRunner:
                                  "platform": "windows" if os.name == "nt" else "posix"})
         stdout_path = out_dir / "runner.out"
         stderr_path = out_dir / "runner.err"
-        timeout = timeout or (manifest.timeout_sec if manifest else
-                              int(self.config.get("skill_timeout_sec", 900)))
+        timeout = timeout or (int((run_entry.get("timeout_sec") or 0))
+                              if run_entry else (manifest.timeout_sec if manifest else
+                                                 int(self.config.get("skill_timeout_sec", 900))))
 
         def _finish(res: dict[str, Any], status: str, error: str = "") -> dict[str, Any]:
+            res.setdefault("artifacts", {"stdout": str(stdout_path), "stderr": str(stderr_path)})
             if self.policy and call_id:
                 resource = {"duration_ms": res.get("duration_ms"),
                             "output_bytes": _file_size(stdout_path) + _file_size(stderr_path),
@@ -657,41 +795,60 @@ class SkillRunner:
                 time.sleep(0.15)
         duration_ms = int((time.time() - started) * 1000)
         summary = read_json(out_dir / "run-summary.json", {}) or {}
+        run_result = read_json(out_dir / "run-result.json", {}) or {}
         if cancelled:
             return _finish({"ok": False, "status": "cancelled", "error": "用户取消",
-                            "duration_ms": duration_ms, "summary": summary}, "cancelled")
+                            "duration_ms": duration_ms, "summary": summary, "exit_code": None,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "cancelled")
         if timed_out:
             return _finish({"ok": False, "status": "timeout",
                             "error": f"子 Skill 执行超过 {timeout}s（日志见 {stderr_path.name}）",
-                            "duration_ms": duration_ms, "summary": summary,
-                            "stderr_tail": _tail(stderr_path)}, "timeout")
+                            "duration_ms": duration_ms, "summary": summary, "exit_code": None,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "timeout")
         if manifest is not None:
             from .sandbox import output_limit_bytes
             if _file_size(stdout_path) + _file_size(stderr_path) > output_limit_bytes(self.config):
                 return _finish({"ok": False, "status": "output_limited",
                                 "error": "子 Skill 输出超过沙箱上限",
-                                "duration_ms": duration_ms, "summary": summary}, "failed")
-        if proc.returncode != 0 or not summary.get("ok"):
+                                "duration_ms": duration_ms, "summary": summary,
+                                "run_result": run_result,
+                                "exit_code": proc.returncode,
+                                "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "failed")
+        if run_result and not run_result.get("ok"):
+            return _finish({"ok": False, "status": str(run_result.get("status") or "failed"),
+                            "error": str(run_result.get("error") or "run-result ok=false"),
+                            "duration_ms": duration_ms, "summary": summary,
+                            "result": run_result,
+                            "exit_code": proc.returncode,
+                            "stdout_tail": _tail(stdout_path),
+                            "stderr_tail": _tail(stderr_path)}, "failed")
+        if not run_result and (proc.returncode != 0 or not summary.get("ok")):
             return _finish({"ok": False, "status": "failed",
                             "error": (summary.get("error") or f"退出码 {proc.returncode}"),
                             "duration_ms": duration_ms, "summary": summary,
-                            "stderr_tail": _tail(stderr_path)}, "failed")
+                            "exit_code": proc.returncode,
+                            "stdout_tail": _tail(stdout_path), "stderr_tail": _tail(stderr_path)}, "failed")
         evidence = read_json(out_dir / "evidence.json", {}) or {}
         report_md = out_dir / "report.md"
         report_html = out_dir / "report.html"
         normalized = self._normalize(skill, summary, evidence, report_md, report_html,
-                                     duration_ms)
+                                     duration_ms, run_result=run_result)
         normalized["sandbox"] = sandbox_meta
+        normalized["exit_code"] = proc.returncode
+        normalized["stdout_tail"] = _tail(stdout_path)
+        normalized["stderr_tail"] = _tail(stderr_path)
         if decision:
             normalized["tool_decision"] = decision.get("decision")
         return _finish(normalized, "done")
 
     def _normalize(self, skill: Skill, summary: dict[str, Any], evidence: dict[str, Any],
-                   report_md: Path, report_html: Path, duration_ms: int) -> dict[str, Any]:
-        verdict = evidence.get("verdict") or {}
+                   report_md: Path, report_html: Path, duration_ms: int,
+                   run_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = run_result or {}
+        verdict = result.get("verdict") or evidence.get("verdict") or {}
         groups = verdict.get("groups") or {}
-        primary = verdict.get("primary") or summary.get("primary") or "NONE"
-        status = verdict.get("status") or summary.get("status") or "unmatched"
+        primary = result.get("primary") or verdict.get("primary") or summary.get("primary") or "NONE"
+        status = result.get("status") or verdict.get("status") or summary.get("status") or "unmatched"
         rc_map = {str(rc.get("id")): rc for rc in skill.root_causes}
         root_cause = None
         if primary and primary != "NONE":
@@ -753,12 +910,26 @@ class SkillRunner:
             }
         return {
             "ok": True,
+            "complete": bool(result.get("complete", True)),
             "status": status,
             "primary": primary,
+            "coverage": result.get("coverage") or {},
+            "degradations": result.get("degradations") or [],
+            "result_schema": result.get("schema") or "",
+            "domain": skill.domain_pack or {},
             "root_cause": root_cause,
             "verdict": {
                 "status": status,
                 "primary": primary,
+                "primary_site": verdict.get("primary_site"),
+                "primary_key": verdict.get("primary_key"),
+                "established_sites": verdict.get("established_sites") or [],
+                "keys_evaluated": verdict.get("keys_evaluated") or [],
+                "keys_established": verdict.get("keys_established") or [],
+                "keys_missing": verdict.get("keys_missing") or [],
+                "multi_site_conflict": bool(verdict.get("multi_site_conflict")),
+                "scope": verdict.get("scope"),
+                "rule_scope_v2": verdict.get("rule_scope_v2"),
                 "groups": _compact_groups(groups),
                 "truncated": verdict.get("truncated"),
             },
@@ -848,7 +1019,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-def _tail(path: Path, limit: int = 1200) -> str:
+def _tail(path: Path, limit: int = 4000) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
         return text[-limit:]

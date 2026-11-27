@@ -1,0 +1,8 @@
+{
+  "exact_rate": 1.0,
+  "f1": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "false_positive_rate": 0.0,
+  "note": "1.24.8 三条真实 golden 的确定性基线；release 前用 20 条 real golden 重新标定"
+}

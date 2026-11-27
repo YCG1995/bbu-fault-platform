@@ -3,6 +3,7 @@ import {
   api, bindActions, bindTopbar, confirmDialog, esc, fmtDate, fmtDur, fmtSize, icon, modal, mount,
   providerName, roleLabel, setBusy, state, statusBadge, toast,
 } from './core.js';
+import { PLATFORM_PRESETS, allPopularModels } from './model_presets.js';
 
 const ROLE_LABELS = { default: '默认', planner: '规划', router: '路由', arbiter: '仲裁', writer: '报告', workshop: '工坊', assistant: '助手' };
 
@@ -23,20 +24,23 @@ export async function renderModels() {
     <div class="alert info" style="margin-bottom:14px">${icon('info')}<div>
       <strong>协议说明：</strong>OpenAI 兼容填到 <code>/v1</code> 结尾（如 https://api.openai.com/v1 或内网 vLLM/OneAPI 地址）；
       Anthropic 使用原生 <code>/v1/messages</code> 协议，Base URL 填 https://api.anthropic.com。密钥只在服务端解密，前端仅显示掩码。
-      <div style="margin-top:6px">成员在个人中心配置的企业内网 MaaS Key 优先于这里的默认模型；未配置时按角色与优先级选择默认模型。</div>
+      <div style="margin-top:6px">成员在个人中心配置的公司内网 MaaS Key 优先于这里的默认模型；未配置时按角色与优先级选择默认模型。</div>
     </div></div>
     <div class="card"><div class="card-body tight table-wrap">
       ${models.length ? `<table class="data"><thead><tr>
-        <th>配置</th><th>协议 / 模型</th><th>角色</th><th>优先级</th><th>密钥</th><th>状态</th><th>操作</th>
+        <th>配置</th><th>协议 / 模型</th><th>执行位置</th><th>角色</th><th>优先级</th><th>密钥</th><th>状态</th><th>操作</th>
       </tr></thead><tbody>${models.map((m) => `<tr>
         <td><div style="font-weight:600">${esc(m.name)}</div><div class="mono tiny muted">${esc(m.base_url || '—')}</div></td>
         <td>${esc(providerName(m.provider))}<div class="mono tiny">${esc(m.model)}</div></td>
+        <td>${m.transport === 'browser'
+          ? `<span class="badge info"><i class="dot"></i>浏览器代理${m.extra?.browser_relay?.server_fallback === false ? '' : ' / 可回退'}</span>`
+          : '<span class="badge muted"><i class="dot"></i>服务端</span>'}</td>
         <td>${(m.roles || []).map((r) => `<span class="role-tag">${esc(ROLE_LABELS[r] || r)}</span>`).join('') || '—'}</td>
         <td>${m.priority}</td>
         <td class="mono tiny">${esc(m.api_key_masked || '—')}</td>
         <td><button class="switch ${m.enabled ? 'on' : ''}" data-act="toggle" data-id="${m.id}" aria-label="启用/停用"></button></td>
         <td><div class="inline" style="gap:4px">
-          <button class="btn btn-sm" data-act="test" data-id="${m.id}">测试</button>
+          <button class="btn btn-sm" data-act="test" data-id="${m.id}">${m.transport === 'browser' ? '链路自检' : '测试'}</button>
           <button class="btn btn-sm" data-act="edit" data-id="${m.id}">编辑</button>
           <button class="btn btn-sm btn-danger" data-act="delete" data-id="${m.id}">删除</button>
         </div></td></tr>`).join('')}</tbody></table>`
@@ -53,6 +57,8 @@ export async function renderModels() {
     'new-model': () => openModelModal(null, () => renderModels()),
     edit: (el) => openModelModal(models.find((m) => String(m.id) === el.dataset.id), () => renderModels()),
     test: async (el) => {
+      const m = models.find((x) => String(x.id) === el.dataset.id);
+      if (m?.transport === 'browser') return runRelayTest(m, el);
       setBusy(el, true, '测试中…');
       try {
         const res = await api(`/api/models/${el.dataset.id}/test`, { method: 'POST' });
@@ -81,31 +87,143 @@ export async function renderModels() {
   return view;
 }
 
+async function runRelayTest(model, button) {
+  setBusy(button, true, '自检中…');
+  try {
+    const start = await api(`/api/models/${model.id}/relay-test`, { method: 'POST' });
+    const testId = start.test_id;
+    for (let i = 0; i < 90; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const test = await api(`/api/models/${model.id}/relay-test/${encodeURIComponent(testId)}`);
+      if (test.state === 'pending') continue;
+      if (test.state === 'done' && test.ok) {
+        const route = test.transport === 'server' ? '服务端直连成功（浏览器代理已回退）' : '浏览器代理自检成功';
+        toast(`${route}：${test.reply || 'OK'} · ${test.latency_ms ?? '—'} ms`, test.fallback ? 'warn' : 'ok');
+      } else {
+        toast(`链路自检失败：${test.error || test.code || '未返回有效响应'}`, 'error', 10000);
+      }
+      return;
+    }
+    toast('浏览器内自检超时：请确认本页保持打开且有可用模型', 'error', 8000);
+  } catch (err) {
+    toast(err.message, 'error', 8000);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 function openModelModal(model, onDone) {
-  const maasBase = state.publicConfig?.personal_model_base_url || 'https://maas.example.com/v1';
-  const maasModel = state.publicConfig?.personal_model_default || 'gpt-4o-mini';
+  const maasBase = state.publicConfig?.personal_model_base_url || 'https://nebulacoder-maas.zte.com.cn/v1';
+  const maasModel = state.publicConfig?.personal_model_default || 'deepseek-v4-flash';
   const maasModels = state.publicConfig?.personal_model_models || [maasModel];
+  const companyPreset = {
+    ...PLATFORM_PRESETS[0],
+    base_url: maasBase,
+    models: [...new Set(maasModels.map(String))].map((name) => [name, 8192]),
+  };
+  const presets = [companyPreset, ...PLATFORM_PRESETS.slice(1)];
+  const allCandidates = () => {
+    const seen = new Set();
+    const out = [];
+    for (const preset of presets) {
+      for (const [name, maxTokens] of preset.models) {
+        if (!seen.has(name)) { seen.add(name); out.push([name, maxTokens]); }
+      }
+    }
+    for (const [name, maxTokens] of allPopularModels()) {
+      if (!seen.has(name)) { seen.add(name); out.push([name, maxTokens]); }
+    }
+    return out;
+  };
+  const normalize = (value) => String(value || '').trim().replace(/\/+$/, '');
+  const findPreset = (baseUrl) => presets.find((preset) => normalize(preset.base_url) === normalize(baseUrl)) || null;
+  const findById = (id) => presets.find((preset) => preset.id === id) || null;
+  const findModel = (baseUrl, name) => {
+    const preset = findPreset(baseUrl);
+    const candidates = preset ? preset.models : allCandidates();
+    return candidates.find(([modelName]) => modelName === name) || null;
+  };
+  const initialBase = model?.base_url || maasBase;
+  const initialPreset = findPreset(initialBase);
+  const initialModels = initialPreset ? initialPreset.models : allCandidates();
+  const initialModel = model?.model || maasModel;
+  const initialSuggestion = findModel(initialBase, initialModel);
+  const initialMax = model?.max_tokens ?? (initialSuggestion ? initialSuggestion[1] : 8192);
+  const platformValue = model ? (initialPreset?.id || 'custom') : companyPreset.id;
+  const initialExtra = model?.extra || {};
+  const browserRelay = model?.browser_relay || initialExtra.browser_relay || {};
+  const isBrowser = (model?.transport || initialExtra.transport || 'server') === 'browser';
+  const browserRoles = Array.isArray(browserRelay.allow_roles) ? browserRelay.allow_roles : [];
+  const browserFallback = browserRelay.server_fallback !== false;
+
   const m = modal({
     title: model ? '编辑模型配置' : '添加模型配置',
     wide: true,
     body: `<form id="model-form">
-      <div class="alert info" style="margin-bottom:14px">${icon('info')}<div>新建配置默认使用企业 MaaS；也可以切换为 OpenAI 兼容或 Anthropic 服务。</div></div>
+      <div class="alert info" style="margin-bottom:14px">${icon('info')}<div>
+        可直接选择常用平台，自动带出 Base URL、模型名和建议 <code>max_tokens</code>；仍可手动修改，或点击“获取”读取服务端模型列表。
+      </div></div>
+      <div class="form-row"><label class="label">配置名称</label>
+        <input class="input" name="name" id="model-config-name" value="${esc(model?.name || '公司 MaaS')}" placeholder="例如：公司 MaaS" required>
+      </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">配置名称</label><input class="input" name="name" value="${esc(model?.name || '企业 MaaS')}" placeholder="例如：企业 MaaS" required></div>
+        <div class="form-row"><label class="label">平台预设 <span class="hint">选择后自动填充，可再修改</span></label>
+          <select class="select" id="model-platform">
+            ${presets.map((p) => `<option value="${p.id}" ${platformValue === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
+            <option value="custom" ${platformValue === 'custom' ? 'selected' : ''}>自定义 / 手动填写</option>
+          </select>
+        </div>
         <div class="form-row"><label class="label">协议</label>
           <select class="select" name="provider" id="provider-select">
             ${['openai', 'anthropic', 'mock'].map((p) => `<option value="${p}" ${(model?.provider || 'openai') === p ? 'selected' : ''}>${providerName(p)}</option>`).join('')}
           </select></div>
       </div>
-      <div class="form-row"><label class="label">Base URL <span class="hint">企业 MaaS 已预填；OpenAI 兼容通常以 /v1 结尾</span></label>
-        <input class="input mono" name="base_url" id="base-url" value="${esc(model?.base_url || maasBase)}" placeholder="${esc(maasBase)}"></div>
+      <div class="form-row">
+        <label class="check" style="font-weight:600"><input type="checkbox" id="browser-transport" ${isBrowser ? 'checked' : ''}>
+          浏览器代理执行 <span class="hint">优先由当前浏览器发起；失败时可回退 Python 直连</span></label>
+        <div class="help">适用于平台服务器无法直连模型网关、但浏览器可经系统代理访问的现场。Base URL 必须是浏览器视角可达地址；Key 只在执行瞬间下发到浏览器内存，不进入 URL、日志或轨迹。若浏览器被 CORS 拦截、而 Python 可直连，可开启下方回退。</div>
+      </div>
+      <div class="card" id="browser-relay-box" style="box-shadow:none;border-color:#c7d2fe;margin-bottom:14px;${isBrowser ? '' : 'display:none'}">
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-row"><label class="label">单窗口并发</label><input class="input" type="number" id="browser-max-concurrent" min="1" max="4" value="${Number(browserRelay.max_concurrent) || 2}"><div class="help">1–4，默认 2</div></div>
+            <div class="form-row"><label class="label">认领超时（秒）</label><input class="input" type="number" id="browser-claim-timeout" min="5" max="60" value="${Number(browserRelay.claim_timeout_sec) || 10}"><div class="help">5–60，默认 10</div></div>
+            <div class="form-row"><label class="label">执行超时（秒）</label><input class="input" type="number" id="browser-exec-timeout" min="30" max="120" value="${Number(browserRelay.exec_timeout_sec) || 90}"><div class="help">30–120，默认 90</div></div>
+          </div>
+          <div class="form-row" style="margin-bottom:0"><label class="check" style="font-weight:600"><input type="checkbox" id="browser-server-fallback" ${browserFallback ? 'checked' : ''}>
+            浏览器执行失败时自动回退服务端直连</label>
+            <div class="help">默认开启。浏览器 fetch 受同源策略限制，目标网关未放行 CORS 时会失败；此时用同一 Base URL / Key 由 Python 直连。服务端没有出网能力时请关闭。</div>
+          </div>
+          <div class="form-row" style="margin-bottom:0"><label class="label">允许执行的用户角色</label>
+            <div class="inline" style="gap:14px;flex-wrap:wrap">
+              ${[['engineer', '工程师'], ['reviewer', '专家'], ['admin', '管理员']].map(([value, label]) =>
+                `<label class="check"><input type="checkbox" data-browser-role="${value}" ${browserRoles.includes(value) ? 'checked' : ''}> ${label}</label>`).join('')}
+            </div>
+            <div class="help">不勾选=所有登录角色均可承接；勾选后仅这些角色能看到并领取该模型。</div>
+          </div>
+        </div>
+      </div>
+      <div class="form-row"><label class="label">Base URL <span class="hint">可手动输入，也可从常用平台下拉选择；浏览器代理不要填 127.0.0.1 / localhost</span></label>
+        <input class="input mono" name="base_url" id="base-url" list="base-url-options" value="${esc(initialBase)}" placeholder="${esc(maasBase)}">
+        <datalist id="base-url-options">${presets.filter((p) => p.base_url).map((p) => `<option value="${esc(p.base_url)}" label="${esc(p.label)}"></option>`).join('')}</datalist>
+        <div class="help" id="platform-note">${esc(initialPreset?.note || '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。')}</div>
+      </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">模型名</label><input class="input mono" name="model" list="company-model-options" value="${esc(model?.model || maasModel)}" placeholder="${esc(maasModel)}" required>
-          <datalist id="company-model-options">${maasModels.map((x) => `<option value="${esc(x)}"></option>`).join('')}</datalist>
+        <div class="form-row"><label class="label">模型名 <span class="hint">选择常用模型，或点击获取</span></label>
+          <div class="inline" style="gap:8px;align-items:stretch">
+            <input class="input mono" name="model" id="model-name" list="model-options" value="${esc(initialModel)}" placeholder="${esc(maasModel)}" required style="flex:1;min-width:0">
+            <button class="btn" type="button" id="model-discover" data-act="discover">${icon('refresh')}获取</button>
+          </div>
+          <select class="select" id="model-select" aria-label="从模型列表选择模型" style="margin-top:8px"></select>
+          <datalist id="model-options">${initialModels.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(`${name} · 建议 ${maxTokens}`)}"></option>`).join('')}</datalist>
+          <div class="help" id="model-discover-hint">${initialSuggestion ? `建议 max_tokens ${initialSuggestion[1]}` : '获取后可下拉选择，也可直接输入模型名。'}</div>
         </div>
-        <div class="form-row"><label class="label">API Key <span class="hint">编辑时留空=保持原密钥</span></label>
-          <input class="input mono" name="api_key" type="password" autocomplete="new-password" placeholder="${model?.api_key_masked ? esc(model.api_key_masked) : '企业 MaaS 个人 API Key'}">
+        <div class="form-row"><label class="label">max_tokens <span class="hint">选择模型自动填入，可修改</span></label>
+          <input class="input" type="number" name="max_tokens" id="max-tokens" value="${initialMax}" min="1" max="200000">
         </div>
+      </div>
+      <div class="form-row"><label class="label">API Key <span class="hint">编辑时留空=保持原密钥</span></label>
+          <input class="input mono" name="api_key" type="password" autocomplete="new-password" placeholder="${model?.api_key_masked ? esc(model.api_key_masked) : '公司 MaaS 个人 API Key'}">
       </div>
       <div class="form-row"><label class="label">承担角色</label>
         <div class="inline" style="gap:14px;flex-wrap:wrap">
@@ -115,7 +233,6 @@ function openModelModal(model, onDone) {
         <div class="help">不选则默认 default。平台按角色选择模型，没配对应角色时回退到 default。</div>
       </div>
       <div class="form-grid">
-        <div class="form-row"><label class="label">max_tokens</label><input class="input" type="number" name="max_tokens" value="${model?.max_tokens ?? 4096}" min="1" max="200000"></div>
         <div class="form-row"><label class="label">temperature</label><input class="input" type="number" step="0.1" name="temperature" value="${model?.temperature ?? 0.2}" min="0" max="2"></div>
         <div class="form-row"><label class="label">超时（秒）</label><input class="input" type="number" name="timeout_sec" value="${model?.timeout_sec ?? 180}" min="5" max="600"></div>
         <div class="form-row"><label class="label">优先级 <span class="hint">数字越小越先尝试</span></label><input class="input" type="number" name="priority" value="${model?.priority ?? 0}" min="0"></div>
@@ -128,16 +245,133 @@ function openModelModal(model, onDone) {
       <button class="btn btn-primary" data-act="save">${model ? '保存' : '添加'}</button>`,
   });
   const form = m.body.querySelector('#model-form');
+  const nameInput = m.body.querySelector('#model-config-name');
   const baseInput = m.body.querySelector('#base-url');
   const providerSelect = m.body.querySelector('#provider-select');
-  const defaults = {
-    openai: maasBase,
-    anthropic: 'https://api.anthropic.com',
-    mock: '',
-  };
+  const platformSelect = m.body.querySelector('#model-platform');
+  const browserCheck = m.body.querySelector('#browser-transport');
+  const browserBox = m.body.querySelector('#browser-relay-box');
+  const modelInput = m.body.querySelector('#model-name');
+  const modelOptions = m.body.querySelector('#model-options');
+  const modelSelect = m.body.querySelector('#model-select');
+  const maxInput = m.body.querySelector('#max-tokens');
+  const platformNote = m.body.querySelector('#platform-note');
+  const discoverHint = m.body.querySelector('#model-discover-hint');
+  const discoverButton = m.body.querySelector('#model-discover');
+  let discovering = false;
+
+  function renderModelOptions(items) {
+    const rows = [];
+    const seen = new Set();
+    for (const item of items || []) {
+      const name = String(item?.[0] || '').trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      rows.push([name, item?.[1] || '']);
+    }
+    const current = modelInput.value.trim();
+    if (current && !seen.has(current)) rows.push([current, '']);
+    modelOptions.innerHTML = rows.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}"></option>`).join('');
+    // 原生 datalist 在已有值时只会过滤出当前值，编辑配置时用户看不到
+    // 刚获取的其他模型；这里额外提供真实 select，确保所有结果都可选。
+    modelSelect.innerHTML = `<option value="">选择模型…</option>` + rows.map(([name, maxTokens]) =>
+      `<option value="${esc(name)}">${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}</option>`).join('');
+    modelSelect.value = current && rows.some(([name]) => name === current) ? current : '';
+  }
+
+  function syncModelSelect() {
+    const current = modelInput.value.trim();
+    modelSelect.value = current && [...modelSelect.options].some((opt) => opt.value === current)
+      ? current : '';
+  }
+
+  function applyModelMax() {
+    const suggestion = findModel(baseInput.value, modelInput.value);
+    if (suggestion) {
+      maxInput.value = suggestion[1];
+      discoverHint.textContent = `建议 max_tokens ${suggestion[1]}，可按账号额度修改。`;
+    } else if (modelInput.value) {
+      discoverHint.textContent = '自定义模型名，max_tokens 请按服务端限制填写。';
+    }
+    syncModelSelect();
+  }
+
+  function autoName(preset) {
+    if (!preset) return;
+    const current = nameInput.value.trim();
+    const isAuto = !current || current === '公司 MaaS'
+      || presets.some((item) => item.label === current);
+    if (isAuto) nameInput.value = preset.id === 'zte-maas' ? '公司 MaaS' : preset.label;
+  }
+
+  function usePlatform(preset, { setModel = true } = {}) {
+    if (!preset) return;
+    platformSelect.value = preset.id;
+    providerSelect.value = preset.provider;
+    baseInput.value = preset.base_url;
+    platformNote.textContent = preset.note || '';
+    renderModelOptions(preset.models);
+    autoName(preset);
+    if (setModel) {
+      modelInput.value = preset.models[0]?.[0] || '';
+      applyModelMax();
+    }
+  }
+
+  function syncFromBase() {
+    const preset = findPreset(baseInput.value);
+    if (preset) {
+      platformSelect.value = preset.id;
+      providerSelect.value = preset.provider;
+      platformNote.textContent = preset.note || '';
+      renderModelOptions(preset.models);
+      autoName(preset);
+      if (!modelInput.value) {
+        modelInput.value = preset.models[0]?.[0] || '';
+      }
+      applyModelMax();
+    } else {
+      platformSelect.value = 'custom';
+      platformNote.textContent = '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。';
+      renderModelOptions(allCandidates());
+      applyModelMax();
+    }
+  }
+
+  platformSelect.addEventListener('change', () => {
+    if (platformSelect.value === 'custom') {
+      platformNote.textContent = '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。';
+      renderModelOptions(allCandidates());
+      return;
+    }
+    usePlatform(findById(platformSelect.value));
+  });
+  baseInput.addEventListener('change', syncFromBase);
+  modelInput.addEventListener('change', applyModelMax);
+  modelInput.addEventListener('input', syncModelSelect);
+  modelSelect.addEventListener('change', () => {
+    if (!modelSelect.value) return;
+    modelInput.value = modelSelect.value;
+    applyModelMax();
+  });
+  renderModelOptions(initialModels);
+
   providerSelect.addEventListener('change', () => {
+    if (browserCheck.checked && providerSelect.value === 'mock') {
+      providerSelect.value = 'openai';
+      toast('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议，已切回 OpenAI', 'warn');
+    }
+    const defaults = { openai: maasBase, anthropic: 'https://api.anthropic.com', mock: '' };
     if (!baseInput.value || Object.values(defaults).includes(baseInput.value) || baseInput.value === 'https://api.openai.com/v1') {
       baseInput.value = defaults[providerSelect.value] || '';
+      syncFromBase();
+    }
+  });
+  browserCheck.addEventListener('change', () => {
+    browserBox.style.display = browserCheck.checked ? '' : 'none';
+    if (browserCheck.checked && providerSelect.value === 'mock') {
+      providerSelect.value = 'openai';
+      toast('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议，已切回 OpenAI', 'warn');
     }
   });
 
@@ -149,12 +383,72 @@ function openModelModal(model, onDone) {
     out.enabled = model?.enabled ?? 1;
     try { out.extra = JSON.parse(out.extra || '{}'); }
     catch (e) { throw new Error('扩展参数不是合法 JSON：' + e.message); }
+    if (!out.extra || typeof out.extra !== 'object' || Array.isArray(out.extra)) {
+      throw new Error('扩展参数必须是 JSON 对象');
+    }
+    const browser = !!browserCheck.checked;
+    if (browser && (out.provider === 'mock' || out.provider === '')) {
+      throw new Error('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议');
+    }
+    out.extra.transport = browser ? 'browser' : 'server';
+    if (browser) {
+      const maxConcurrent = Number(m.body.querySelector('#browser-max-concurrent').value || 2);
+      const claimTimeout = Number(m.body.querySelector('#browser-claim-timeout').value || 10);
+      const execTimeout = Number(m.body.querySelector('#browser-exec-timeout').value || 90);
+      if (!(maxConcurrent >= 1 && maxConcurrent <= 4)) throw new Error('单窗口并发必须在 1–4');
+      if (!(claimTimeout >= 5 && claimTimeout <= 60)) throw new Error('认领超时必须在 5–60 秒');
+      if (!(execTimeout >= 30 && execTimeout <= 120)) throw new Error('执行超时必须在 30–120 秒');
+      out.extra.browser_relay = {
+        max_concurrent: maxConcurrent,
+        claim_timeout_sec: claimTimeout,
+        exec_timeout_sec: execTimeout,
+        allow_roles: [...form.querySelectorAll('[data-browser-role]:checked')].map((el) => el.dataset.browserRole),
+        server_fallback: m.body.querySelector('#browser-server-fallback').checked,
+      };
+    }
     if (!out.api_key) delete out.api_key;
     return out;
   }
 
   m.mask.addEventListener('click', async (e) => {
     if (e.target.closest('[data-act="cancel"]')) m.close();
+    if (e.target.closest('#model-discover')) {
+      if (discovering) return;
+      let payload;
+      try { payload = collect(); } catch (err) { toast(err.message, 'error'); return; }
+      if (payload.provider === 'mock') { toast('Mock 模型不需要获取列表', 'info'); return; }
+      if (!payload.base_url) { toast('请先填写 Base URL', 'error'); return; }
+      if (!payload.api_key && !model) { toast('请先填写 API Key', 'error'); return; }
+      if (model) payload.model_id = model.id;
+      discovering = true;
+      setBusy(discoverButton, true, '获取中…');
+      try {
+        const res = await api('/api/models/discover', { method: 'POST', body: payload });
+        if (!document.body.contains(m.mask)) return;
+        if (normalize(baseInput.value) !== normalize(payload.base_url)
+            || providerSelect.value !== payload.provider) {
+          toast('Base URL 或协议已变更，已忽略上一次获取结果', 'warn');
+          return;
+        }
+        const items = (res.models || []).map((name) => {
+          const suggestion = findModel(payload.base_url, name);
+          return [name, suggestion ? suggestion[1] : ''];
+        });
+        if (!items.length) { toast('接口未返回模型列表', 'error'); return; }
+        renderModelOptions(items);
+        if (!modelInput.value) {
+          modelInput.value = items[0][0];
+          applyModelMax();
+        }
+        discoverHint.textContent = `获取到 ${items.length} 个模型，可从下拉选择或手动输入。`;
+        toast(`获取到 ${items.length} 个模型`, 'ok');
+      } catch (err) {
+        if (document.body.contains(m.mask)) toast(err.message, 'error', 8000);
+      } finally {
+        discovering = false;
+        setBusy(discoverButton, false);
+      }
+    }
     if (e.target.closest('[data-act="save"]')) {
       const btn = e.target.closest('[data-act="save"]');
       let payload;
@@ -172,6 +466,10 @@ function openModelModal(model, onDone) {
       const btn = e.target.closest('#model-test');
       let payload;
       try { payload = collect(); } catch (err) { toast(err.message, 'error'); return; }
+      if (payload.extra?.transport === 'browser') {
+        toast('浏览器代理模型请先保存，再点击列表中的“链路自检”', 'warn');
+        return;
+      }
       if (model) payload.model_id = model.id;
       setBusy(btn, true, '测试中…');
       try {
@@ -532,12 +830,15 @@ export async function renderSystem() {
   try { info = await api('/api/system/info'); }
   catch (err) { view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`; return; }
   const config = info.config || {};
+  const isAdmin = state.user?.role === 'admin';
   let updates = null;
-  try { updates = await api('/api/system/updates'); }
-  catch (err) { updates = { error: err.message, items: [] }; }
   let migrations = null;
-  try { migrations = await api('/api/system/migrations'); }
-  catch (err) { migrations = { error: err.message, items: [] }; }
+  if (isAdmin) {
+    try { updates = await api('/api/system/updates'); }
+    catch (err) { updates = { error: err.message, items: [] }; }
+    try { migrations = await api('/api/system/migrations'); }
+    catch (err) { migrations = { error: err.message, items: [] }; }
+  }
   let mcp = null;
   try { mcp = await api('/api/mcp/info'); }
   catch (err) { mcp = { error: err.message }; }
@@ -644,21 +945,44 @@ function renderMigrationPanel(panel, data) {
             <div class="help">导出在后台执行，完成后在下方任务记录中下载 .bbumig；请通过安全渠道传递迁移包和口令。</div>
           </div></div>
         </div>
-        <div class="card" style="margin-top:14px;background:#fff7ed;border-color:#fed7aa"><div class="card-head"><h2 class="small">覆盖恢复</h2><span class="sub">高风险</span></div><div class="card-body">
-          <div class="alert warn">${icon('alert')}<div>导入会用迁移包替换目标工作目录的 data / skills / cases，不做增量合并；当前业务数据会先备份到 <code>backups/import-任务ID</code>，健康检查失败会自动恢复旧目录。请确认这是新实例或已做好停机准备。</div></div>
-          <div class="form-grid" style="margin-top:10px">
-            <div class="form-row"><label class="label" for="migration-import-file">迁移包</label>
-              <input type="file" id="migration-import-file" accept=".bbumig,application/octet-stream" ${active ? 'disabled' : ''}></div>
-            <div class="form-row"><label class="label" for="migration-import-pass">迁移口令</label>
-              <input class="input mono" id="migration-import-pass" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+        <section class="migration-danger">
+          <div class="migration-danger-aside">
+            <div class="migration-danger-icon">${icon('alert')}</div>
+            <div class="migration-danger-title"><h3>覆盖恢复</h3><span class="badge danger">高风险</span></div>
+            <p>导入会用迁移包替换目标工作目录的 data / skills / cases，不做增量合并。请确认这是新实例或已做好停机准备。</p>
+            <ul class="migration-danger-list">
+              <li>当前业务数据先备份到 <code>backups/import-任务ID</code></li>
+              <li>健康检查失败自动恢复旧目录</li>
+              <li>迁移包与口令确认后才开始上传</li>
+            </ul>
+            <div class="migration-danger-tip">${icon('shield')}建议先在测试实例验证迁移包</div>
           </div>
-          <div class="form-row"><label class="label" for="migration-import-pass2">再次输入迁移口令</label>
-            <input class="input mono" id="migration-import-pass2" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
-          <button class="btn btn-danger" id="migration-import-btn" style="margin-top:10px" ${active ? 'disabled' : ''}>${icon('upload')}上传并恢复</button>
-          <div id="migration-import-state" class="small muted" style="margin-top:8px"></div>
-        </div></div>
-        <div style="margin-top:16px"><div class="between"><strong class="small">迁移记录</strong><span class="tiny muted">保留最近 30 条，导出包需手动删除</span></div>
-          ${items.length ? items.map(migrationJobCard).join('') : '<div class="empty" style="padding:24px"><p>暂无迁移任务。</p></div>'}
+          <div class="migration-danger-form">
+            <label class="migration-dropzone ${active ? 'is-disabled' : ''}" id="migration-import-file-box">
+              <input class="migration-file-input" type="file" id="migration-import-file"
+                accept=".bbumig,application/octet-stream" ${active ? 'disabled' : ''}>
+              <span class="migration-drop-icon">${icon('upload')}</span>
+              <span class="migration-drop-copy">
+                <strong id="migration-import-file-name">选择迁移包</strong>
+                <span id="migration-import-file-meta">支持 .bbumig，单包上限 ${data.max_migration_mb || '—'} MB</span>
+              </span>
+              <span class="btn btn-sm">浏览文件</span>
+            </label>
+            <div class="migration-pass-grid">
+              <div class="form-row"><label class="label" for="migration-import-pass">迁移口令</label>
+                <input class="input mono" id="migration-import-pass" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+              <div class="form-row"><label class="label" for="migration-import-pass2">再次输入迁移口令</label>
+                <input class="input mono" id="migration-import-pass2" type="password" autocomplete="new-password" ${active ? 'disabled' : ''}></div>
+            </div>
+            <div class="migration-import-actions">
+              <div id="migration-import-state" class="small muted">选择迁移包并填写两次口令后上传。</div>
+              <button class="btn btn-danger" id="migration-import-btn" ${active ? 'disabled' : ''}>${icon('upload')}上传并恢复</button>
+            </div>
+          </div>
+        </section>
+        <div class="migration-records">
+          <div class="migration-records-head"><div><h3>迁移记录</h3><span class="sub">导出、切换与恢复任务</span></div><span class="tiny muted">保留最近 30 条 · 导出包需手动删除</span></div>
+          ${items.length ? `<div class="migration-record-list">${items.map(migrationJobCard).join('')}</div>` : `<div class="migration-empty">${icon('history')}<div><strong>暂无迁移任务</strong><p>导出、切换工作目录或覆盖恢复后，任务进度会显示在这里。</p></div></div>`}
         </div>
       </div>
     </div>`;
@@ -726,11 +1050,21 @@ function bindMigrationActions(panel, data) {
   });
 
   const fileInput = panel.querySelector('#migration-import-file');
-  fileInput?.addEventListener('change', () => {
-    const file = fileInput.files?.[0];
-    panel.querySelector('#migration-import-state').textContent = file
-      ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : '';
-  });
+  const fileBox = panel.querySelector('#migration-import-file-box');
+  const fileName = panel.querySelector('#migration-import-file-name');
+  const fileMeta = panel.querySelector('#migration-import-file-meta');
+  const importHint = `支持 .bbumig，单包上限 ${data.max_migration_mb || '—'} MB`;
+  const renderImportFile = () => {
+    const file = fileInput?.files?.[0];
+    fileBox?.classList.toggle('has-file', Boolean(file));
+    if (fileName) fileName.textContent = file ? file.name : '选择迁移包';
+    if (fileMeta) fileMeta.textContent = file
+      ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 点击可重新选择` : importHint;
+    const stateEl = panel.querySelector('#migration-import-state');
+    if (stateEl) stateEl.textContent = file
+      ? '已选择迁移包，填写两次口令后上传并恢复。' : '选择迁移包并填写两次口令后上传。';
+  };
+  fileInput?.addEventListener('change', renderImportFile);
   panel.querySelector('#migration-import-btn')?.addEventListener('click', () => {
     const file = fileInput?.files?.[0];
     const pass = panel.querySelector('#migration-import-pass')?.value || '';
@@ -874,7 +1208,8 @@ function updatePhaseLabel(phase) {
   return {
     uploaded: '已上传', verifying: '预检中', ready: '可升级', queued: '等待 root 助手',
     backup: '备份中', migrating: '迁移/替换中', restarting: '重启中',
-    health_check: '健康检查', succeeded: '升级成功', failed: '失败', rolled_back: '已回滚',
+    health_check: '健康检查', waiting_restart: '待重启生效',
+    succeeded: '升级成功', failed: '失败', rolled_back: '已回滚',
   }[phase] || phase || '—';
 }
 
@@ -890,7 +1225,7 @@ function renderUpdatePanel(panel, updates, currentVersion) {
         <div class="card-head"><h2>离线升级</h2><span class="sub">当前 v${esc(currentVersion)}</span></div>
         <div class="card-body">
           <div class="alert info">${icon('shield')}<div>
-            Windows 版默认不启用网页自动升级。需要更新时请停止平台，备份 <code>data/</code> 与
+            当前环境未启用网页升级。请停止平台，备份 <code>data/</code> 与
             <code>config.json</code>，解压新版本后覆盖程序目录，再重新启动即可。
           </div></div>
         </div>
@@ -902,24 +1237,29 @@ function renderUpdatePanel(panel, updates, currentVersion) {
   const ready = items.find((x) => x.phase === 'ready') || null;
   const focus = active || ready || items[0] || null;
   const busy = !!active;
-  const helper = updates.helper || 'root/systemd 一次性助手';
+  const locked = busy || !!updates.pending_update;
+  const restart = updates.mode === 'restart';
+  const rollbackEnabled = updates.rollback_supported !== false;
+  const helper = updates.helper || (restart ? 'Windows 网页上传 + 重启生效' : 'root/systemd 一次性助手');
   const history = items.filter((x) => x !== focus);
   panel.innerHTML = `
     <div class="card" style="margin-bottom:16px" id="update-card">
       <div class="card-head"><h2>离线升级</h2><span class="sub">当前 v${esc(currentVersion)} · ${esc(helper)}</span></div>
       <div class="card-body">
         <div class="alert ${updates.error ? 'danger' : 'info'}">${icon(updates.error ? 'alert' : 'shield')}<div>
-          ${updates.error ? esc(updates.error) : `升级只接受管理员上传的 .tar.gz 离线包，由 root/systemd 一次性助手执行固定脚本；主 Web 进程不提权。`}
+          ${updates.error ? esc(updates.error) : (restart
+            ? `Windows 网页上传只做校验和解压；确认后点击“准备重启生效”，关闭平台并重新启动，启动时会自动替换代码并保留 <code>data/</code> 与 <code>config.json</code>。`
+            : `升级只接受管理员上传的 .tar.gz 离线包，由 root/systemd 一次性助手执行固定脚本；主 Web 进程不提权。`)}
           ${updates.running_tasks ? `<br><strong>当前有 ${updates.running_tasks} 个诊断任务在排队/运行，升级会被阻止。</strong>` : ''}
           ${updates.disk_free_mb != null ? `<br>磁盘可用 ${updates.disk_free_mb} MB · 单包上限 ${updates.max_update_mb || '—'} MB` : ''}
         </div></div>
         <div class="between" style="margin-top:14px;gap:12px;flex-wrap:wrap">
           <div>
-            <label class="label" for="update-file">选择离线升级包（.tar.gz）</label>
-            <input type="file" id="update-file" accept=".tar.gz,application/gzip" ${busy ? 'disabled' : ''}>
+            <label class="label" for="update-file">选择离线升级包（${restart ? '.zip / .tar.gz' : '.tar.gz'}）</label>
+            <input type="file" id="update-file" accept=".tar.gz,.tgz,.zip,application/gzip,application/zip" ${locked ? 'disabled' : ''}>
             <div class="tiny muted" id="update-file-name">上传后服务端会计算 SHA256 并检查版本/结构，不会执行包内脚本。</div>
           </div>
-          <button class="btn btn-primary" data-act="upload-update" id="update-upload-btn" ${busy ? 'disabled' : ''}>${icon('upload')}上传并预检</button>
+          <button class="btn btn-primary" data-act="upload-update" id="update-upload-btn" ${locked ? 'disabled' : ''}>${icon('upload')}上传并预检</button>
         </div>
         <div id="update-upload-state" class="small muted" style="margin-top:8px"></div>
         ${focus ? `<div class="card" style="margin-top:14px;background:#f8fafc">
@@ -930,13 +1270,17 @@ function renderUpdatePanel(panel, updates, currentVersion) {
             <div class="upload-progress" style="margin-top:10px"><div style="width:${Number(focus.progress || 0)}%"></div></div>
             <div class="between tiny muted" style="margin-top:5px"><span>${esc(focus.message || '')}</span><span>${Number(focus.progress || 0)}%</span></div>
             ${focus.error ? `<div class="alert danger" style="margin-top:10px">${icon('alert')}<div>${esc(focus.error)}</div></div>` : ''}
+            ${focus.phase === 'waiting_restart' ? `<div class="alert warn" style="margin-top:10px">${icon('refresh')}<div>
+              <strong>已准备，等待重启。</strong>关闭当前平台窗口后重新运行 <code>start_platform.bat</code> 或 <code>python run.py</code>；
+              启动时会自动替换程序目录并加载新版本。当前页面连接的是旧进程，重启后再刷新。
+            </div></div>` : ''}
             ${focus.package_sha256 ? `<div class="kv small" style="margin-top:8px"><div class="k">SHA256</div><div class="v mono">${esc(focus.package_sha256)}</div>
               <div class="k">包大小</div><div class="v">${((focus.size || 0) / 1024 / 1024).toFixed(2)} MB</div>
               ${focus.backup_dir ? `<div class="k">回滚快照</div><div class="v mono">${esc(focus.backup_dir)}</div>` : ''}</div>` : ''}
             ${focus.release_notes ? `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">查看版本说明</summary><pre class="small" style="white-space:pre-wrap;max-height:260px;overflow:auto">${esc(focus.release_notes)}</pre></details>` : ''}
             <div class="inline" style="margin-top:10px;flex-wrap:wrap">
-              ${focus.phase === 'ready' ? `<button class="btn btn-primary" data-act="apply-update" data-id="${esc(focus.id)}">${icon('play')}执行升级</button>` : ''}
-              ${(focus.phase === 'failed' || focus.phase === 'succeeded') && focus.backup_dir ? `<button class="btn btn-danger" data-act="rollback-update" data-id="${esc(focus.id)}">回滚到快照</button>` : ''}
+              ${focus.phase === 'ready' ? `<button class="btn btn-primary" data-act="apply-update" data-id="${esc(focus.id)}">${icon(restart ? 'refresh' : 'play')}${restart ? '准备重启生效' : '执行升级'}</button>` : ''}
+              ${(focus.phase === 'failed' || focus.phase === 'succeeded') && focus.backup_dir && rollbackEnabled ? `<button class="btn btn-danger" data-act="rollback-update" data-id="${esc(focus.id)}">回滚到快照</button>` : ''}
               ${focus.phase === 'failed' || focus.phase === 'ready' ? `<button class="btn btn-sm" data-act="verify-update" data-id="${esc(focus.id)}">重新预检</button>` : ''}
               ${focus.phase === 'succeeded' || focus.phase === 'rolled_back' ? `<button class="btn btn-sm" data-act="reload-after-update">刷新页面</button>` : ''}
             </div>
@@ -948,7 +1292,7 @@ function renderUpdatePanel(panel, updates, currentVersion) {
               <td>${esc(updateActions(x))}</td>
               <td class="small">v${esc(x.current_version || '—')} → v${esc(x.target_version || '—')}</td>
               <td>${esc(updatePhaseLabel(x.phase))}${x.error ? `<div class="tiny danger-text">${esc(x.error).slice(0, 120)}</div>` : ''}</td>
-              <td>${x.phase === 'succeeded' && x.backup_dir ? `<button class="btn btn-sm" data-act="rollback-update" data-id="${esc(x.id)}">回滚</button>` : '—'}</td></tr>`).join('')
+              <td>${x.phase === 'succeeded' && x.backup_dir && rollbackEnabled ? `<button class="btn btn-sm" data-act="rollback-update" data-id="${esc(x.id)}">回滚</button>` : '—'}</td></tr>`).join('')
               : '<tr><td colspan="5" class="muted" style="text-align:center;padding:18px">暂无升级记录</td></tr>'}
           </tbody></table></div></div>
       </div>
@@ -961,10 +1305,10 @@ function renderUpdatePanel(panel, updates, currentVersion) {
   });
   panel.querySelector('[data-act="upload-update"]')?.addEventListener('click', () => {
     const file = fileInput?.files?.[0];
-    if (!file) { toast('请选择 .tar.gz 升级包', 'error'); return; }
+    if (!file) { toast('请选择 .tar.gz / .zip 升级包', 'error'); return; }
     uploadUpdatePackage(file, panel, currentVersion);
   });
-  panel.querySelector('[data-act="apply-update"]')?.addEventListener('click', (e) => openApplyUpdate(e.currentTarget.dataset.id));
+  panel.querySelector('[data-act="apply-update"]')?.addEventListener('click', (e) => openApplyUpdate(e.currentTarget.dataset.id, updates.mode));
   panel.querySelectorAll('[data-act="rollback-update"]').forEach((btn) => btn.addEventListener('click', () => openRollbackUpdate(btn.dataset.id)));
   panel.querySelectorAll('[data-act="verify-update"]').forEach((btn) => btn.addEventListener('click', () => verifyUpdate(btn.dataset.id, panel, currentVersion)));
   panel.querySelector('[data-act="reload-after-update"]')?.addEventListener('click', () => location.reload());
@@ -1004,27 +1348,39 @@ function uploadUpdatePackage(file, panel, currentVersion) {
   xhr.send(fd);
 }
 
-function openApplyUpdate(jobId) {
+function openApplyUpdate(jobId, mode = 'helper') {
+  const restart = mode === 'restart';
   const m = modal({
-    title: '执行离线升级',
-    body: `<div class="alert warn">${icon('alert')}<div>升级会停止服务、备份数据、迁移数据库并替换代码。请确认当前没有诊断任务运行，并已保留升级包。</div></div>
-      <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
-        <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`,
-    footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="apply">确认升级</button>`,
+    title: restart ? '准备重启生效' : '执行离线升级',
+    body: restart
+      ? `<div class="alert info">${icon('refresh')}<div>
+          <strong>确认后只会准备重启，不会立即替换代码。</strong><br>
+          关闭当前平台窗口并重新启动，启动时会先备份旧程序，再替换代码并加载新版本；<code>data/</code> 与 <code>config.json</code> 保留。
+        </div></div>
+        <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
+          <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`
+      : `<div class="alert warn">${icon('alert')}<div>升级会停止服务、备份数据、迁移数据库并替换代码。请确认当前没有诊断任务运行，并已保留升级包。</div></div>
+        <div class="form-row" style="margin-top:12px"><label class="label">重新输入管理员密码</label>
+          <input class="input" type="password" id="apply-password" autocomplete="current-password"></div>`,
+    footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="apply">${restart ? '准备重启' : '确认升级'}</button>`,
   });
   m.mask.addEventListener('click', async (e) => {
     if (e.target.closest('[data-act="cancel"]')) { m.close(); return; }
     const btn = e.target.closest('[data-act="apply"]'); if (!btn) return;
     const password = m.body.querySelector('#apply-password').value;
     if (!password) { toast('请输入管理员密码', 'error'); return; }
-    setBusy(btn, true, '提交中');
+    setBusy(btn, true, restart ? '准备中' : '提交中');
     try {
-      await api(`/api/system/updates/${encodeURIComponent(jobId)}/apply`, { method: 'POST', body: { password } });
-      m.close(); toast('已提交升级，正在等待 root 助手', 'ok');
+      const data = await api(`/api/system/updates/${encodeURIComponent(jobId)}/apply`, { method: 'POST', body: { password } });
+      const update = data.update || {};
+      const waiting = update.phase === 'waiting_restart';
+      m.close();
+      toast(waiting ? '已准备，重启平台后自动生效' : '已提交升级，正在等待 root 助手',
+            waiting ? 'warn' : 'ok', waiting ? 10000 : 4000);
       updatePollTimer = null;
       const panel = document.querySelector('#update-panel');
       await refreshUpdatePanel(panel, state.publicConfig.version || '');
-      startUpdatePoll(jobId, panel, state.publicConfig.version || '');
+      if (!waiting) startUpdatePoll(jobId, panel, state.publicConfig.version || '');
     } catch (err) { toast(err.message, 'error', 6000); setBusy(btn, false); }
   });
 }
@@ -1068,10 +1424,12 @@ function startUpdatePoll(jobId, panel, currentVersion) {
     try {
       const data = await api(`/api/system/updates/${encodeURIComponent(jobId)}`);
       const line = data.update;
-      if (line.phase === 'succeeded' || line.phase === 'failed' || line.phase === 'rolled_back') {
+      if (line.phase === 'succeeded' || line.phase === 'failed'
+          || line.phase === 'rolled_back' || line.phase === 'waiting_restart') {
         clearInterval(updatePollTimer); updatePollTimer = null;
         await refreshUpdatePanel(panel, currentVersion);
         if (line.phase === 'succeeded') toast('升级成功，请刷新页面使用新版本', 'ok', 8000);
+        if (line.phase === 'waiting_restart') toast('已准备，重启平台后自动生效', 'warn', 10000);
         return;
       }
       if (panel.querySelector('#update-card')) {
@@ -1101,13 +1459,22 @@ function runtimeFieldHtml(item) {
       <div class="help">默认 ${item.value ? '开启' : '关闭'} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
   }
   if (item.type === 'enum') {
-    const options = (item.choices || []).map((value) =>
-      `<option value="${esc(value)}" ${String(item.value) === String(value) ? 'selected' : ''}>${esc(value)}</option>`).join('');
+    const options = (item.choices || []).map((value) => {
+      const label = (item.choice_labels || {})[value] || value;
+      return `<option value="${esc(value)}" ${String(item.value) === String(value) ? 'selected' : ''}>${esc(label)}</option>`;
+    }).join('');
     return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
         ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
       <select class="input" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
         data-runtime-type="enum" ${disabled}>${options}</select>
-      <div class="help">默认 ${esc(item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+      <div class="help">默认 ${esc((item.choice_labels || {})[item.default] || item.default)} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
+  }
+  if (item.type === 'str') {
+    return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
+        ${item.env_override ? `<span class="badge warn" title="该值由环境变量覆盖，网页保存不会生效">${esc(item.env_override)}</span>` : ''}</label>
+      <input class="input mono" id="rt-${esc(item.key)}" data-runtime-key="${esc(item.key)}"
+        data-runtime-type="str" type="text" value="${esc(item.value ?? '')}" ${disabled}>
+      <div class="help">默认 ${esc(item.default || '（空）')} · ${effect}${item.env_override ? ' · 环境变量优先' : ''}</div></div>`;
   }
   const step = item.type === 'float' ? '0.1' : '1';
   return `<div class="form-row"><label class="label" for="rt-${esc(item.key)}">${esc(item.label)}
@@ -1153,7 +1520,10 @@ async function renderRuntimeConfigPanel(panel) {
       values[input.dataset.runtimeKey] = input.dataset.runtimeType === 'bool'
         ? Boolean(input.checked)
         : input.dataset.runtimeType === 'float'
-          ? Number(input.value) : Number.parseInt(input.value, 10);
+          ? Number(input.value)
+          : input.dataset.runtimeType === 'int'
+            ? Number.parseInt(input.value, 10)
+            : input.value;
     });
     return values;
   };
@@ -1298,6 +1668,11 @@ async function renderStoragePanel(panel) {
   if (!panel) return;
   if (storagePollTimer) { clearInterval(storagePollTimer); storagePollTimer = null; }
   let data;
+  let skills = [];
+  try {
+    const skillData = await api('/api/skills');
+    skills = (skillData.items || []).filter((s) => ['ready', 'degraded'].includes(s.status));
+  } catch { /* 技能列表失败不阻塞空间统计 */ }
   try { data = await api('/api/storage/overview'); }
   catch (err) {
     panel.innerHTML = `<div class="card"><div class="card-head"><h2>任务空间</h2></div>
@@ -1308,28 +1683,38 @@ async function renderStoragePanel(panel) {
   const items = data.items || [];
   const disk = summary.disk || {};
   const rows = items.map((item) => `<tr>
-    <td><input type="checkbox" class="storage-check" data-task="${esc(item.id)}"
+    <td class="storage-check-cell"><input type="checkbox" class="storage-check" data-task="${esc(item.id)}"
       ${(item.can_release || item.can_release_extracted) ? '' : 'disabled'}></td>
-    <td><div style="font-weight:600">${esc(item.title || item.id)}</div>
+    <td data-label="任务"><div style="font-weight:600">${esc(item.title || item.id)}</div>
       <div class="mono tiny muted">${esc(item.id)} · ${fmtDate(item.created_at)}</div></td>
-    <td>${statusBadge(item.status)}<div class="tiny muted">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
-    <td class="mono">${fmtSize(item.raw_input_bytes)}
+    <td data-label="状态 / 输入">${statusBadge(item.status)}<div class="tiny muted">${esc(INPUT_STATE_LABELS[item.inputs_state] || item.inputs_state)}</div></td>
+    <td data-label="原始输入" class="mono">${fmtSize(item.raw_input_bytes)}
       ${item.shared_input_paths ? `<div class="tiny"><span class="badge warn">${item.shared_input_paths} 个共享</span></div>` : ''}</td>
-    <td class="mono ${item.extracted_bytes ? '' : 'muted'}">${fmtSize(item.extracted_bytes)}
+    <td data-label="解压文件" class="mono ${item.extracted_bytes ? '' : 'muted'}">${fmtSize(item.extracted_bytes)}
       ${item.extracted_dirs ? `<div class="tiny muted">${item.extracted_dirs} 个目录</div>` : ''}</td>
-    <td class="mono muted">${fmtSize(item.retained_bytes)}</td>
-    <td class="mono">${fmtSize(item.total_bytes)}</td>
-    <td><div class="inline" style="gap:4px;flex-wrap:wrap">
+    <td data-label="其它产物" class="mono muted">${fmtSize(item.retained_bytes)}</td>
+    <td data-label="合计" class="mono">${fmtSize(item.total_bytes)}</td>
+    <td data-label="操作" class="${(!item.can_release && !item.can_release_extracted) ? 'storage-no-action' : ''}"><div class="inline" style="gap:4px;flex-wrap:wrap">
       ${item.can_release_extracted ? `<button class="btn btn-sm" data-release="${esc(item.id)}" data-release-mode="extracted">${icon('trash')}释放解压</button>` : ''}
       ${item.can_release ? `<button class="btn btn-sm btn-danger" data-release="${esc(item.id)}" data-release-mode="raw_inputs">${icon('trash')}释放原始</button>` : ''}
       ${(!item.can_release && !item.can_release_extracted) ? '<span class="muted">—</span>' : ''}
     </div></td>
   </tr>`).join('');
+  const storageList = items.length ? `
+      <div class="storage-list-head"><div><h3>任务清单</h3><span class="sub">共 ${items.length} 个任务，按创建时间倒序</span></div></div>
+      <div class="table-wrap"><table class="data storage-table"><thead><tr>
+        <th><input type="checkbox" id="storage-check-all" aria-label="全选可释放任务"></th>
+        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>解压文件</th><th>其它产物</th><th>合计</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>` : `
+      <div class="storage-empty">${icon('layers')}<h3>暂无任务空间记录</h3>
+        <p>新建诊断或技能工坊任务后，这里会显示原始输入、解压文件和可释放空间。</p>
+        <button class="btn" data-storage-refresh>${icon('refresh')}重新统计</button></div>`;
   panel.innerHTML = `<div class="card">
-    <div class="card-head"><div><h2>任务空间统计与释放</h2>
-      <span class="sub">可单独释放解压文件；报告、证据、案例和数据库记录始终保留</span></div>
-      <div class="inline" style="flex-wrap:wrap">
-        <select class="select" id="storage-release-mode" style="max-width:180px" title="批量释放内容">
+    <div class="card-head storage-head">
+      <div class="storage-head-copy"><h2>任务空间统计与释放</h2>
+        <span class="sub">可单独释放解压文件；报告、证据、案例和数据库记录始终保留</span></div>
+      <div class="storage-toolbar">
+        <select class="select storage-mode-select" id="storage-release-mode" title="批量释放内容">
           <option value="extracted" selected>解压文件（推荐）</option>
           <option value="raw_inputs">原始输入</option>
           <option value="both">原始输入 + 解压文件</option>
@@ -1338,29 +1723,48 @@ async function renderStoragePanel(panel) {
         <button class="btn" id="storage-refresh">${icon('refresh')}重新统计</button>
       </div></div>
     <div class="card-body">
-      <div class="grid grid-4" style="margin-bottom:14px">
-        <div class="card stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
-        <div class="card stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
-        <div class="card stat"><div class="stat-icon ok">${icon('shield')}</div><div><div class="stat-val">${fmtSize(summary.retained_bytes)}</div><div class="stat-label">报告/证据等保留</div></div></div>
-        <div class="card stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">当前可释放</div></div></div>
+      <div class="storage-skill-bar">
+        <div class="storage-skill-copy">
+          <div class="storage-skill-icon">${icon('play')}</div>
+          <div><strong>按技能诊断</strong><p>选择可用技能后，直接进入只执行该技能的诊断任务</p></div>
+        </div>
+        <div class="storage-skill-actions">
+          <select class="select" id="storage-skill" ${skills.length ? '' : 'disabled'}>
+            <option value="">${skills.length ? '选择技能' : '暂无可用技能'}</option>
+            ${skills.map((s) => `<option value="${esc(s.name)}">${esc(s.title || s.name)} · v${esc(s.version)}</option>`).join('')}
+          </select>
+          <button class="btn btn-primary" id="storage-skill-diagnose" ${skills.length ? '' : 'disabled'}>${icon('play')}按技能诊断</button>
+        </div>
       </div>
-      <div class="alert info">${icon('shield')}<div>
-        <strong>解压文件</strong>只删除任务目录中的 <span class="mono">skills/*/unpacked</span>，报告、证据和案例不受影响；重跑会从原始日志重新解压。
-        <br><strong>原始输入</strong>会删除上传日志；共享文件只有最后一个引用任务释放时才删除。释放原始输入后该任务不能再重跑。
-        <br><span class="tiny muted">磁盘剩余：${fmtSize(disk.free_bytes)}</span>
-      </div></div>
+      <div class="storage-stats">
+        <div class="storage-stat"><div class="stat-icon">${icon('file')}</div><div><div class="stat-val">${fmtSize(summary.raw_input_bytes)}</div><div class="stat-label">原始输入</div></div></div>
+        <div class="storage-stat"><div class="stat-icon warn">${icon('layers')}</div><div><div class="stat-val">${fmtSize(summary.extracted_bytes)}</div><div class="stat-label">解压文件（可释放）</div></div></div>
+        <div class="storage-stat"><div class="stat-icon ok">${icon('shield')}</div><div><div class="stat-val">${fmtSize(summary.retained_bytes)}</div><div class="stat-label">报告/证据等保留</div></div></div>
+        <div class="storage-stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${fmtSize(summary.deletable_bytes)}</div><div class="stat-label">当前可释放</div></div></div>
+      </div>
+      <div class="storage-notice">
+        <div class="storage-notice-icon">${icon('shield')}</div>
+        <div class="storage-notice-text"><strong>释放规则</strong>
+          <p><b>解压文件</b>只删除任务目录中的 <span class="mono">skills/*/unpacked</span>，报告、证据和案例不受影响；重跑会从原始日志重新解压。</p>
+          <p><b>原始输入</b>会删除上传日志；共享文件只有最后一个引用任务释放时才删除。释放原始输入后该任务不能再重跑。</p>
+        </div>
+        <span class="storage-disk">磁盘剩余 ${fmtSize(disk.free_bytes)}</span>
+      </div>
       <div id="storage-status" class="small muted" style="margin:8px 0"></div>
-      <div class="table-wrap"><table class="data"><thead><tr>
-        <th><input type="checkbox" id="storage-check-all" aria-label="全选可释放任务"></th>
-        <th>任务</th><th>状态 / 输入</th><th>原始输入</th><th>解压文件</th><th>其它产物</th><th>合计</th><th>操作</th>
-      </tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty">暂无任务</div></td></tr>'}</tbody></table></div>
+      ${storageList}
     </div></div>`;
 
   const checkAll = panel.querySelector('#storage-check-all');
   checkAll?.addEventListener('change', () => {
     panel.querySelectorAll('.storage-check:not(:disabled)').forEach((c) => { c.checked = checkAll.checked; });
   });
-  panel.querySelector('#storage-refresh').addEventListener('click', () => renderStoragePanel(panel));
+  panel.querySelectorAll('#storage-refresh, [data-storage-refresh]').forEach((btn) => btn.addEventListener('click', () => renderStoragePanel(panel)));
+  panel.querySelector('#storage-skill-diagnose')?.addEventListener('click', () => {
+    const name = panel.querySelector('#storage-skill')?.value || '';
+    if (!name) { toast('请先选择一个可用技能', 'warn'); return; }
+    try { sessionStorage.setItem('bbu.diagnose_skill', name); } catch { /* ignore */ }
+    location.hash = '#/tasks/new';
+  });
   panel.querySelector('#storage-release-selected').addEventListener('click', () => {
     const ids = [...panel.querySelectorAll('.storage-check:checked')].map((c) => c.dataset.task);
     releaseTasks(panel, ids, panel.querySelector('#storage-release-mode').value);
@@ -1454,9 +1858,9 @@ async function openMCPTokenModal(panel, current) {
     <div class="field"><label>访问模式</label>
       <select id="mcp-token-mode">
         <option value="read" ${mode === 'read' ? 'selected' : ''}>read · 只读（推荐）</option>
-        <option value="admin" ${mode === 'admin' ? 'selected' : ''}>admin · 允许执行白名单写工具</option>
+        <option value="write" ${mode === 'write' ? 'selected' : ''}>write · 允许执行当前账号可用的白名单写工具</option>
       </select>
-      <div class="hint">read 仅暴露查询类工具；admin 还允许删除备份、释放任务空间、修改通知偏好等低风险写操作，升级/回滚、用户和模型变更永不通过 MCP 执行。</div>
+      <div class="hint">read 仅暴露当前账号可用的查询类工具；write 还允许当前账号权限内的删除备份、释放任务空间、修改通知偏好等低风险写操作。升级/回滚、用户和模型变更永不通过 MCP 执行。</div>
     </div>
     <div class="field"><label>客户端连接地址</label>
       <input readonly value="${esc(mcpEndpoint())}"></div>`,
@@ -1541,10 +1945,23 @@ function renderMCPPanel(panel, payload) {
         <div class="tiny muted" style="margin-top:8px">Token 仅保存 SHA-256 哈希；轮换后旧 Token 立即失效。账号停用后 Token 同步失效。</div>
       </div></div>
     </div>
-    <div class="card" style="margin-bottom:14px"><div class="card-head"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div>
+    <div class="card mcp-client-card" style="margin-bottom:14px">
+      <div class="card-head"><div class="mcp-client-heading"><h2>客户端配置</h2><span class="sub">Claude Desktop / Cursor / 其他 MCP 客户端</span></div></div>
       <div class="card-body">
-        <div class="alert info">${icon('info')}<div>推荐使用 <strong>read</strong> 模式。将以下配置加入支持 HTTP MCP 的客户端；Token 需先在上方生成。</div></div>
-        <textarea readonly rows="10" class="mono" id="mcp-config-example">{
+        <div class="mcp-client-layout">
+          <div class="mcp-client-notes">
+            <div class="mcp-config-note">${icon('info')}<div>推荐使用 <strong>read</strong> 模式；Token 绑定当前账号，只能看到当前账号权限内的工具与数据。</div></div>
+            <ol class="mcp-steps">
+              <li><span>1</span><div><strong>复制配置</strong><p>右侧 JSON 已填入当前 MCP 端点，复制后替换 Bearer 占位 Token。</p></div></li>
+              <li><span>2</span><div><strong>写入客户端</strong><p>粘贴到 Claude Desktop / Cursor 的 <code>mcpServers</code> 配置中。</p></div></li>
+              <li><span>3</span><div><strong>重启并验证</strong><p>重新打开客户端，确认工具列表出现 <code>bbu-faultscope</code>。</p></div></li>
+            </ol>
+            <div class="mcp-token-tip">${icon('key')}<span>Token 绑定当前账号；轮换后旧 Token 立即失效，需要同步更新客户端。</span></div>
+          </div>
+          <div class="mcp-code-panel">
+            <div class="mcp-code-head"><div class="mcp-code-title">${icon('file')} mcp.json <span class="badge">JSON</span></div>
+              <button class="btn btn-sm" id="mcp-copy-config">${icon('copy')}复制 JSON</button></div>
+            <pre class="mcp-code-block"><code id="mcp-config-example">{
   "mcpServers": {
     "bbu-faultscope": {
       "type": "http",
@@ -1552,9 +1969,11 @@ function renderMCPPanel(panel, payload) {
       "headers": { "Authorization": "Bearer &lt;YOUR_TOKEN&gt;" }
     }
   }
-}</textarea>
-        <div style="margin-top:8px"><button class="btn btn-sm" id="mcp-copy-config">${icon('copy')}复制配置模板</button></div>
-      </div></div>
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="card"><div class="card-head"><h2>当前模式工具</h2><span class="sub">${info.mode || 'read'} 模式</span></div>
       <div class="card-body"><div class="assistant-suggestions">${names.length ? names.map((n) => `<span class="badge" style="font-family:var(--mono)">${esc(n)}</span>`).join('') : '<span class="muted">暂无</span>'}</div>
         <div class="tiny muted" style="margin-top:8px">升级/回滚、用户与模型变更不通过 MCP 暴露；写工具仍要求 <code>confirm=true</code>。</div>
@@ -1570,11 +1989,61 @@ function renderMCPPanel(panel, payload) {
   });
   const cfg = panel.querySelector('#mcp-config-example');
   panel.querySelector('#mcp-copy-config').addEventListener('click', (e) => copyText(
-    cfg.value.replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
+    cfg.textContent.trim().replace('&lt;YOUR_TOKEN&gt;', '<YOUR_TOKEN>'), e.currentTarget));
+}
+
+function resourcePercent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+}
+
+function resourceText(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(1)}%` : '—';
+}
+
+function systemOverviewResources(system) {
+  if (!system) return '';
+  const cpu = system.cpu || {};
+  const memory = system.memory || null;
+  const process = system.process || {};
+  const disk = system.disk || null;
+  return `<div class="card system-resource-card" style="margin:0 0 16px">
+    <div class="card-head"><h2>系统资源</h2>
+      <span class="sub">系统信息概览 · ${esc(system.as_of ? fmtDate(system.as_of) : '')}</span></div>
+    <div class="card-body"><div class="resource-grid">
+      <div class="resource-tile">
+        <div class="resource-label">${icon('cpu')} CPU 使用率</div>
+        <div class="resource-value">${resourceText(cpu.percent)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(cpu.percent)}%"></span></div>
+        <div class="resource-note">${Number(cpu.cores || 1)} 核 · 1 分钟负载 ${cpu.load_1m == null ? '—' : Number(cpu.load_1m).toFixed(2)} · ${esc(cpu.source || '')}</div>
+      </div>
+      <div class="resource-tile">
+        <div class="resource-label">${icon('activity')} 当前应用内存</div>
+        <div class="resource-value">${fmtSize(process.rss_bytes)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(process.percent_of_total)}%"></span></div>
+        <div class="resource-note">总内存 ${memory ? fmtSize(memory.total_bytes) : '—'} · 占 ${resourceText(process.percent_of_total)}${process.threads ? ` · ${process.threads} 线程` : ''}</div>
+      </div>
+      <div class="resource-tile">
+        <div class="resource-label">${icon('layers')} 系统内存</div>
+        <div class="resource-value">${memory ? resourceText(memory.percent) : '—'}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(memory?.percent)}%"></span></div>
+        <div class="resource-note">${memory ? `${fmtSize(memory.used_bytes)} 已用 · ${fmtSize(memory.available_bytes)} 可用` : '内存信息不可用'}</div>
+      </div>
+      ${disk ? `<div class="resource-tile">
+        <div class="resource-label">${icon('inbox')} 数据盘</div>
+        <div class="resource-value">${resourceText(disk.percent)}</div>
+        <div class="resource-bar"><span style="width:${resourcePercent(disk.percent)}%"></span></div>
+        <div class="resource-note">${fmtSize(disk.free_bytes)} 可用 / ${fmtSize(disk.total_bytes)} · ${esc(disk.path || '')}</div>
+      </div>` : ''}
+    </div></div></div>`;
 }
 
 function renderSystemView(view, info, config, updates, migrations, mcp) {
-  const tabs = [['overview', '概览'], ['runtime', '运行参数'], ['storage', '任务空间'], ['backups', '备份'], ['migration', '迁移'], ['update', '升级'], ['mcp', 'MCP / 助手']];
+  const isAdmin = state.user?.role === 'admin';
+  const tabs = isAdmin
+    ? [['overview', '概览'], ['runtime', '运行参数'], ['storage', '任务空间'], ['backups', '备份'], ['migration', '迁移'], ['update', '升级'], ['mcp', 'MCP / 助手']]
+    : [['overview', '概览'], ['mcp', 'MCP / 助手']];
   view.innerHTML = `
     <div class="system-tabs-bar"><div class="tabs system-tabs" role="tablist">
       ${tabs.map(([key, label], index) => `<button class="${index === 0 ? 'active' : ''}" role="tab"
@@ -1587,6 +2056,7 @@ function renderSystemView(view, info, config, updates, migrations, mcp) {
         <div class="card stat"><div class="stat-icon ok">${icon('clock')}</div><div><div class="stat-val">${fmtDur(info.uptime_sec)}</div><div class="stat-label">已运行</div></div></div>
         <div class="card stat"><div class="stat-icon warn">${icon('activity')}</div><div><div class="stat-val">${info.workers?.running || 0} / ${info.workers?.max_workers || '-'}</div><div class="stat-label">运行 / 并发上限</div></div></div>
       </div>
+      ${systemOverviewResources(info.system)}
       <div class="grid grid-2">
         <div class="card"><div class="card-head"><h2>运行环境</h2></div><div class="card-body">
           <div class="kv">

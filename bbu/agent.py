@@ -34,8 +34,20 @@ class BoundedAgent:
 
     def review_plan(self, task: dict[str, Any], plan: dict[str, Any],
                     catalog: list[dict[str, Any]],
-                    prior_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                    prior_results: list[dict[str, Any]] | None = None,
+                    replan_count: int | None = None) -> dict[str, Any]:
         max_steps, max_skills, max_replans = self._limits()
+        if replan_count is None:
+            raw_replan = plan.get("replan")
+            if isinstance(raw_replan, bool):
+                replan_count = 1 if raw_replan else 0
+            elif isinstance(raw_replan, (list, tuple, dict)):
+                replan_count = len(raw_replan)
+            else:
+                try:
+                    replan_count = int(raw_replan or 0)
+                except (TypeError, ValueError):
+                    replan_count = 0
         names = {str(x.get("name") if isinstance(x, dict) else getattr(x, "name", ""))
                  for x in catalog}
         steps = [s for s in (plan.get("steps") or []) if isinstance(s, dict)]
@@ -64,9 +76,9 @@ class BoundedAgent:
                             "parallel": min(len(skills), int(self.config.get("max_skill_parallel", 4)))})
         if skill_total > max_skills:
             reasons.append(f"技能总数 {skill_total} 超过上限 {max_skills}")
-        if plan.get("replan") and max_replans < 1:
+        if replan_count and max_replans < 1:
             reasons.append("本次不允许重规划")
-        if len(plan.get("replan") or []) > max_replans:
+        if replan_count > max_replans:
             reasons.append("重规划次数超过上限")
         stop_reason = ""
         if prior_results:

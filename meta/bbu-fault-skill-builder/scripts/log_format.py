@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-log_format.py — BBU 日志文件通用格式识别与处理路由（零三方依赖）
+log_format.py — 日志文件通用格式识别与处理路由（零三方依赖，域策略可注入）
 
 统一分类学（kind）与处理路由：
   empty              空文件                 → 登记忽略
@@ -19,6 +19,7 @@ log_format.py — BBU 日志文件通用格式识别与处理路由（零三方�
 """
 import argparse
 import bz2
+import fnmatch
 import json
 import lzma
 import os
@@ -38,8 +39,66 @@ CONTAINER_DOC_SUFFIXES = (".xlsx", ".xlsm", ".xltx", ".docx", ".docm", ".pptx",
                           ".pptm", ".vsdx", ".odt", ".ods", ".odp", ".epub",
                           ".jar", ".apk", ".ipa", ".whl")
 XLSX_SUFFIXES = {".xlsx", ".xlsm", ".xltx"}
-# 密文/私有格式：文件名特征命中即视为不可解析（即使内容是 gzip）
-CIPHERED_HINTS = ("bspmoni", "verprotect", "gnssoriginalmsg", "uartlog")
+# 域策略由 assets/format-policy.json 注入；core 不再内置任何域文件名。
+DEFAULT_FORMAT_POLICY = {
+    "detect_by": "magic",
+    "opaque_name_patterns": [],
+    "force_text": [],
+    "force_opaque": [],
+}
+_POLICY_STATE = {"path": None, "mtime": None, "policy": None}
+
+
+def load_format_policy(path=None):
+    """读取技能自带的 format-policy.json（或域包 YAML）；无策略时返回纯 magic 默认。"""
+    policy_path = path or os.environ.get("SKILL_FORMAT_POLICY")
+    if not policy_path:
+        candidate = Path(__file__).resolve().parent.parent / "assets" / "format-policy.json"
+        policy_path = str(candidate) if candidate.exists() else None
+    if not policy_path:
+        return dict(DEFAULT_FORMAT_POLICY)
+    try:
+        text = Path(policy_path).read_text(encoding="utf-8")
+        if str(policy_path).lower().endswith((".yaml", ".yml")):
+            import yaml  # 可选依赖：域包 YAML；无 PyYAML 时退回纯 magic
+            raw = yaml.safe_load(text)
+        else:
+            raw = json.loads(text)
+    except Exception:  # 配置损坏/缺 PyYAML 时退回纯 magic，不阻断日志分析
+        return dict(DEFAULT_FORMAT_POLICY)
+    if isinstance(raw, dict) and isinstance(raw.get("format_policy"), dict):
+        raw = raw["format_policy"]
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_FORMAT_POLICY)
+    out = dict(DEFAULT_FORMAT_POLICY)
+    out.update({k: raw.get(k) for k in out if k in raw})
+    return out
+
+
+def active_format_policy():
+    """按 env 路径缓存；mtime 变化自动重载（回归/构建同一进程可换策略）。"""
+    path = os.environ.get("SKILL_FORMAT_POLICY")
+    if not path:
+        candidate = Path(__file__).resolve().parent.parent / "assets" / "format-policy.json"
+        path = str(candidate) if candidate.exists() else ""
+    mtime = None
+    if path:
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            mtime = None
+    if (_POLICY_STATE["path"] != path or _POLICY_STATE["mtime"] != mtime
+            or _POLICY_STATE["policy"] is None):
+        _POLICY_STATE.update(path=path, mtime=mtime, policy=load_format_policy(path or None))
+    return _POLICY_STATE["policy"]
+
+
+def _matches_any(name: str, patterns) -> bool:
+    low = str(name).lower()
+    for pattern in patterns or []:
+        if fnmatch.fnmatchcase(low, str(pattern).lower()):
+            return True
+    return False
 BINARY_SUFFIXES = {".pcap", ".pcapng", ".cap", ".bin", ".raw", ".img",
                    ".exe", ".dll", ".so", ".o", ".a", ".lib", ".class", ".pyc",
                    ".db", ".sqlite", ".sqlite3"}
@@ -185,10 +244,16 @@ def classify_bytes(name: str, head: bytes):
     if not head:
         return {"kind": "empty"}
 
-    # 1) 名称权威层：密文/私有格式、OOXML 容器、已知归档后缀
-    if any(h in low for h in CIPHERED_HINTS):
+    # 1) 名称权威层：域包策略优先；core 默认不按文件名判密文
+    policy = active_format_policy()
+    force_text = _matches_any(name, policy.get("force_text"))
+    force_opaque = _matches_any(name, policy.get("force_opaque"))
+    opaque_name = _matches_any(name, policy.get("opaque_name_patterns"))
+    if force_text:
+        pass  # 域包显式声明为文本：继续走 magic/内容判断，不再按名称判密文
+    elif force_opaque or opaque_name:
         return {"kind": "ciphered", "subtype": "vendor",
-                "note": "密文/私有格式，需专用工具人工解析"}
+                "note": "域包声明为密文/私有格式，需专用工具人工解析"}
     if low.endswith(CONTAINER_DOC_SUFFIXES):
         suf = low.rsplit(".", 1)[-1]
         out = {"kind": "container_doc", "subtype": suf}

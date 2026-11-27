@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from .provenance import (attach_provenance, audit_provenance, locked_values,
@@ -232,12 +233,18 @@ def _parse_cases(text: str) -> list[dict[str, Any]]:
             if "应排除" in expected or "排除本故障" in expected:
                 negative = True
         phenomenon = re.search(r"故障现象[^\n]*[：:]\s*([^\n]+)", block)
-        packages = re.findall(r"([^\n（()]+\.(?:7z|zip|tar\.gz|tgz|tar|gz|log(?:\.\w+)?))", block, re.I)
+        package_line = re.search(r"日志包[^\n：:]*[：:]\s*([^\n]+)", block)
+        packages: list[str] = []
+        if package_line:
+            for raw in re.split(r"[；;、,，]", package_line.group(1)):
+                name = raw.strip().strip("。.；;，, ")
+                if name and not name.startswith("必填"):
+                    packages.append(_one_line(name))
         cases.append({"id": match.group(1).upper(), "kind": "negative" if negative else "positive",
                       "description": phenomenon.group(1).strip() if phenomenon else expected,
                       "expected_root_cause": "" if negative else expected,
                       "expected_text": expected, "evidence": [],
-                      "packages": [_one_line(x) for x in packages]})
+                      "packages": packages})
     return cases
 
 
@@ -769,6 +776,34 @@ def compile_profile(spec: dict[str, Any], skill_name: str) -> dict[str, Any]:
     return profile
 
 
+_RULE_LINT = None
+
+
+def _semantic_lint(spec: dict[str, Any]) -> dict[str, Any]:
+    """把工坊规格映射成 fault-profile 后执行 R2 的 10 类语义 lint。"""
+    global _RULE_LINT
+    if _RULE_LINT is None:
+        import importlib.util
+        path = (Path(__file__).resolve().parent.parent /
+                "meta/bbu-fault-skill-builder/scripts/rule_lint.py")
+        mod_spec = importlib.util.spec_from_file_location("bbu_rule_lint", path)
+        if mod_spec is None or mod_spec.loader is None:
+            return {"ok": True, "issues": [], "counts": {}}
+        module = importlib.util.module_from_spec(mod_spec)
+        mod_spec.loader.exec_module(module)
+        _RULE_LINT = module
+    profile = {
+        "analysis": {"steps": [{"rules": spec.get("evidence_rules") or []}]},
+        "root_causes": spec.get("root_causes") or [],
+        "temporal": spec.get("temporal") or [],
+    }
+    try:
+        return _RULE_LINT.lint_profile(profile)
+    except Exception as exc:  # noqa: BLE001 - lint 自身错误不能阻断工坊保存
+        return {"ok": True, "issues": [], "error": f"{type(exc).__name__}: {exc}",
+                "counts": {}}
+
+
 def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
     _normalize_spec(spec)
     errors: list[dict[str, str]] = []
@@ -810,11 +845,11 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             issue(warnings, root["id"], f"根因“{root['name']}”缺少故障机理")
     kinds = {case.get("kind") for case in spec.get("cases") or []}
     if "positive" not in kinds:
-        issue(warnings, "cases", "文本中没有可识别的故障正例")
-        questions.append({"field": "cases", "question": "请补充至少一个故障正例，并写明期望根因和关键证据。", "blocking": False})
+        issue(warnings, "cases", "文本中没有可识别的故障案例")
+        questions.append({"field": "cases", "question": "请补充至少一个故障案例，并写明期望根因和关键证据。", "blocking": False})
     if "negative" not in kinds:
-        issue(warnings, "cases", "文本中没有可识别的正常/反例")
-        questions.append({"field": "cases", "question": "请补充一个正常或易混淆反例，防止规则误命中。", "blocking": False})
+        issue(warnings, "cases", "文本中没有可识别的正常案例")
+        questions.append({"field": "cases", "question": "请补充一个正常案例或易混淆案例，防止规则误命中。", "blocking": False})
     for item in spec.get("questions") or []:
         if isinstance(item, dict) and _one_line(item.get("question")):
             questions.append({"field": _one_line(item.get("field")) or "general",
@@ -832,6 +867,12 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
             issue(warnings, "recipe", "配方未登记正例样本，不能据此声称已验证")
         if recipe.get("trigger_matched") is False:
             issue(warnings, "recipe", "所选配方的触发词未在资料中出现；请确认设备/单板/版本范围，避免套用不适用规则")
+    lint = _semantic_lint(spec)
+    for item in lint.get("issues") or []:
+        if item.get("severity") == "error":
+            issue(errors, item.get("field_path") or "rule", str(item.get("message") or "规则语义错误"))
+        else:
+            issue(warnings, item.get("field_path") or "rule", str(item.get("message") or "规则语义警告"))
     # 去重，限制一次最多四个问题。
     prov = audit_provenance(spec)
     for path in prov.get("missing") or []:
@@ -850,7 +891,9 @@ def audit_spec(spec: dict[str, Any]) -> dict[str, Any]:
                        "cases": len(spec.get("cases") or []), "log_sources": len(spec["log_sources"]),
                        "provenance_coverage": prov.get("coverage"),
                        "provenance_missing": len(prov.get("missing") or [])},
-            "provenance": prov}
+            "provenance": prov,
+            "semantic_lint": {"ok": lint.get("ok"), "counts": lint.get("counts") or {},
+                              "issues": lint.get("issues") or []}}
 
 
 def public_spec(spec: dict[str, Any]) -> dict[str, Any]:

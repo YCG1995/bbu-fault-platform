@@ -13,26 +13,57 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import threading
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import yaml
 
 from . import __version__, updater
-from .accounts import (activate_invite, create_invite, list_invites as list_invites_service,
+from .accounts import (ROLES, activate_invite, create_invite,
+                       list_invites as list_invites_service,
                        normalize_status, public_user, register_user, revoke_invite)
 from .assistant import AssistantError, AssistantService
 from .backups import BackupManager
-from .ai import AIGateway
+from .ai import (
+    AIGateway,
+    AIError,
+    _anthropic_url,
+    _openai_url,
+    browser_relay_server_fallback,
+    browser_relay_timeouts,
+    browser_models_spec,
+    browser_test_spec,
+    build_browser_relay_spec,
+    list_models,
+    parse_model_names,
+    parse_test_reply,
+)
 from .config import Config
 from .db import Database
+from .relay import (
+    RelayAbsentError,
+    RelayCallConsumedError,
+    RelayCallExpiredError,
+    RelayCrossUserError,
+    RelayDisabledError,
+    RelayError,
+    RelayExecError,
+    RelayHub,
+    RelayNotFoundError,
+    RelayOversizeError,
+    RelaySpec,
+    RelayWindowEvictedError,
+    validate_browser_url,
+)
+
 from .evaluation import EvaluationService, RealCaseStore
 from .evidence_store import EvidenceStore
 from .migration import (
@@ -43,10 +74,17 @@ from .migration import (
 )
 from .mcp_server import MCPService
 from .metrics import collect as collect_metrics, prometheus as prometheus_metrics
+from .system_metrics import snapshot as system_snapshot
 from .model_roles import MODEL_ROLES
+from .netguard import OutboundPolicyError, endpoint_target
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
+from .kb_service import KBService, MAX_BACKUP_TOTAL_BYTES
+from .kb_eval import KBEvaluator
+from .kb_duplicates import KBDuplicates
+from .kb_report import KBReport
+from .kb_ingest import preview_import_file, normalize_mapping
 from .pipeline import TaskPipeline
 from .review import ReviewService
 from .agent import BoundedAgent
@@ -66,6 +104,8 @@ from .security import (ROLE_RANK, SESSION_COOKIE, SecretBox, bootstrap_admin, ch
 from .skills import SkillRegistry, SkillRunner, parse_frontmatter
 from .session import DiagnosticSession, RevisionConflict
 from .tool_contract import ToolPolicy
+from .trace import TraceStore
+from .usage import UsageStore
 from .storage import save_upload
 from .util import (CST, iso_now, new_id, read_json, safe_filename, sha256_file, truncate,
                    unique_path, within_directory, write_json)
@@ -76,6 +116,8 @@ from .task_storage import TaskStorageService
 
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_LOCK = threading.Lock()
+KB_CHAT_RATE: dict[int, list[float]] = {}
+KB_CHAT_RATE_LOCK = threading.Lock()
 
 
 def _loads(text: str | None, default: Any) -> Any:
@@ -136,9 +178,6 @@ def _auth(app: "App", req, minimum: str = "engineer", csrf: bool = True,
     req.user = {"id": session["user_id"], "username": session["username"],
                 "display_name": session["display_name"], "role": session["role"],
                 "must_change": session["must_change"]}
-    if session["must_change"] and not allow_password_change:
-        raise HTTPError(403, "请先修改初始密码",
-                        {"code": "password_change_required"})
     if not check_role(req.user, minimum):
         raise HTTPError(403, "权限不足")
     if csrf and req.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -293,15 +332,32 @@ class App:
                                       manifest_mode=str(config.get("skill_manifest_mode", "shadow")))
         self.tools = ToolPolicy(self.db, config)
         self.runner = SkillRunner(config, db=self.db, policy=self.tools)
-        self.gateway = AIGateway(self.db, config, secret_box=self.secret_box)
+        self.relay = RelayHub(self.db, config)
+        self.relay_tests: dict[str, dict[str, Any]] = {}
+        self.relay_tests_lock = threading.Lock()
+        self.gateway = AIGateway(self.db, config, secret_box=self.secret_box,
+                                 relay=self.relay)
+        self.traces = TraceStore(self.db, config)
+        self.kb = KBService(self.db, config, gateway=self.gateway, traces=self.traces)
+        self.kb_eval = KBEvaluator(self.kb)
+        self.kb_duplicates = KBDuplicates(self.kb)
+        self.kb_report = KBReport(self.kb)
+        self.usage = UsageStore(self.db, config)
+        self.gateway.on_usage = self._record_llm_usage
+        try:
+            self.traces.cleanup()
+        except Exception:
+            pass
         self.workshop = WorkshopService(self.db, config, self.registry, self.gateway)
-        self.workshop_jobs = WorkshopJobService(self.db, config, self.workshop, self.gateway)
+        self.workshop_jobs = WorkshopJobService(self.db, config, self.workshop, self.gateway,
+                                                traces=self.traces)
         self.storage = TaskStorageService(self.db, config)
         self.backups = BackupManager(self.db, config)
         self.learning = LearningService(self.db, config, self.registry, self.workshop)
         self.pipeline = TaskPipeline(self.db, config, self.registry,
                                      self.gateway, self.runner,
-                                     experiences=self.learning.experiences)
+                                     experiences=self.learning.experiences,
+                                     traces=self.traces, kb=self.kb)
         self.evidence_store = EvidenceStore(self.db)
         self.assistant = AssistantService(self)
         self.mcp = MCPService(self, self.assistant)
@@ -331,6 +387,21 @@ class App:
         self.learning.shutdown()
         self.workshop_jobs.shutdown()
         self.storage.shutdown()
+        try:
+            self.kb.shutdown()
+        except Exception:
+            pass
+        try:
+            self.relay.shutdown()
+        except Exception:
+            pass
+
+    def _record_llm_usage(self, event: dict[str, Any]) -> None:
+        try:
+            self.usage.record(event)
+        except Exception:
+            # 用量统计是旁路，不能影响诊断主流程。
+            pass
 
     # ---------- demo ----------
     def _install_demos(self) -> None:
@@ -372,6 +443,8 @@ class App:
         r.add("GET", r"/api/stats", h_stats)
         r.add("GET", r"/api/metrics", h_metrics)
         r.add("GET", r"/api/metrics/prometheus", h_metrics_prometheus)
+        r.add("GET", r"/api/usage/overview", h_usage_overview)
+        r.add("GET", r"/api/usage/tasks", h_usage_tasks)
         r.add("GET", r"/mcp", h_mcp_http)
         r.add("POST", r"/mcp", h_mcp_http)
         r.add("GET", r"/api/assistant/status", h_assistant_status)
@@ -381,6 +454,82 @@ class App:
               h_assistant_confirm)
         r.add("POST", r"/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/cancel",
               h_assistant_cancel)
+        r.add("GET", r"/api/kb/status", h_kb_status)
+        r.add("GET", r"/api/kb/libraries", h_kb_libraries_list)
+        r.add("POST", r"/api/kb/libraries", h_kb_library_create)
+        r.add("PUT", r"/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)", h_kb_library_update)
+        r.add("POST", r"/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)/archive", h_kb_library_archive)
+        r.add("GET", r"/api/kb/libraries/(?P<kb_id>[A-Za-z0-9_-]+)/backup", h_kb_library_backup)
+        r.add("POST", r"/api/kb/libraries/restore", h_kb_library_restore)
+        r.add("GET", r"/api/kb/operations", h_kb_operations)
+        r.add("GET", r"/api/kb/facets", h_kb_facets)
+        r.add("GET", r"/api/kb/docs", h_kb_docs)
+        r.add("POST", r"/api/kb/docs", h_kb_doc_create)
+        r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_detail)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)", h_kb_case_detail)
+        r.add("PUT", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)", h_kb_case_update)
+        r.add("POST", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/status", h_kb_case_status)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions", h_kb_case_revisions)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/verify", h_kb_case_verify)
+        r.add("GET", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)", h_kb_case_revision)
+        r.add("POST", r"/api/kb/cases/(?P<case_id>[A-Za-z0-9_-]+)/revisions/(?P<revision>[0-9]+)/restore", h_kb_case_restore)
+        r.add("GET", r"/api/kb/search", h_kb_search)
+        r.add("PUT", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_update)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/status", h_kb_doc_status)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/restore", h_kb_doc_restore_alias)
+        r.add("DELETE", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_delete)
+        r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions", h_kb_doc_versions)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions/"
+              r"(?P<version_id>[A-Za-z0-9_-]+)/restore", h_kb_doc_restore)
+        r.add("GET", r"/api/kb/files/(?P<file_id>[A-Za-z0-9_-]+)", h_kb_file)
+        r.add("POST", r"/api/kb/import/preview", h_kb_import_preview)
+        r.add("POST", r"/api/kb/import", h_kb_import)
+        r.add("GET", r"/api/kb/import/jobs", h_kb_jobs)
+        r.add("GET", r"/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)", h_kb_job)
+        r.add("POST", r"/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)/cancel", h_kb_job_cancel)
+        r.add("POST", r"/api/kb/import/jobs/rollback", h_kb_jobs_rollback)
+        r.add("POST", r"/api/kb/import/jobs/delete", h_kb_jobs_delete)
+        r.add("POST", r"/api/kb/import/jobs/retry", h_kb_jobs_retry)
+        r.add("GET", r"/api/kb/drafts", h_kb_drafts)
+        r.add("GET", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_kb_draft)
+        r.add("PUT", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_kb_draft_update)
+        r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/approve", h_kb_draft_approve)
+        r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/reject", h_kb_draft_reject)
+        r.add("POST", r"/api/kb/chat", h_kb_chat)
+        r.add("POST", r"/api/kb/feedback", h_kb_feedback)
+        r.add("POST", r"/api/kb/reindex", h_kb_reindex)
+        r.add("GET", r"/api/kb/queries", h_kb_queries)
+        r.add("POST", r"/api/kb/sample", h_kb_sample)
+        r.add("GET", r"/api/kb/audit", h_kb_audit)
+        r.add("POST", r"/api/kb/export/report", h_kb_export_report)
+        r.add("GET", r"/api/kb/duplicates", h_kb_duplicates)
+        r.add("GET", r"/api/kb/duplicates/preview", h_kb_duplicate_preview)
+        r.add("POST", r"/api/kb/duplicates/merge", h_kb_duplicate_merge)
+        r.add("GET", r"/api/kb/eval/sets", h_kb_eval_sets)
+        r.add("POST", r"/api/kb/eval/sets", h_kb_eval_set_create)
+        r.add("GET", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)", h_kb_eval_set)
+        r.add("DELETE", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)", h_kb_eval_set_delete)
+        r.add("POST", r"/api/kb/eval/sets/(?P<set_id>[A-Za-z0-9_-]+)/run", h_kb_eval_run)
+        r.add("GET", r"/api/kb/eval/runs", h_kb_eval_runs)
+        r.add("GET", r"/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)", h_kb_eval_run_get)
+        r.add("GET", r"/api/kb/eval/runs/(?P<run_id>[A-Za-z0-9_-]+)/export", h_kb_eval_export)
+        r.add("GET", r"/api/kb/terms", h_kb_terms)
+        r.add("POST", r"/api/kb/terms", h_kb_term_create)
+        r.add("GET", r"/api/kb/terms/export", h_kb_terms_export)
+        r.add("POST", r"/api/kb/terms/import", h_kb_terms_import)
+        r.add("PUT", r"/api/kb/terms/(?P<term_id>[0-9]+)", h_kb_term_update)
+        r.add("DELETE", r"/api/kb/terms/(?P<term_id>[0-9]+)", h_kb_term_delete)
+        r.add("GET", r"/api/kb/stats", h_kb_stats)
+        r.add("GET", r"/api/kb/reviews/auto-publish/dry-run", h_kb_auto_publish_dry_run)
+        r.add("GET", r"/api/kb/reviews", h_kb_reviews)
+        r.add("GET", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)", h_kb_review)
+        r.add("POST", r"/api/kb/reviews", h_kb_review_create)
+        r.add("POST", r"/api/kb/reviews/run", h_kb_reviews_run)
+        r.add("POST", r"/api/kb/reviews/batch-decision", h_kb_reviews_batch_decision)
+        r.add("POST", r"/api/kb/reviews/batch-retry", h_kb_reviews_batch_retry)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/decision", h_kb_review_decision)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/auto-publish", h_kb_auto_publish)
+        r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/retry", h_kb_review_retry)
         r.add("GET", r"/api/mcp/info", h_mcp_info)
         r.add("POST", r"/api/mcp/token", h_mcp_token_create)
         r.add("DELETE", r"/api/mcp/token", h_mcp_token_delete)
@@ -442,6 +591,10 @@ class App:
         r.add("POST", r"/api/skills/(?P<name>[A-Za-z0-9_-]+)/manifest/sign",
               h_skill_manifest_sign)
         r.add("GET", r"/api/tool-calls", h_tool_calls)
+        r.add("GET", r"/api/traces", h_traces)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/summary", h_trace_summary)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/events", h_trace_events)
+        r.add("GET", r"/api/traces/(?P<run_id>[Tt][Rr][A-Za-z0-9_-]+)/download", h_trace_download)
         r.add("GET", r"/api/tool-approvals", h_tool_approvals)
         r.add("POST", r"/api/tasks/(?P<task_id>[A-Za-z0-9_-]+)/tool-approvals",
               h_tool_approval_create)
@@ -463,6 +616,7 @@ class App:
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/analyze", h_workshop_analyze)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/refine", h_workshop_refine)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/check", h_workshop_check)
+        r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/rules/try", h_workshop_rules_try)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/verify-rules", h_workshop_verify_rules)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/build", h_workshop_build)
         r.add("POST", r"/api/workshop/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/publish", h_workshop_publish)
@@ -482,9 +636,17 @@ class App:
         r.add("POST", r"/api/models", h_model_create)
         r.add("PUT", r"/api/models/(?P<model_id>[0-9]+)", h_model_update)
         r.add("DELETE", r"/api/models/(?P<model_id>[0-9]+)", h_model_delete)
+        r.add("POST", r"/api/models/discover", h_model_discover)
         r.add("POST", r"/api/models/test", h_model_test_draft)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/test", h_model_test)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/capabilities", h_model_capabilities)
+        r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/relay-test", h_model_relay_test)
+        r.add("GET", r"/api/models/(?P<model_id>[0-9]+)/relay-test/(?P<test_id>[A-Za-z0-9_-]+)",
+              h_model_relay_test_get)
+        r.add("GET", r"/api/relay/status", h_relay_status)
+        r.add("GET", r"/api/relay/calls", h_relay_calls)
+        r.add("POST", r"/api/relay/calls/(?P<call_id>[A-Za-z0-9_-]+)/result", h_relay_result)
+        r.add("POST", r"/api/relay/release", h_relay_release)
 
         r.add("GET", r"/api/users", h_users)
         r.add("GET", r"/api/users/invites", h_invites)
@@ -542,6 +704,7 @@ def h_public_config(app: App, req):
                           "allow_engineer_workshop": bool(app.config.get("allow_engineer_workshop", True)),
                           "allow_self_register": bool(app.config.get("allow_self_register", False)),
                           "assistant_enabled": bool(app.config.get("assistant_enabled", True)),
+                          "kb_enabled": bool(app.config.get("kb_enabled", True)),
                           "mcp_endpoint": "/mcp",
                           "personal_model_base_url": app.config.get("personal_model_base_url"),
                           "personal_model_default": app.config.get("personal_model_default"),
@@ -579,8 +742,11 @@ def h_login(app: App, req):
 
 def h_logout(app: App, req):
     token = _cookie(req, SESSION_COOKIE)
+    session = get_session(app.db, token) if token else None
     if token:
         delete_session(app.db, token)
+    if session and hasattr(app, "relay"):
+        app.relay.cancel_user(session["user_id"])
     return response_json({"ok": True},
                          headers={"Set-Cookie": _set_cookie(
                              "", 0, app.config.cookie_secure)})
@@ -716,7 +882,7 @@ def h_global_search(app: App, req):
         f"SELECT id,title,status,created_at FROM tasks WHERE (title LIKE ? OR id LIKE ?){task_where} "
         "ORDER BY created_at DESC LIMIT 6", tuple(task_args))
     cases = []
-    if user["role"] != "reviewer":
+    if True:
         case_where = "" if user["role"] == "admin" else " AND (created_by='' OR created_by=?)"
         case_args: list[Any] = [like, like, like]
         if user["role"] != "admin":
@@ -725,7 +891,7 @@ def h_global_search(app: App, req):
             f"SELECT id,name,title,status,split FROM real_cases WHERE (name LIKE ? OR title LIKE ? OR id LIKE ?){case_where} "
             "ORDER BY updated_at DESC LIMIT 6", tuple(case_args))
     skills = []
-    if user["role"] != "reviewer":
+    if True:
         skills = app.db.all(
             "SELECT name,title,status,version FROM skills WHERE name LIKE ? OR title LIKE ? "
             "ORDER BY name LIMIT 6", (like, like))
@@ -793,7 +959,8 @@ def _draft_files(row: dict) -> list[dict]:
 def _draft_public(row: dict) -> dict:
     return {
         "id": row["id"], "title": row["title"], "description": row["description"],
-        "mode": row["mode"], "model_override": row.get("model_override"),
+        "mode": row["mode"], "skill_name": row.get("skill_name") or "",
+        "model_override": row.get("model_override"),
         "include_canary": bool(row.get("include_canary")),
         "files": [{k: f.get(k) for k in ("id", "name", "size", "sha256")}
                   for f in _draft_files(row)],
@@ -802,10 +969,7 @@ def _draft_public(row: dict) -> dict:
 
 
 def _draft_edit_user(app: App, req) -> dict:
-    user = _auth(app, req)
-    if user["role"] not in ("engineer", "admin"):
-        raise HTTPError(403, "专家账号不能创建诊断草稿")
-    return user
+    return _auth(app, req)
 
 
 def h_task_draft_current(app: App, req):
@@ -821,7 +985,15 @@ def _draft_payload(app: App, req) -> dict:
     description = str(data.get("description") or "").strip()
     if len(description) > 20000:
         raise HTTPError(400, "故障描述过长（上限 20000 字）")
-    mode = data.get("mode") if data.get("mode") in ("fast", "deep") else "fast"
+    mode = data.get("mode") if data.get("mode") in ("fast", "deep", "skill") else "fast"
+    skill_name = str(data.get("skill_name") or "").strip()
+    if mode != "skill":
+        skill_name = ""
+    elif skill_name:
+        available = {r["name"] for r in app.db.all(
+            "SELECT name FROM skills WHERE status IN ('ready','degraded')")}
+        if skill_name not in available:
+            raise HTTPError(400, "指定技能不存在或不可用")
     model_override = data.get("model_override")
     if model_override in ("", None):
         model_override = None
@@ -832,7 +1004,8 @@ def _draft_payload(app: App, req) -> dict:
             raise HTTPError(400, "model_override 必须是整数") from exc
     include_canary = bool(data.get("include_canary")) and app and True
     return {"title": title, "description": description, "mode": mode,
-            "model_override": model_override, "include_canary": 1 if include_canary else 0}
+            "skill_name": skill_name, "model_override": model_override,
+            "include_canary": 1 if include_canary else 0}
 
 
 def h_task_draft_create(app: App, req):
@@ -841,10 +1014,11 @@ def h_task_draft_create(app: App, req):
     draft_id = new_id("D")
     now = iso_now()
     app.db.execute(
-        "INSERT INTO task_drafts(id,user_id,title,description,mode,model_override,"
-        "include_canary,files_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO task_drafts(id,user_id,title,description,mode,skill_name,model_override,"
+        "include_canary,files_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (draft_id, user["id"], payload["title"], payload["description"], payload["mode"],
-         payload["model_override"], 1 if user["role"] == "admin" and payload["include_canary"] else 0,
+         payload["skill_name"], payload["model_override"],
+         1 if user["role"] == "admin" and payload["include_canary"] else 0,
          "[]", now, now))
     app.db.audit(user["id"], user["username"], "task.draft_create", draft_id, {}, req.ip)
     row = app.db.one("SELECT * FROM task_drafts WHERE id=?", (draft_id,))
@@ -856,9 +1030,10 @@ def h_task_draft_update(app: App, req, draft_id: str):
     row = _task_draft_for(app, user, draft_id)
     payload = _draft_payload(app, req)
     app.db.execute(
-        "UPDATE task_drafts SET title=?,description=?,mode=?,model_override=?,include_canary=?,"
-        "updated_at=? WHERE id=?",
-        (payload["title"], payload["description"], payload["mode"], payload["model_override"],
+        "UPDATE task_drafts SET title=?,description=?,mode=?,skill_name=?,model_override=?,"
+        "include_canary=?,updated_at=? WHERE id=?",
+        (payload["title"], payload["description"], payload["mode"], payload["skill_name"],
+         payload["model_override"],
          1 if user["role"] == "admin" and payload["include_canary"] else 0,
          iso_now(), row["id"]))
     row = app.db.one("SELECT * FROM task_drafts WHERE id=?", (row["id"],))
@@ -886,8 +1061,8 @@ def h_task_draft_file(app: App, req, draft_id: str):
         raise HTTPError(400, "请选择要上传的日志包")
     item = uploads[0]
     name = safe_filename(item.filename)
-    if not re.search(r"\.(zip|tar\.gz|tgz)$", name, re.IGNORECASE):
-        raise HTTPError(400, "仅支持 zip / tar.gz / tgz 日志包")
+    if not re.search(r"\.(zip|tar|tar\.gz|tgz|7z|gz|bz2|xz|zst)$", name, re.IGNORECASE):
+        raise HTTPError(400, "仅支持 zip / tar / tar.gz / tgz / 7z / gz / bz2 / xz / zst 日志包")
     if any(f.get("name") == item.filename and f.get("size") == item.size for f in files):
         for other in uploads[1:]:
             try: os.unlink(other.path)
@@ -936,8 +1111,6 @@ def h_task_draft_file_delete(app: App, req, draft_id: str, file_id: str):
 
 def h_task_create(app: App, req):
     user = _auth(app, req)
-    if user["role"] not in ("engineer", "admin"):
-        raise HTTPError(403, "专家账号仅处理被分配的复核任务，不能创建诊断任务")
     max_mb = int(app.config.get("max_upload_mb", 2048))
     fields, files = req.parse_multipart(max_mb * 1024 * 1024, max_file_bytes=max_mb * 1024 * 1024)
     description = (fields.get("description") or "").strip()
@@ -948,8 +1121,20 @@ def h_task_create(app: App, req):
     supplied_title = (fields.get("title") or "").strip()
     title = supplied_title or truncate(description.splitlines()[0], 60)
     title_source = "manual" if supplied_title else "deterministic"
-    mode = fields.get("mode") if fields.get("mode") in ("fast", "deep") else "fast"
+    mode = fields.get("mode") if fields.get("mode") in ("fast", "deep", "skill") else "fast"
     include_canary = fields.get("include_canary") in ("1", "true", "on") and user["role"] == "admin"
+    skill_name = str(fields.get("skill_name") or "").strip()
+    if mode == "skill":
+        if not skill_name:
+            raise HTTPError(400, "指定技能模式必须选择一个技能")
+        available = {r["name"] for r in app.db.all(
+            "SELECT name FROM skills WHERE status IN ('ready','degraded')")}
+        if skill_name not in available:
+            raise HTTPError(400, "指定技能不存在或不可用：" + skill_name)
+        selected_skills = [skill_name]
+    else:
+        skill_name = ""
+        selected_skills = []
     model_override = None
     if fields.get("model_id"):
         try:
@@ -993,7 +1178,8 @@ def h_task_create(app: App, req):
         (task_id, user["id"], title, description, title_source, "queued", "queued", 0, mode,
          model_override, json.dumps(inputs, ensure_ascii=False),
          json.dumps({"mode": mode, "model_override": model_override,
-                     "include_canary": include_canary}, ensure_ascii=False), now))
+                     "include_canary": include_canary, "skill_name": skill_name,
+                     "skill_names": selected_skills}, ensure_ascii=False), now))
     app.worker.submit(task_id)
     if draft_row:
         shutil.rmtree(app.config.data_dir / "draft_uploads" / draft_row["id"], ignore_errors=True)
@@ -1192,9 +1378,13 @@ def h_task_evidence(app: App, req, task_id: str):
         limit = max(1, min(1000, int(req.query.get("limit", 300))))
     except ValueError:
         limit = 300
-    items = app.evidence_store.list(task_id, limit)
+    try:
+        offset = max(0, int(req.query.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    items = app.evidence_store.list(task_id, limit, offset)
     return response_json({"items": items, "total": app.evidence_store.count(task_id),
-                          "limit": limit})
+                          "limit": limit, "offset": offset})
 
 
 def _supplement_answers(fields: dict[str, str]) -> dict[str, str]:
@@ -1698,6 +1888,9 @@ def h_task_report(app: App, req, task_id: str):
 def h_task_review(app: App, req, task_id: str):
     task = _task_for(app, req, task_id)
     user = _auth(app, req)
+    if user["role"] == "reviewer" and task.get("user_id") == user["id"] \
+            and task.get("reviewer_id") != user["id"]:
+        raise HTTPError(403, "不能复核自己创建的任务")
     payload = req.json()
     service = ReviewService(app.db, app.config.data_dir)
     try:
@@ -1780,6 +1973,51 @@ def h_metrics_prometheus(app: App, req):
     body = prometheus_metrics(collect_metrics(app)).encode("utf-8")
     return 200, {"Content-Type": "text/plain; version=0.0.4; charset=utf-8",
                  "Cache-Control": "no-store"}, body
+
+
+def _usage_scope(app: App, req):
+    user = _auth(app, req, csrf=False)
+    raw = str(req.query.get("user_id") or "").strip()
+    if raw:
+        try:
+            selected = int(raw)
+        except ValueError as exc:
+            raise HTTPError(400, "user_id 非法") from exc
+        if user["role"] != "admin" and selected != int(user["id"]):
+            raise HTTPError(403, "只能查看自己的用量")
+        return user, selected, False
+    if user["role"] == "admin":
+        return user, None, True
+    return user, int(user["id"]), False
+
+
+def _usage_days(req, default: int = 30) -> int:
+    try:
+        days = int(str(req.query.get("days") or default))
+    except ValueError as exc:
+        raise HTTPError(400, "days 非法") from exc
+    if days < 1 or days > 365:
+        raise HTTPError(400, "days 必须在 1-365 之间")
+    return days
+
+
+def h_usage_overview(app: App, req):
+    _user, user_id, all_users = _usage_scope(app, req)
+    return response_json(app.usage.overview(
+        days=_usage_days(req), user_id=user_id, all_users=all_users,
+        include_directory=bool(_user["role"] == "admin")))
+
+
+def h_usage_tasks(app: App, req):
+    _user, user_id, all_users = _usage_scope(app, req)
+    try:
+        page = int(str(req.query.get("page") or 1))
+        page_size = int(str(req.query.get("page_size") or 20))
+    except ValueError as exc:
+        raise HTTPError(400, "分页参数非法") from exc
+    return response_json(app.usage.task_rows(
+        days=_usage_days(req), user_id=user_id, all_users=all_users,
+        page=page, page_size=page_size))
 
 
 def h_stats(app: App, req):
@@ -2213,11 +2451,53 @@ def h_recovery_observe(app: App, req, run_id: str):
     except ValueError as exc:
         raise HTTPError(404, str(exc)) from exc
     task = _task_for(app, req, run["task_id"])
-    data = req.json()
-    after = data.get("after") if isinstance(data.get("after"), dict) else data
+    user = _auth(app, req)
+    after = None
+    upload = None
+    if "multipart/form-data" in (req.headers.get("Content-Type") or "").lower():
+        max_mb = min(64, int(app.config.get("max_upload_mb", 2048)))
+        fields, files = req.parse_multipart(max_mb * 1024 * 1024,
+                                            max_file_bytes=max_mb * 1024 * 1024)
+        try:
+            payload = json.loads(fields.get("after") or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPError(400, "恢复后回传内容不是合法 JSON") from exc
+        after = payload.get("after") if isinstance(payload.get("after"), dict) else payload
+        upload = files[0] if files else None
+    else:
+        data = req.json()
+        after = data.get("after") if isinstance(data.get("after"), dict) else data
     if not after:
         raise HTTPError(400, "缺少恢复后只读回传内容")
-    user = _auth(app, req)
+    if upload:
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with open(upload.path, "rb") as fh:
+                raw = fh.read(1024 * 1024)
+                digest.update(raw)
+                total = len(raw)
+                while True:
+                    chunk = fh.read(512 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    total += len(chunk)
+        except OSError as exc:
+            raise HTTPError(400, "无法读取回传文件") from exc
+        text = raw.decode("utf-8", errors="replace")
+        evidence = after.get("evidence") if isinstance(after.get("evidence"), list) else []
+        if not evidence:
+            evidence = [{"rule_id": "", "file": upload.filename, "text": "", "hit": True}]
+        first = dict(evidence[0])
+        first["file"] = upload.filename or first.get("file") or "after-evidence.txt"
+        first["sha256"] = digest.hexdigest()
+        first["size"] = total
+        first["uploaded"] = True
+        if not first.get("text"):
+            first["text"] = "\n".join(text.splitlines()[:60])[:4000]
+        evidence[0] = first
+        after["evidence"] = evidence
     try:
         run = recovery_observe(app.db, run_id, after, user["username"])
     except ValueError as exc:
@@ -2352,6 +2632,59 @@ def h_skill_manifest_sign(app: App, req, name: str):
                           "signature": result.get("signature")})
 
 
+def _trace_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item.pop("trace_path_abs", None)
+    kind = str(item.get("kind") or "")
+    ref_id = str(item.get("ref_id") or "")
+    meta = item.get("meta") or {}
+    title = ""
+    if kind == "diagnosis":
+        task = app.db.one("SELECT title FROM tasks WHERE id=?", (ref_id,)) or {}
+        title = str(task.get("title") or "")
+        item["ref_url"] = f"#/tasks/{ref_id}"
+    elif kind == "workshop":
+        draft_id = str(meta.get("draft_id") or "")
+        draft = app.db.one("SELECT name FROM workshop_drafts WHERE id=?", (draft_id,)) or {}
+        title = str(draft.get("name") or "")
+        item["ref_url"] = "#/workshop"
+        item["draft_id"] = draft_id
+    elif kind == "kb":
+        action = str(meta.get("action") or "")
+        if action == "import":
+            job = app.db.one(
+                "SELECT name FROM kb_import_files WHERE job_id=? AND name<>'' "
+                "ORDER BY rowid LIMIT 1", (ref_id,)) or {}
+            title = str(job.get("name") or f"导入任务 {ref_id}")
+            item["ref_url"] = "#/kb/docs?tab=import"
+        elif action == "review":
+            title = f"审核 {meta.get('target_type') or ''} {meta.get('target_id') or ''}"
+            item["ref_url"] = "#/kb/docs?tab=review"
+        elif action in {"library_backup", "library_restore"}:
+            lib = app.db.one("SELECT name FROM kb_libraries WHERE id=?", (ref_id,)) or {}
+            label = "备份" if action == "library_backup" else "恢复"
+            title = f"知识库{label}：{lib.get('name') or ref_id}"
+            item["ref_url"] = "#/kb/docs?tab=libraries"
+        else:
+            title = "知识库检索"
+            item["ref_url"] = "#/kb"
+    item["ref_title"] = title or str(meta.get("title") or meta.get("draft_name") or "")
+    return item
+
+
+def h_traces(app: App, req):
+    _admin(app, req, csrf=False)
+    kind = str(req.query.get("kind") or "").strip()
+    ref_id = str(req.query.get("ref_id") or "").strip()
+    status = str(req.query.get("status") or "").strip()
+    try:
+        limit = max(1, min(200, int(req.query.get("limit") or 60)))
+    except ValueError:
+        limit = 60
+    rows = app.traces.list(kind=kind, ref_id=ref_id, status=status, limit=limit)
+    return response_json({"items": [_trace_public(app, row) for row in rows]})
+
+
 def h_tool_calls(app: App, req):
     user = _auth(app, req, csrf=False)
     task_id = str(req.query.get("task_id") or "").strip()
@@ -2366,6 +2699,59 @@ def h_tool_calls(app: App, req):
         raise HTTPError(400, "limit 必须是整数") from exc
     return response_json({"items": app.tools.list_calls(task_id, limit_n),
                           "mode": app.tools.mode})
+
+
+def _trace_for(app: App, run_id: str) -> dict[str, Any]:
+    run = app.traces.get(run_id)
+    if not run:
+        raise HTTPError(404, "轨迹不存在")
+    return run
+
+
+def h_trace_summary(app: App, req, run_id: str):
+    _admin(app, req, csrf=False)
+    try:
+        data = app.traces.summary(run_id)
+    except KeyError as exc:
+        raise HTTPError(404, "轨迹不存在") from exc
+    data["run"] = _trace_public(app, data["run"])
+    return response_json(data)
+
+
+def h_trace_events(app: App, req, run_id: str):
+    _admin(app, req, csrf=False)
+    try:
+        after = max(0, int(req.query.get("after") or 0))
+    except ValueError:
+        after = 0
+    try:
+        limit = max(1, min(1000, int(req.query.get("limit") or 300)))
+    except ValueError:
+        limit = 300
+    type_filter = str(req.query.get("type") or "").strip()
+    phase = str(req.query.get("phase") or "").strip()
+    only_failed = str(req.query.get("only_failed") or "") in ("1", "true", "yes")
+    try:
+        data = app.traces.events(run_id, after=after, limit=limit,
+                                 type_filter=type_filter, phase=phase,
+                                 only_failed=only_failed)
+    except KeyError as exc:
+        raise HTTPError(404, "轨迹不存在") from exc
+    data["run"] = _trace_public(app, data["run"])
+    return response_json(data)
+
+
+def h_trace_download(app: App, req, run_id: str):
+    actor = _admin(app, req, csrf=False)
+    run = _trace_for(app, run_id)
+    path = Path(str(run.get("trace_path_abs") or "")).resolve()
+    root = (Path(app.config.data_dir) / "traces").resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPError(404, "轨迹原文不存在")
+    app.db.audit(actor["id"], actor["username"], "trace.download", run_id,
+                 {"size": path.stat().st_size}, req.ip)
+    return response_file(path, "application/x-ndjson; charset=utf-8",
+                         download_name=f"{run_id}.jsonl", inline=False)
 
 
 def h_tool_approvals(app: App, req):
@@ -2545,15 +2931,18 @@ def h_workshop_create(app: App, req):
         raise HTTPError(403, "当前配置只允许管理员创建技能草稿")
     data = req.json()
     async_mode = _async_requested(req)
+    defer_only = str(req.query.get("defer") or "").lower() in ("1", "true", "yes", "on")
     model_override = data.get("model_override") or data.get("model_id")
     try:
+        # 带文件的创建必须先建草稿、再上传文件，避免后台 analyze 在文件到达前
+        # 先按空日志跑完，导致自动案例匹配看不到上传包。
         draft = app.workshop.create_draft(
-            user["id"], data, deferred=async_mode,
+            user["id"], data, deferred=async_mode or defer_only,
             model_override=int(model_override) if model_override else None)
     except ValueError as exc:
         raise HTTPError(400, str(exc)) from exc
     job = None
-    if async_mode:
+    if async_mode and not defer_only:
         try:
             job = app.workshop_jobs.create(
                 user["id"], draft["id"], "analyze",
@@ -2562,8 +2951,9 @@ def h_workshop_create(app: App, req):
             raise _job_error(exc) from exc
     app.db.audit(user["id"], user["username"], "workshop.create", draft["id"],
                  {"name": draft["name"], "recipe_id": draft.get("recipe_id") or "",
-                  "async": async_mode}, req.ip)
-    return response_json({"draft": draft, "job": job}, status=202 if async_mode else 201)
+                  "async": async_mode, "defer": defer_only}, req.ip)
+    return response_json({"draft": draft, "job": job},
+                         status=202 if async_mode and not defer_only else 201)
 
 
 def h_workshop_detail(app: App, req, draft_id: str):
@@ -2611,22 +3001,49 @@ def h_workshop_logs(app: App, req, draft_id: str):
             model_override = int(fields["model_id"])
         except ValueError:
             model_override = None
-    payload = [{"stored_path": str(f.path), "name": f.filename} for f in files]
+    payload = []
+    try:
+        relative_paths = json.loads(fields.get("file_paths") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        relative_paths = []
+    for idx, f in enumerate(files):
+        relative = (str(relative_paths[idx]).strip()
+                    if idx < len(relative_paths) and str(relative_paths[idx]).strip()
+                    else f.filename)
+        payload.append({"stored_path": str(f.path), "name": relative,
+                        "relative_path": relative})
+    auto_cases = str(req.query.get("auto_cases") or fields.get("auto_cases") or "").lower() in (
+        "1", "true", "yes", "on")
     if _async_requested(req):
         try:
             job = app.workshop_jobs.create(
-                user["id"], draft_id, "logs", model_override=model_override, uploads=payload)
+                user["id"], draft_id, "logs", model_override=model_override,
+                uploads=payload, args={"auto_cases": auto_cases})
         except ValueError as exc:
             raise _job_error(exc) from exc
         app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
-                     {"files": len(files), "async": True}, req.ip)
+                     {"files": len(files), "async": True, "auto_cases": auto_cases}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "logs", "files": len(files),
+              "auto_cases": auto_cases})
     try:
-        draft = app.workshop.attach_logs(draft_id, payload, model_override=model_override)
+        draft = app.workshop.attach_logs(draft_id, payload, model_override=model_override,
+                                         trace=trace, auto_cases=auto_cases)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_logs_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_logs_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_logs_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_logs_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
-                 {"files": len(files)}, req.ip)
+                 {"files": len(files), "auto_cases": auto_cases}, req.ip)
     return response_json({"draft": draft})
 
 
@@ -2645,11 +3062,24 @@ def h_workshop_analyze(app: App, req, draft_id: str):
         app.db.audit(user["id"], user["username"], "workshop.analyze", draft_id,
                      {"async": True}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "analyze"})
     try:
         draft = app.workshop.analyze(
-            draft_id, model_override=int(model_override) if model_override else None)
+            draft_id, model_override=int(model_override) if model_override else None,
+            trace=trace)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_analyze_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_analyze_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_analyze_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_analyze_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.analyze", draft_id, {}, req.ip)
     return response_json({"draft": draft})
 
@@ -2670,11 +3100,24 @@ def h_workshop_refine(app: App, req, draft_id: str):
         app.db.audit(user["id"], user["username"], "workshop.refine", draft_id,
                      {"async": True}, req.ip)
         return response_json({"job": job}, status=202)
+    trace = app.traces.start(
+        kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
+        meta={"trigger": "sync", "api": "refine"})
     try:
         draft = app.workshop.refine(
-            draft_id, text, model_override=int(model_override) if model_override else None)
+            draft_id, text, model_override=int(model_override) if model_override else None,
+            trace=trace)
+        trace.finish("success")
     except ValueError as exc:
+        trace.error(phase="workshop", code="workshop_refine_failed",
+                    message=str(exc), exc=exc, retryable=False)
+        trace.finish("failed", error_code="workshop_refine_failed", error_summary=str(exc))
         raise HTTPError(400, str(exc)) from exc
+    except Exception as exc:
+        trace.error(phase="workshop", code="workshop_refine_failed",
+                    message=str(exc), exc=exc, retryable=True)
+        trace.finish("failed", error_code="workshop_refine_failed", error_summary=str(exc))
+        raise
     app.db.audit(user["id"], user["username"], "workshop.refine", draft_id, {}, req.ip)
     return response_json({"draft": draft})
 
@@ -2727,10 +3170,17 @@ def h_workshop_verify_rules(app: App, req, draft_id: str):
 def h_workshop_publish(app: App, req, draft_id: str):
     user = _admin(app, req)
     _draft_for(app, req, draft_id)
+    data = req.json()
     try:
-        result = app.workshop.publish(draft_id, user["username"])
+        result = app.workshop.publish(
+            draft_id, user["username"],
+            override_reason=str(data.get("override_reason") or ""),
+            approvals=data.get("approvals") if isinstance(data.get("approvals"), list) else None,
+            channel=str(data.get("channel") or "stable"),
+            emergency_reason=str(data.get("emergency_reason") or ""))
     except ValueError as exc:
-        raise HTTPError(400, str(exc)) from exc
+        status = 409 if "至少需要 2 名" in str(exc) else 400
+        raise HTTPError(status, str(exc)) from exc
     return response_json(result)
 
 
@@ -2781,6 +3231,18 @@ def h_workshop_case(app: App, req, draft_id: str):
     return response_json(result)
 
 
+def h_workshop_rules_try(app: App, req, draft_id: str):
+    user = _auth(app, req)
+    _draft_for(app, req, draft_id)
+    try:
+        result = app.workshop.try_rules(draft_id)
+    except ValueError as exc:
+        raise HTTPError(400, str(exc)) from exc
+    app.db.audit(user["id"], user["username"], "workshop.rules_try", draft_id,
+                 {"ok": result.get("ok"), "rules": result.get("rules")}, req.ip)
+    return response_json(result)
+
+
 def h_workshop_cases(app: App, req, draft_id: str):
     _draft_for(app, req, draft_id)
     return response_json({"items": app.workshop.list_cases(draft_id),
@@ -2808,7 +3270,7 @@ def _model_row(app: App, model_id: int) -> dict[str, Any]:
     return row
 
 
-def _model_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
+def _model_public(app: App, row: dict[str, Any], *, reveal: bool = True) -> dict[str, Any]:
     try:
         plain = app.secret_box.decrypt(row.get("api_key") or "")
         key_view = SecretBox.mask(plain)
@@ -2816,16 +3278,35 @@ def _model_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         key_view = "（解密失败）"
         has_key = True
-    return {
+    extra = _loads(row["extra"], {})
+    transport = str(extra.get("transport") or "server")
+    base_url = str(row["base_url"] or "")
+    parsed = urlparse(base_url)
+    public = {
         "id": row["id"], "name": row["name"], "provider": row["provider"],
-        "base_url": row["base_url"], "model": row["model"],
-        "api_key_masked": key_view, "has_key": has_key,
+        "base_url": base_url if reveal else "",
+        "base_url_host": parsed.hostname or "",
+        "model": row["model"],
+        "api_key_masked": key_view if reveal else "",
+        "has_key": has_key if reveal else False,
         "roles": _loads(row["roles"], []), "max_tokens": row["max_tokens"],
         "temperature": row["temperature"], "timeout_sec": row["timeout_sec"],
         "enabled": bool(row["enabled"]), "priority": row["priority"],
-        "extra": _loads(row["extra"], {}),
+        "extra": extra if reveal else {"transport": transport},
+        "transport": transport,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+    if reveal:
+        relay_cfg = extra.get("browser_relay") if isinstance(extra.get("browser_relay"), dict) else {}
+        public["browser_relay"] = {
+            "max_concurrent": int(relay_cfg.get("max_concurrent") or 2),
+            "claim_timeout_sec": int(relay_cfg.get("claim_timeout_sec") or 10),
+            "exec_timeout_sec": int(relay_cfg.get("exec_timeout_sec") or 90),
+            "allow_roles": relay_cfg.get("allow_roles") or [],
+            "server_fallback": relay_cfg.get("server_fallback", True) is not False,
+        }
+        public["auto_reply"] = extra.get("auto_reply")
+    return public
 
 
 def _validate_model(app: App, data: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2868,6 +3349,55 @@ def _validate_model(app: App, data: dict[str, Any], existing: dict[str, Any] | N
             raise HTTPError(400, f"extra 不是合法 JSON: {exc}") from exc
     if not isinstance(extra, dict):
         raise HTTPError(400, "extra 必须是 JSON 对象")
+    transport = str(extra.get("transport") or "server").strip().lower()
+    if transport not in ("server", "browser"):
+        raise HTTPError(400, "extra.transport 必须是 server 或 browser")
+    if transport == "browser":
+        if provider not in ("openai", "anthropic"):
+            raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+        if not validate_browser_url(base_url,
+                                    allow_http=bool(app.config.get("relay_allow_insecure_http", False))):
+            raise HTTPError(400, ("浏览器代理 Base URL 必须是 HTTP(S) 且不能指向本机/"
+                                  "链路本地地址；内网 HTTP 需先在运行时配置开启"))
+        relay_cfg = extra.get("browser_relay")
+        if relay_cfg is None:
+            relay_cfg = {}
+        if not isinstance(relay_cfg, dict):
+            raise HTTPError(400, "extra.browser_relay 必须是 JSON 对象")
+        try:
+            max_concurrent = int(relay_cfg.get("max_concurrent", 2))
+            claim_timeout = int(relay_cfg.get("claim_timeout_sec", 10))
+            exec_timeout = int(relay_cfg.get("exec_timeout_sec", 90))
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, f"browser_relay 数值字段非法: {exc}") from exc
+        if not (1 <= max_concurrent <= 4):
+            raise HTTPError(400, "browser_relay.max_concurrent 必须在 1–4")
+        if not (5 <= claim_timeout <= 60):
+            raise HTTPError(400, "browser_relay.claim_timeout_sec 必须在 5–60")
+        if not (30 <= exec_timeout <= 120):
+            raise HTTPError(400, "browser_relay.exec_timeout_sec 必须在 30–120")
+        allow_roles = relay_cfg.get("allow_roles") or []
+        if isinstance(allow_roles, str):
+            allow_roles = [x.strip() for x in allow_roles.split(",") if x.strip()]
+        if not isinstance(allow_roles, list):
+            raise HTTPError(400, "browser_relay.allow_roles 必须是字符串数组")
+        allow_roles = [str(x).strip() for x in allow_roles if str(x).strip()]
+        bad_roles = [x for x in allow_roles if x not in ROLES]
+        if bad_roles:
+            raise HTTPError(400, f"browser_relay.allow_roles 含未知角色: {', '.join(bad_roles)}")
+        server_fallback = relay_cfg.get("server_fallback", True)
+        if isinstance(server_fallback, str):
+            server_fallback = server_fallback.strip().lower() not in (
+                "0", "false", "no", "off", "")
+        relay_cfg = {
+            "max_concurrent": max_concurrent,
+            "claim_timeout_sec": claim_timeout,
+            "exec_timeout_sec": exec_timeout,
+            "allow_roles": allow_roles,
+            "server_fallback": bool(server_fallback),
+        }
+        extra["browser_relay"] = relay_cfg
+    extra["transport"] = transport
     api_key = data.get("api_key")
     if api_key is None or api_key == "":
         api_key = (existing or {}).get("api_key", "")
@@ -2890,7 +3420,8 @@ def h_models(app: App, req):
     if user["role"] == "reviewer":
         raise HTTPError(403, "专家账号不能查看或管理模型配置")
     rows = app.db.all("SELECT * FROM model_configs ORDER BY priority, id")
-    return response_json({"items": [_model_public(app, r) for r in rows],
+    reveal = user["role"] == "admin"
+    return response_json({"items": [_model_public(app, r, reveal=reveal) for r in rows],
                           "roles": list(MODEL_ROLES)})
 
 
@@ -2942,7 +3473,7 @@ def h_model_delete(app: App, req, model_id: str):
 
 
 def h_model_test(app: App, req, model_id: str):
-    _admin(app, req)
+    user = _admin(app, req)
     row = _model_row(app, int(model_id))
     model = dict(row)
     try:
@@ -2951,8 +3482,264 @@ def h_model_test(app: App, req, model_id: str):
         raise HTTPError(400, str(exc)) from exc
     model["roles"] = _loads(row["roles"], [])
     model["extra"] = _loads(row["extra"], {})
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     result = app.gateway.test_model(model)
+    host, path = endpoint_target(str(model.get("base_url") or ""))
+    app.db.audit(user["id"], user["username"], "model.test", str(row["id"]),
+                 {"provider": model.get("provider"), "endpoint_host": host,
+                  "endpoint_path": path[:300], "ok": bool(result.get("ok"))}, req.ip)
     return response_json(result)
+
+
+# ---------------------------- 浏览器代理中继 ----------------------------
+
+
+def _relay_http_error(exc: RelayError) -> HTTPError:
+    status = exc.http_status if 400 <= int(exc.http_status or 0) < 600 else 409
+    return HTTPError(status, str(exc)[:600], {"code": exc.code})
+
+
+def _relay_model(app: App, row: dict[str, Any]) -> dict[str, Any]:
+    model = dict(row)
+    model["roles"] = _loads(row.get("roles"), [])
+    model["extra"] = _loads(row.get("extra"), {})
+    model["transport"] = str(model["extra"].get("transport") or "server")
+    model["_relay_max_bytes"] = int(app.config.get("relay_max_response_bytes", 1048576))
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
+    try:
+        model["api_key"] = app.secret_box.decrypt(row.get("api_key") or "")
+    except ValueError as exc:
+        raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
+    return model
+
+
+def _relay_public_call(call: Any) -> dict[str, Any]:
+    remaining = max(0.0, float(getattr(call, "deadline", 0) or 0) - time.monotonic())
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+    payload = call.spec.public(expires_at=expires)
+    payload.update({
+        "call_id": call.call_id,
+        "model_id": call.model_id,
+        "model_name": call.model_name,
+        "purpose": call.purpose,
+        "body": call.spec.body,
+        "expires_at": expires,
+    })
+    return payload
+
+
+def h_relay_status(app: App, req):
+    user = _auth(app, req, csrf=False)
+    window_id = str(req.query.get("window_id") or "").strip()
+    if not app.relay.enabled:
+        return response_json({
+            "enabled": False, "window": None,
+            "poll_sec": int(app.config.get("relay_status_poll_sec", 5) or 5),
+            "pending": 0, "models": [], "allow_http": False,
+            "max_response_bytes": int(app.config.get("relay_max_response_bytes", 1048576)),
+        }, headers={"Pragma": "no-cache"})
+    try:
+        payload = app.relay.status_payload(user["id"], window_id)
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    return response_json(payload, headers={"Pragma": "no-cache"})
+
+
+def h_relay_calls(app: App, req):
+    user = _auth(app, req, csrf=False)
+    window_id = str(req.query.get("window_id") or "").strip()
+    call_id = str(req.query.get("call_id") or "").strip() or None
+    try:
+        wait = float(req.query.get("wait") or 10)
+    except (TypeError, ValueError):
+        wait = 10.0
+    try:
+        call = app.relay.claim(user["id"], window_id, wait, call_id=call_id)
+    except RelayCrossUserError as exc:
+        app.db.audit(user["id"], user["username"], "relay.cross_user_claim",
+                     call_id or "", {"code": exc.code}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    if call is None:
+        return 204, {"Cache-Control": "no-store", "Pragma": "no-cache"}, b""
+    payload = _relay_public_call(call)
+    response = response_json(payload, headers={"Pragma": "no-cache"})
+    # 浏览器已经拿到这份 payload；服务端内存中立即擦除 Key，重复领取
+    # 只会得到 409，不会再次下发。
+    app.relay.consume_auth(call.call_id)
+    return response
+
+
+def h_relay_result(app: App, req, call_id: str):
+    user = _auth(app, req)
+    data = req.json()
+    if not isinstance(data, dict):
+        raise HTTPError(400, "结果必须是 JSON 对象")
+    body_text = data.get("body_text")
+    if not isinstance(body_text, str):
+        raise HTTPError(400, "body_text 必须是字符串")
+    try:
+        status = int(data.get("status") or 0)
+        latency_ms = int(data.get("latency_ms") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPError(400, "status / latency_ms 必须是整数") from exc
+    if not (0 <= status <= 599):
+        raise HTTPError(400, "status 超出范围")
+    error_kind = str(data.get("error_kind") or "").strip().lower()
+    if error_kind not in ("", "network", "abort", "timeout", "http"):
+        raise HTTPError(400, "error_kind 必须是 network/abort/timeout/http")
+    truncated = bool(data.get("truncated"))
+    try:
+        app.relay.complete(user["id"], call_id, status, body_text,
+                           latency_ms, error_kind, truncated)
+    except RelayCrossUserError as exc:
+        app.db.audit(user["id"], user["username"], "relay.cross_user_result",
+                     call_id, {"code": exc.code}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayOversizeError as exc:
+        app.db.audit(user["id"], user["username"], "relay.result_oversize",
+                     call_id, {"bytes": len(body_text.encode("utf-8")),
+                               "limit": int(app.config.get("relay_max_response_bytes",
+                                                           1048576))}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    return response_json({"ok": True})
+
+
+def h_relay_release(app: App, req):
+    # sendBeacon 不能带 X-CSRF；只释放当前用户自己的窗口，影响面是可恢复
+    # 的租约释放，不涉及模型 Key 或数据写入。
+    user = _auth(app, req, csrf=False)
+    data = req.json()
+    window_id = str((data or {}).get("window_id") or req.query.get("window_id") or "").strip()
+    released = app.relay.release_window(user["id"], window_id) if window_id else False
+    return response_json({"ok": True, "released": bool(released)})
+
+
+def _run_relay_test(app: App, test_id: str, user: dict[str, Any],
+                    model: dict[str, Any], spec: RelaySpec) -> None:
+    result: dict[str, Any] = {}
+    try:
+        claim_timeout, exec_timeout = browser_relay_timeouts(model)
+        relay_result = app.relay.submit(user["id"], model, spec,
+                                        purpose="relay-test",
+                                        claim_timeout=claim_timeout,
+                                        exec_timeout=exec_timeout)
+        status = int(relay_result.status or 0)
+        raw = str(relay_result.text or "")
+        info = {"state": "done", "ok": 200 <= status < 300,
+                "http_status": status, "latency_ms": relay_result.latency_ms,
+                "bytes": len(raw.encode("utf-8"))}
+        if status >= 400:
+            info.update({"ok": False, "error": f"HTTP {status}"})
+        else:
+            try:
+                data = json.loads(raw)
+                info["reply"] = parse_test_reply(data, str(model.get("provider") or "openai"))
+            except json.JSONDecodeError:
+                info.update({"ok": False, "error": "响应不是合法 JSON"})
+        result = info
+    except RelayExecError as exc:
+        failure = str(exc).lower()
+        if (browser_relay_server_fallback(model) and "timeout" not in failure
+                and "abort" not in failure):
+            # 浏览器 fetch 被 CORS/代理阻断时，实测 Python 直连能给现场一条
+            # 可执行的结论，而不是只报“浏览器内自检失败”。
+            server_model = dict(model)
+            server_model["transport"] = "server"
+            previous = app.gateway.set_user(user["id"])
+            try:
+                server_test = app.gateway.test_model(server_model)
+            finally:
+                app.gateway.set_user(previous)
+            if server_test.get("ok"):
+                result = {
+                    "state": "done", "ok": True, "transport": "server",
+                    "fallback": True, "browser_error": str(exc)[:300],
+                    "http_status": 200, "latency_ms": int(server_test.get("latency_ms") or 0),
+                    "reply": server_test.get("reply") or "",
+                    "usage": server_test.get("usage") or 0,
+                }
+            else:
+                result = {
+                    "state": "failed", "ok": False, "transport": "server",
+                    "fallback": True, "browser_error": str(exc)[:300],
+                    "error": f"浏览器代理失败：{str(exc)[:240]}；服务端直连失败："
+                             f"{str(server_test.get('error') or '未知错误')[:300]}",
+                }
+        else:
+            result = {"state": "failed", "ok": False, "error": str(exc)[:500],
+                      "code": exc.code, "error_kind": exc.kind}
+    except RelayError as exc:
+        result = {"state": "failed", "ok": False, "error": str(exc)[:500],
+                  "code": exc.code, "error_kind": exc.kind}
+    except Exception as exc:  # noqa: BLE001 - 后台线程必须收敛失败
+        result = {"state": "failed", "ok": False,
+                  "error": f"{type(exc).__name__}: {str(exc)[:400]}"}
+    finally:
+        spec.auth = {}
+    result["finished_at"] = iso_now()
+    with app.relay_tests_lock:
+        test = app.relay_tests.get(test_id)
+        if test:
+            test.update(result)
+    try:
+        app.db.audit(user["id"], user["username"], "model.relay_test", test_id,
+                     {"model_id": model.get("id"), "ok": result.get("ok"),
+                      "transport": result.get("transport") or "browser",
+                      "fallback": bool(result.get("fallback")),
+                      "http_status": result.get("http_status"),
+                      "bytes": result.get("bytes")}, "")
+    except Exception:
+        pass
+
+
+def h_model_relay_test(app: App, req, model_id: str):
+    user = _admin(app, req)
+    if not app.relay.enabled:
+        raise _relay_http_error(RelayDisabledError())
+    row = _model_row(app, int(model_id))
+    model = _relay_model(app, row)
+    if model.get("transport") != "browser":
+        raise HTTPError(400, "该模型不是浏览器代理模型")
+    if model.get("provider") not in ("openai", "anthropic"):
+        raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+    spec = browser_test_spec(model)
+    test_id = new_id("RT", with_time=False)
+    now = iso_now()
+    with app.relay_tests_lock:
+        if len(app.relay_tests) > 100:
+            for key in sorted(app.relay_tests)[:50]:
+                app.relay_tests.pop(key, None)
+        app.relay_tests[test_id] = {
+            "test_id": test_id, "model_id": model.get("id"), "model_name": model.get("name"),
+            "user_id": user["id"], "state": "pending", "ok": None,
+            "created_at": now, "finished_at": "",
+        }
+    thread = threading.Thread(target=_run_relay_test,
+                              args=(app, test_id, dict(user), model, spec),
+                              name="relay-test", daemon=True)
+    thread.start()
+    return response_json({"test_id": test_id, "state": "pending"}, status=202)
+
+
+def h_model_relay_test_get(app: App, req, model_id: str, test_id: str):
+    user = _admin(app, req)
+    with app.relay_tests_lock:
+        test = dict(app.relay_tests.get(test_id) or {})
+    if not test:
+        raise HTTPError(404, "自检任务不存在")
+    if int(test.get("user_id") or 0) != int(user["id"]):
+        raise HTTPError(403, "不能查看其他管理员的自检任务")
+    if int(test.get("model_id") or 0) != int(model_id):
+        raise HTTPError(404, "自检任务与模型不匹配")
+    test.pop("user_id", None)
+    return response_json(test)
 
 
 def h_model_capabilities(app: App, req, model_id: str):
@@ -2960,6 +3747,8 @@ def h_model_capabilities(app: App, req, model_id: str):
     row = _model_row(app, int(model_id))
     model = dict(row)
     model["extra"] = _loads(row.get("extra"), {})
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"]) if row.get("api_key") else ""
     except ValueError as exc:
@@ -2971,9 +3760,130 @@ def h_model_capabilities(app: App, req, model_id: str):
     return response_json({"capabilities": caps})
 
 
+def h_model_discover(app: App, req):
+    """列出当前 Base URL 可用的模型名，不创建/修改配置。"""
+    user = _admin(app, req)
+    data = req.json()
+    existing = None
+    if data.get("model_id"):
+        try:
+            existing = _model_row(app, int(data["model_id"]))
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, "model_id 非法") from exc
+    provider = str(data.get("provider") or (existing or {}).get("provider") or "openai")
+    if provider not in ("openai", "anthropic", "mock"):
+        raise HTTPError(400, "provider 必须是 openai / anthropic / mock")
+    base_url = str(data.get("base_url") or (existing or {}).get("base_url") or "").strip()
+    if provider == "openai" and not base_url:
+        base_url = str(app.config.get("personal_model_base_url") or "")
+    if provider == "anthropic" and not base_url:
+        base_url = "https://api.anthropic.com"
+    api_key = str(data.get("api_key") or "")
+    if not api_key and existing and existing.get("api_key"):
+        try:
+            api_key = app.secret_box.decrypt(existing["api_key"])
+        except ValueError as exc:
+            raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
+    if provider != "mock" and not api_key:
+        raise HTTPError(400, "请填写 API Key")
+    if provider == "mock":
+        return response_json({"models": ["mock"], "count": 1})
+    extra = data.get("extra")
+    if extra is None and existing:
+        extra = _loads(existing.get("extra"), {})
+    if extra is None:
+        extra = {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra) if extra.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise HTTPError(400, f"扩展参数不是合法 JSON: {exc}") from exc
+    if not isinstance(extra, dict):
+        raise HTTPError(400, "扩展参数必须是 JSON 对象")
+    try:
+        timeout_sec = int(data.get("timeout_sec") or 15)
+    except (TypeError, ValueError) as exc:
+        raise HTTPError(400, "timeout_sec 必须是整数") from exc
+    model = {
+        "id": existing["id"] if existing else 0,
+        "name": (existing or {}).get("name") or "",
+        "provider": provider, "base_url": base_url, "api_key": api_key,
+        "extra": extra, "timeout_sec": timeout_sec,
+        "transport": str(extra.get("transport") or "server"),
+        "_relay_max_bytes": int(app.config.get("relay_max_response_bytes", 1048576)),
+        "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+        "private_allowlist": app.config.get("model_private_allowlist", ""),
+    }
+    browser_fallback_error = ""
+    if model["transport"] == "browser":
+        if provider not in ("openai", "anthropic"):
+            raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+        if not validate_browser_url(base_url,
+                                    allow_http=bool(app.config.get("relay_allow_insecure_http", False))):
+            raise HTTPError(400, "浏览器代理 Base URL 不符合安全要求")
+        try:
+            result = app.relay.submit(user["id"], model, browser_models_spec(model),
+                                      purpose="model.discover")
+        except RelayExecError as exc:
+            if not browser_relay_server_fallback(model):
+                raise HTTPError(503, str(exc)[:600], {"code": exc.code}) from exc
+            # 与推理一致：浏览器 CORS/代理阻断时，浏览器发现的请求改由 Python
+            # 直连；模型配置本身不改，仍保持“浏览器优先”。
+            model["transport"] = "server"
+            browser_fallback_error = str(exc)[:300]
+        except RelayError as exc:
+            raise HTTPError(503 if exc.http_status in (0, 503) else exc.http_status,
+                            str(exc)[:600], {"code": exc.code}) from exc
+        else:
+            if not (200 <= int(result.status or 0) < 300):
+                raise HTTPError(502, f"获取模型列表失败: HTTP {result.status}")
+            try:
+                names = parse_model_names(json.loads(result.text), provider)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HTTPError(502, f"浏览器回传的模型列表无法解析: {str(exc)[:300]}") from exc
+            parsed = urlparse(base_url)
+            app.db.audit(user["id"], user["username"], "model.discover", "",
+                         {"provider": provider, "transport": "browser",
+                          "base_url_host": parsed.hostname or "",
+                          "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
+            return response_json({"models": names, "count": len(names)})
+    try:
+        names = list_models(model, timeout=timeout_sec)
+    except OutboundPolicyError as exc:
+        raise HTTPError(403, f"模型地址被安全策略拒绝: {str(exc)[:300]}") from exc
+    except AIError as exc:
+        text = str(exc)
+        if api_key:
+            text = text.replace(api_key, "***")
+        if exc.http_status == 403:
+            raise HTTPError(403, text[:600]) from exc
+        if exc.http_status == 413:
+            raise HTTPError(413, text[:600]) from exc
+        if exc.http_status == 401 or "http 401" in text.lower():
+            raise HTTPError(502, "上游模型服务认证失败（401），请检查 API Key") from exc
+        if "timed out" in text.lower() or "timeout" in text.lower():
+            raise HTTPError(504, "模型服务响应超时") from exc
+        raise HTTPError(502, f"获取模型列表失败: {text[:600]}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise HTTPError(504, "模型服务响应超时") from exc
+    except ValueError as exc:
+        raise HTTPError(400, f"获取模型列表失败: {str(exc)[:600]}") from exc
+    parsed = urlparse(base_url)
+    audit = {"provider": provider, "base_url_host": parsed.hostname or "",
+             "base_url_path": parsed.path[:300], "count": len(names),
+             "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+             "private_allowlist_count": len([
+                 x for x in str(app.config.get("model_private_allowlist", "")).split(",")
+                 if x.strip()])}
+    if browser_fallback_error:
+        audit.update({"transport": "server", "browser_fallback": True,
+                      "browser_error": browser_fallback_error})
+    app.db.audit(user["id"], user["username"], "model.discover", "", audit, req.ip)
+    return response_json({"models": names, "count": len(names)})
+
 def h_model_test_draft(app: App, req):
     """Test the current form values without creating or updating a model row."""
-    _admin(app, req)
+    user = _admin(app, req)
     data = req.json()
     existing = None
     if data.get("model_id"):
@@ -2997,6 +3907,8 @@ def h_model_test_draft(app: App, req):
         "enabled": 1,
         "priority": payload["priority"],
         "extra": _loads(payload["extra"], {}),
+        "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
+        "private_allowlist": app.config.get("model_private_allowlist", ""),
     }
     try:
         if payload["provider"] == "mock":
@@ -3005,7 +3917,13 @@ def h_model_test_draft(app: App, req):
             model["api_key"] = app.secret_box.decrypt(payload["api_key"])
     except ValueError as exc:
         raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
-    return response_json(app.gateway.test_model(model))
+    result = app.gateway.test_model(model)
+    host, path = endpoint_target(str(model.get("base_url") or ""))
+    app.db.audit(user["id"], user["username"], "model.test_draft",
+                 str(existing["id"] if existing else ""),
+                 {"provider": model.get("provider"), "endpoint_host": host,
+                  "endpoint_path": path[:300], "ok": bool(result.get("ok"))}, req.ip)
+    return response_json(result)
 
 
 # ---------------------------- 用户与审计 ----------------------------
@@ -3387,6 +4305,8 @@ def h_profile_model_key_test(app: App, req):
     model = dict(row)
     model["roles"] = ["default"]
     model["extra"] = _loads(row.get("extra"), {}) or {}
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
     try:
         model["api_key"] = app.secret_box.decrypt(row["api_key"])
     except ValueError as exc:
@@ -3528,25 +4448,1174 @@ def h_assistant_cancel(app: App, req, action_id: str):
     return response_json(app.assistant.cancel_action(user, action_id))
 
 
+def _kb_raise(exc: Exception) -> None:
+    status = getattr(exc, "status", 400)
+    raise HTTPError(int(status), str(exc)) from exc
+
+
+def _kb_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _kb_id_param(obj: Any, default: int = 1) -> int:
+    """Accept kb / kb_id from query string or JSON body."""
+    value = None
+    if hasattr(obj, "query"):
+        value = obj.query.get("kb_id") or obj.query.get("kb")
+    if value is None and hasattr(obj, "json"):
+        try:
+            body = obj.json()
+            value = body.get("kb_id") if isinstance(body, dict) else None
+        except Exception:
+            value = None
+    value = _kb_int(value, default)
+    return value if value > 0 else default
+
+
+def _kb_require_visible(app: App, user: dict[str, Any], kb_id: int | None) -> None:
+    """非管理员不能通过显式 kb_id 读取仅管理员库或归档库。"""
+    if user.get("role") == "admin":
+        return
+    if int(kb_id or 0) not in app.kb._visible_library_ids(user):
+        raise HTTPError(404, "知识库不存在")
+
+
+def _kb_raw_param(obj: Any) -> int:
+    value = None
+    if hasattr(obj, "query"):
+        value = obj.query.get("kb_id") or obj.query.get("kb")
+    if value is None and hasattr(obj, "json"):
+        try:
+            body = obj.json()
+            value = body.get("kb_id") if isinstance(body, dict) else None
+        except Exception:
+            value = None
+    return _kb_int(value, 0) if value not in (None, "") else 0
+
+
+def _kb_default_visible(app: App, user: dict[str, Any]) -> int:
+    kb_id = app.kb.default_kb_id()
+    if user.get("role") != "admin":
+        visible = app.kb._visible_library_ids(user)
+        if kb_id not in visible:
+            kb_id = visible[0] if visible else kb_id
+    return kb_id
+
+
+def _kb_request_id(app: App, user: dict[str, Any], obj: Any) -> int:
+    """显式库 ID 必须可见；未指定时使用当前默认库。"""
+    raw = _kb_raw_param(obj)
+    if raw > 0:
+        _kb_require_visible(app, user, raw)
+        return raw
+    return _kb_default_visible(app, user)
+
+
+def _kb_require_case_visible(app: App, user: dict[str, Any], case_id: str) -> None:
+    row = app.db.one("SELECT kb_id FROM kb_cases WHERE id=?", (case_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
+
+
+def _kb_ids_param(obj: Any, default: int = 1) -> list[int]:
+    raw = obj.query.get("kb_ids") if hasattr(obj, "query") else None
+    if not raw and hasattr(obj, "json"):
+        try:
+            body = obj.json()
+            if isinstance(body, dict):
+                raw = body.get("kb_ids")
+                if isinstance(raw, list) and raw:
+                    ids = [_kb_int(x, 0) for x in raw]
+                    return [x for x in ids if x > 0] or [default]
+        except Exception:
+            raw = None
+    if raw:
+        ids = [_kb_int(x, 0) for x in str(raw).split(",")]
+        return [x for x in ids if x > 0] or [default]
+    return [_kb_id_param(obj, default)]
+
+
+def _kb_job_owned(app: App, user: dict[str, Any], job_id: str) -> dict[str, Any]:
+    row = app.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
+    if not row:
+        raise HTTPError(404, "导入任务不存在")
+    if user.get("role") != "admin" and int(row.get("user_id") or 0) != int(user.get("id") or 0):
+        raise HTTPError(403, "无权查看该导入任务")
+    return row
+
+
+def _kb_rate(app: App, user: dict[str, Any]) -> None:
+    limit = int(app.config.get("kb_rate_per_min", 20) or 20)
+    if limit <= 0:
+        return
+    now = time.time()
+    with KB_CHAT_RATE_LOCK:
+        bucket = [t for t in KB_CHAT_RATE.get(user["id"], []) if now - t < 60]
+        if len(bucket) >= limit:
+            raise HTTPError(429, "知识库提问过于频繁，请稍后重试")
+        bucket.append(now)
+        KB_CHAT_RATE[user["id"]] = bucket
+
+
+# ---------------------------- 故障知识库 ----------------------------
+def h_kb_status(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_int(req.query.get("kb_id") or req.query.get("kb"), 0) or app.kb.default_kb_id()
+    return response_json({"status": app.kb.status(user, kb_id=kb_id)})
+
+
+def h_kb_libraries_list(app: App, req):
+    user = _auth(app, req, csrf=False)
+    data = app.kb.list_libraries(
+        include_archived=str(req.query.get("include_archived") or "") == "1")
+    if user.get("role") != "admin":
+        data = {"items": [x for x in data.get("items") or []
+                          if x.get("visibility") != "admin" and x.get("status") == "active"]}
+    return response_json(data)
+
+
+def h_kb_library_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.create_library(
+            user, name=str(data.get("name") or ""), kind=str(data.get("kind") or "fault"),
+            description=str(data.get("description") or ""),
+            visibility=str(data.get("visibility") or "all"))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.library_create",
+                 str(result.get("library", {}).get("id") or ""), result.get("library"), req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_library_update(app: App, req, kb_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.update_library(int(kb_id), req.json(), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    lib = result.get("library", {})
+    app.db.audit(user["id"], user["username"], "kb.library_update", str(kb_id),
+                 {"name": lib.get("name"), "visibility": lib.get("visibility"),
+                  "is_default": bool(lib.get("is_default"))}, req.ip)
+    return response_json(result)
+
+
+def h_kb_library_archive(app: App, req, kb_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.archive_library(int(kb_id), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.library_archive", str(kb_id), {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_library_backup(app: App, req, kb_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        filename, data = app.kb.backup_library(int(kb_id), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.library_backup", str(kb_id),
+                 {"bytes": len(data)}, req.ip)
+    return 200, {
+        "Content-Type": "application/zip", "Cache-Control": "no-store",
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+    }, data
+
+
+def h_kb_library_restore(app: App, req):
+    user = _admin(app, req)
+    limit = MAX_BACKUP_TOTAL_BYTES + 64 * 1024 * 1024
+    fields, uploads = req.parse_multipart(limit, max_file_bytes=limit)
+    if not uploads:
+        raise HTTPError(400, "请选择备份包")
+    upload = uploads[0]
+    path = Path(getattr(upload, "path", ""))
+    if not path.is_file():
+        raise HTTPError(400, "备份包不可读")
+    if path.stat().st_size > limit:
+        raise HTTPError(413, "备份包超过恢复上限")
+    try:
+        result = app.kb.restore_library(
+            user, path.read_bytes(), name=str(fields.get("name") or ""),
+            target_kb_id=_kb_int(fields.get("target_kb_id"), 0) or None,
+            dedupe=str(fields.get("dedupe") or "1") not in {"0", "false", "off"})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.library_restore",
+                 str(result.get("kb_id") or ""), result, req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_operations(app: App, req):
+    user = _auth(app, req, csrf=False)
+    try:
+        raw_kb = req.query.get("kb_id") or req.query.get("kb")
+        return response_json(app.kb.list_operations(
+            user, limit=_kb_int(req.query.get("limit"), 50),
+            kb_id=_kb_int(raw_kb, 0) or None if raw_kb else None))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_facets(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_request_id(app, user, req)
+    return response_json(app.kb.facets(kb_id=kb_id))
+
+
+def h_kb_search(app: App, req):
+    user = _auth(app, req, csrf=False)
+    query = str(req.query.get("q") or req.query.get("query") or "").strip()
+    if not query:
+        raise HTTPError(400, "请填写故障现象或关键词")
+    _kb_rate(app, user)
+    filters = {k: str(req.query.get(k) or "") for k in ("board", "domain") if req.query.get(k)}
+    try:
+        result = app.kb.search(query, user, filters=filters,
+                               limit=_kb_int(req.query.get("limit"), 10),
+                               kb_ids=_kb_ids_param(req, _kb_request_id(app, user, req)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(result)
+
+
+def h_kb_docs(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_request_id(app, user, req)
+    try:
+        data = app.kb.list_documents(
+            q=str(req.query.get("q") or ""), board=str(req.query.get("board") or ""),
+            domain=str(req.query.get("domain") or ""),
+            status=str(req.query.get("status") or "active"),
+            page=_kb_int(req.query.get("page"), 1), size=_kb_int(req.query.get("size"), 20),
+            reveal=user.get("role") == "admin", kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(data)
+
+
+def h_kb_doc_create(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    title = str(data.get("title") or "").strip()
+    text = str(data.get("text") or data.get("content") or "").strip()
+    if not text:
+        raise HTTPError(400, "粘贴文本不能为空")
+    if len(text) > 2 * 1024 * 1024:
+        raise HTTPError(413, "文本超过 2 MB")
+    try:
+        result = app.kb.create_paste(user, title=title, text=text,
+                                     kb_id=_kb_request_id(app, user, req))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_create", result.get("doc_id") or "",
+                 {"status": result.get("status")}, req.ip)
+    return response_json(result, status=201 if result.get("status") == "active" else 202)
+
+
+def h_kb_doc_detail(app: App, req, doc_id: str):
+    user = _auth(app, req, csrf=False)
+    row = app.db.one("SELECT kb_id FROM kb_documents WHERE id=?", (doc_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
+    try:
+        data = app.kb.get_document(doc_id, reveal=user.get("role") == "admin")
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json({"doc": data})
+
+
+def _kb_csv(text: str, name: str) -> tuple[int, dict[str, str], bytes]:
+    return 200, {"Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
+                 "Content-Disposition": f'attachment; filename="{name}"'}, text.encode("utf-8")
+
+
+def h_kb_case_detail(app: App, req, case_id: str):
+    user = _auth(app, req, csrf=False)
+    row = app.db.one("SELECT kb_id FROM kb_cases WHERE id=?", (case_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
+    try:
+        return response_json(app.kb.get_case(case_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_update(app: App, req, case_id: str):
+    user = _auth(app, req)
+    _kb_require_case_visible(app, user, case_id)
+    data = req.json()
+    try:
+        result = app.kb.update_case(case_id, data, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_update", case_id,
+                 {"revision": result.get("case", {}).get("revision")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_status(app: App, req, case_id: str):
+    user = _auth(app, req)
+    _kb_require_case_visible(app, user, case_id)
+    data = req.json()
+    status = str(data.get("status") or "")
+    try:
+        result = app.kb.set_case_status(case_id, status, user, str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_status", case_id,
+                 {"status": status}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_revisions(app: App, req, case_id: str):
+    user = _auth(app, req, csrf=False)
+    _kb_require_case_visible(app, user, case_id)
+    try:
+        return response_json(app.kb.list_case_revisions(
+            case_id, user, page=_kb_int(req.query.get("page"), 1),
+            size=_kb_int(req.query.get("size"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_revision(app: App, req, case_id: str, revision: str):
+    user = _auth(app, req, csrf=False)
+    _kb_require_case_visible(app, user, case_id)
+    try:
+        return response_json({"revision": app.kb.get_case_revision(case_id, revision, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_case_restore(app: App, req, case_id: str, revision: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.restore_case_revision(case_id, revision, user,
+                                              reason=str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.case_restore", case_id,
+                 {"revision": revision}, req.ip)
+    return response_json(result)
+
+
+def h_kb_case_verify(app: App, req, case_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.verify_case_revisions(case_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_doc_restore_alias(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    version_id = str(data.get("version_id") or data.get("version") or "")
+    if not version_id:
+        raise HTTPError(400, "缺少 version_id")
+    try:
+        return response_json({"doc": app.kb.restore_version(doc_id, version_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_audit(app: App, req):
+    user = _admin(app, req, csrf=False)
+    filters = {
+        "actor": str(req.query.get("actor") or ""),
+        "action": str(req.query.get("action") or ""),
+        "target": str(req.query.get("target") or ""),
+        "since": str(req.query.get("since") or ""),
+        "until": str(req.query.get("until") or ""),
+        "limit": _kb_int(req.query.get("limit"), 100),
+        "kb_id": _kb_id_param(req),
+    }
+    try:
+        if str(req.query.get("format") or "") == "csv":
+            return _kb_csv(app.kb.audit_csv(user, **filters), "kb-audit.csv")
+        return response_json(app.kb.list_audit(user, **filters))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_stats(app: App, req):
+    user = _admin(app, req, csrf=False)
+    days = _kb_int(req.query.get("days"), 90)
+    kb_id = _kb_id_param(req)
+    try:
+        if str(req.query.get("format") or "") == "csv":
+            return _kb_csv(app.kb.stats_csv(user, days=days, kb_id=kb_id), "kb-stats.csv")
+        return response_json(app.kb.stats(user, days=days, kb_id=kb_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_export_report(app: App, req):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    doc_ids = body.get("doc_ids") if isinstance(body.get("doc_ids"), list) else []
+    case_ids = body.get("case_ids") if isinstance(body.get("case_ids"), list) else []
+    formats = body.get("formats") if isinstance(body.get("formats"), list) else None
+    try:
+        payload, filename, ctype = app.kb_report.generate(
+            user, kb_id=kb_id, doc_ids=doc_ids, case_ids=case_ids,
+            formats=formats, reveal=bool(body.get("reveal")), title=str(body.get("title") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.report_export", str(kb_id),
+                 {"documents": len(doc_ids), "cases": len(case_ids),
+                  "formats": formats or [], "reveal": bool(body.get("reveal"))}, req.ip)
+    safe_name = "kb-report.zip"
+    return 200, {"Content-Type": ctype, "Cache-Control": "no-store",
+                 "Content-Disposition": f"attachment; filename=\"{safe_name}\"; "
+                                       f"filename*=UTF-8''{quote(filename)}"}, payload
+
+
+def h_kb_duplicates(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        return response_json(app.kb_duplicates.candidates(
+            user, kb_id=kb_id, threshold=float(req.query.get("threshold") or 0.82),
+            limit=_kb_int(req.query.get("limit"), 60)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_duplicate_preview(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    source = str(req.query.get("source") or "")
+    target = str(req.query.get("target") or "")
+    if not source or not target:
+        raise HTTPError(400, "需要 source 和 target 文档 ID")
+    try:
+        return response_json(app.kb_duplicates.preview(source, target, user, kb_id=kb_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_duplicate_merge(app: App, req):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    source = str(body.get("source_doc_id") or body.get("source") or "")
+    target = str(body.get("target_doc_id") or body.get("target") or "")
+    token = str(body.get("merge_token") or "")
+    if not source or not target:
+        raise HTTPError(400, "需要 source_doc_id 和 target_doc_id")
+    try:
+        result = app.kb_duplicates.merge(
+            source, target, user, merge_token=token,
+            reason=str(body.get("reason") or ""), kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_merge", source,
+                 {"target": target, "moved_cases": result.get("moved_cases") or 0,
+                  "token": token, "reason": str(body.get("reason") or "")[:200]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_terms(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        return response_json(app.kb.list_terms(user, kb_id=kb_id))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_term_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    kb_id = _kb_id_param(req, 1)
+    if isinstance(data, dict) and data.get("kb_id"):
+        kb_id = _kb_int(data.get("kb_id"), 1)
+    try:
+        result = app.kb.save_term(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_create", str(result["item"]["id"]),
+                 {"term": result["item"]["term"]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_term_update(app: App, req, term_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    if not isinstance(data, dict):
+        data = {}
+    data["id"] = int(term_id)
+    kb_id = _kb_id_param(req, 1)
+    if data.get("kb_id"):
+        kb_id = _kb_int(data.get("kb_id"), 1)
+    try:
+        result = app.kb.save_term(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_update", term_id,
+                 {"term": result["item"]["term"]}, req.ip)
+    return response_json(result)
+
+
+def h_kb_term_delete(app: App, req, term_id: str):
+    user = _admin(app, req)
+    kb_id = _kb_id_param(req)
+    try:
+        result = app.kb.delete_term(int(term_id), user, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_delete", term_id,
+                 {"term": result.get("term") or ""}, req.ip)
+    return response_json(result)
+
+
+def h_kb_terms_export(app: App, req):
+    user = _admin(app, req, csrf=False)
+    kb_id = _kb_id_param(req)
+    try:
+        text = app.kb.terms_csv(user, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return _kb_csv(text, f"kb-terms-{kb_id}.csv")
+
+
+def h_kb_terms_import(app: App, req):
+    user = _admin(app, req)
+    ctype = str(req.headers.get("Content-Type") or "").lower()
+    if "multipart/form-data" in ctype:
+        fields, uploads = req.parse_multipart(16 * 1024 * 1024)
+        if not uploads:
+            raise HTTPError(400, "需要上传词典 CSV")
+        data = Path(uploads[0].path).read_bytes()
+        kb_id = _kb_int(fields.get("kb_id") or fields.get("kb"), 1)
+    else:
+        body = req.json()
+        data = str(body.get("content") or "").encode("utf-8")
+        kb_id = _kb_int(body.get("kb_id") or 1, 1)
+    try:
+        result = app.kb.import_terms_csv(user, data, kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.term_import", str(kb_id),
+                 {"imported": result.get("imported") or 0}, req.ip)
+    return response_json(result)
+
+
+def h_kb_eval_sets(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.list_sets(user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_set_create(app: App, req):
+    user = _admin(app, req)
+    ctype = str(req.headers.get("Content-Type") or "").lower()
+    if "multipart/form-data" in ctype:
+        fields, uploads = req.parse_multipart(32 * 1024 * 1024)
+        if not uploads:
+            raise HTTPError(400, "需要上传评测集文件")
+        item = uploads[0]
+        data = Path(item.path).read_bytes()
+        name = str(fields.get("name") or Path(item.filename).stem)
+        description = str(fields.get("description") or "")
+        kind = str(fields.get("kind") or "retrieval")
+        filename = item.filename
+    else:
+        body = req.json()
+        raw = body.get("content") or body.get("queries") or ""
+        if isinstance(raw, (list, dict)):
+            raw = json.dumps(raw, ensure_ascii=False)
+        data = str(raw or "").encode("utf-8")
+        name = str(body.get("name") or "")
+        description = str(body.get("description") or "")
+        kind = str(body.get("kind") or "retrieval")
+        filename = str(body.get("filename") or "eval.jsonl")
+    if not data:
+        raise HTTPError(400, "评测集内容为空")
+    try:
+        result = app.kb_eval.import_set(
+            user, name=name, data=data, filename=filename,
+            description=description, kind=kind)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_import", result.get("id") or "",
+                 {"name": name, "queries": result.get("imported") or 0}, req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_eval_set(app: App, req, set_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.get_set(set_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_set_delete(app: App, req, set_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb_eval.delete_set(set_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_delete", set_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_eval_run(app: App, req, set_id: str):
+    user = _admin(app, req)
+    body = req.json()
+    kb_id = _kb_int(body.get("kb_id") or body.get("kb"), 1)
+    top_k = max(1, min(10, _kb_int(body.get("top_k"), 10)))
+    try:
+        result = app.kb_eval.run_set(set_id, user, kb_id=kb_id, top_k=top_k)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.eval_run", result.get("id") or "",
+                 {"set_id": set_id, "kb_id": kb_id, "summary": result.get("summary") or {}},
+                 req.ip)
+    return response_json(result, status=201)
+
+
+def h_kb_eval_runs(app: App, req):
+    user = _admin(app, req, csrf=False)
+    set_id = str(req.query.get("set_id") or "")
+    if not set_id:
+        raise HTTPError(400, "缺少 set_id")
+    try:
+        return response_json(app.kb_eval.list_runs(set_id, user,
+                                                   limit=_kb_int(req.query.get("limit"), 30)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_run_get(app: App, req, run_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb_eval.get_run(run_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_eval_export(app: App, req, run_id: str):
+    user = _admin(app, req, csrf=False)
+    fmt = str(req.query.get("format") or "csv").lower()
+    try:
+        payload, ctype = app.kb_eval.export_run(run_id, user, fmt=fmt)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    ext = "md" if fmt == "md" else "csv"
+    return 200, {"Content-Type": ctype, "Cache-Control": "no-store",
+                 "Content-Disposition": f'attachment; filename="kb-eval-{run_id}.{ext}"'}, payload
+
+
+def h_kb_auto_publish_dry_run(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.auto_publish_dry_run(
+            user, limit=_kb_int(req.query.get("limit"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_auto_publish(app: App, req, review_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.auto_publish_now(review_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.auto_publish_manual", review_id,
+                 result, req.ip)
+    return response_json(result)
+
+
+def h_kb_reviews(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_reviews(
+            user, status=str(req.query.get("status") or ""),
+            target_type=str(req.query.get("target_type") or ""),
+            limit=_kb_int(req.query.get("limit"), 50), kb_id=_kb_id_param(req)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_review(app: App, req, review_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json({"review": app.kb.get_review(review_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_review_create(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    targets = data.get("targets")
+    try:
+        if isinstance(targets, list) and targets:
+            reviews = []
+            for raw in targets[:50]:
+                if isinstance(raw, str):
+                    target_type, target_id = str(data.get("target_type") or ""), raw
+                elif isinstance(raw, dict):
+                    target_type = str(raw.get("target_type") or data.get("target_type") or "")
+                    target_id = str(raw.get("target_id") or "")
+                else:
+                    continue
+                if not target_type or not target_id:
+                    continue
+                reviews.append(app.kb.create_review(
+                    user, target_type=target_type, target_id=target_id,
+                    stage=str(data.get("stage") or "manual"), run=bool(data.get("run"))))
+            if not reviews:
+                raise ValueError("targets 中没有有效的 target_type/target_id")
+            app.db.audit(user["id"], user["username"], "kb.review_create_batch", "",
+                         {"count": len(reviews), "stage": data.get("stage")}, req.ip)
+            return response_json({"reviews": reviews, "count": len(reviews)}, status=201)
+        review = app.kb.create_review(
+            user, target_type=str(data.get("target_type") or ""),
+            target_id=str(data.get("target_id") or ""),
+            stage=str(data.get("stage") or "manual"), run=bool(data.get("run")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.review_create", review.get("id") or "",
+                 {"target_type": data.get("target_type"), "target_id": data.get("target_id")},
+                 req.ip)
+    return response_json({"review": review}, status=201)
+
+
+def h_kb_reviews_run(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        return response_json(app.kb.run_reviews(
+            user, limit=_kb_int(data.get("limit"), 20), kb_id=_kb_id_param(req)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def _kb_batch_ids(raw: Any) -> list[str]:
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise HTTPError(400, "ids 必须是数组")
+    ids = []
+    for item in raw:
+        value = str(item or "").strip()
+        if value and value not in ids:
+            ids.append(value)
+    if not ids:
+        raise HTTPError(400, "至少选择一个审核")
+    if len(ids) > 50:
+        raise HTTPError(400, "单批最多处理 50 条审核")
+    return ids
+
+
+def h_kb_reviews_batch_decision(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    ids = _kb_batch_ids(data.get("ids") or data.get("review_ids"))
+    decision = str(data.get("decision") or "").strip()
+    if decision not in {"approve", "reject", "adopt_patch"}:
+        raise HTTPError(400, "终审结论必须是 approve/reject/adopt_patch")
+    note = str(data.get("note") or "")
+    apply_patch = bool(data.get("apply_patch"))
+    results = []
+    done = failed = 0
+    for review_id in ids:
+        try:
+            review = app.kb.decide_review(
+                review_id, user, decision=decision, note=note, apply_patch=apply_patch)
+            results.append({"id": review_id, "ok": True, "review": review})
+            done += 1
+        except Exception as exc:  # noqa: BLE001
+            results.append({"id": review_id, "ok": False, "status": int(
+                getattr(exc, "status", 400)), "error": str(exc)})
+            failed += 1
+    app.db.audit(user["id"], user["username"], "kb.review_batch_decision", ",".join(ids[:50]),
+                 {"decision": decision, "done": done, "failed": failed}, req.ip)
+    return response_json({"ok": failed == 0, "processed": len(ids), "done": done,
+                          "failed": failed, "results": results})
+
+
+def h_kb_reviews_batch_retry(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    ids = _kb_batch_ids(data.get("ids") or data.get("review_ids"))
+    results = []
+    done = failed = 0
+    for review_id in ids:
+        try:
+            review = app.kb.run_review(review_id, user)
+            if str(review.get("status") or "") == "failed":
+                results.append({"id": review_id, "ok": False, "status": 502,
+                                "error": str(review.get("error") or "审核失败"),
+                                "review": review})
+                failed += 1
+            else:
+                results.append({"id": review_id, "ok": True, "review": review})
+                done += 1
+        except Exception as exc:  # noqa: BLE001
+            results.append({"id": review_id, "ok": False, "status": int(
+                getattr(exc, "status", 400)), "error": str(exc)})
+            failed += 1
+    app.db.audit(user["id"], user["username"], "kb.review_batch_retry", ",".join(ids[:50]),
+                 {"done": done, "failed": failed}, req.ip)
+    return response_json({"ok": failed == 0, "processed": len(ids), "done": done,
+                          "failed": failed, "results": results})
+
+
+def h_kb_review_decision(app: App, req, review_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.decide_review(
+            review_id, user, decision=str(data.get("decision") or ""),
+            note=str(data.get("note") or ""), apply_patch=bool(data.get("apply_patch")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.review_decision", review_id,
+                 {"decision": data.get("decision")}, req.ip)
+    return response_json({"review": result})
+
+
+def h_kb_review_retry(app: App, req, review_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"review": app.kb.run_review(review_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_doc_update(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.update_document(doc_id, data, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_update", doc_id, {}, req.ip)
+    return response_json({"doc": result})
+
+
+def h_kb_doc_status(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    status = str(data.get("status") or "").strip()
+    try:
+        result = app.kb.set_document_status(doc_id, status, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_status", doc_id,
+                 {"status": status}, req.ip)
+    return response_json(result)
+
+
+def h_kb_doc_delete(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.delete_document(doc_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_delete", doc_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_doc_versions(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json(app.kb.list_versions(doc_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_doc_restore(app: App, req, doc_id: str, version_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"doc": app.kb.restore_version(doc_id, version_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_file(app: App, req, file_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        path, row = app.kb.file_path(file_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    # 导入文件只对上传者/管理员开放；知识库文档附件不在这里暴露。
+    owner_row = app.db.one("SELECT user_id FROM kb_import_jobs WHERE id=?",
+                           (row.get("job_id"),)) or {}
+    if user.get("role") != "admin" and int(owner_row.get("user_id") or 0) != int(user.get("id") or 0):
+        raise HTTPError(403, "无权下载该文件")
+    return response_file(path, str(row.get("mime") or "application/octet-stream"),
+                         str(row.get("name") or "file"), inline=False)
+
+
+def h_kb_import_preview(app: App, req):
+    user = _admin(app, req)
+    fields, uploads = req.parse_multipart(32 * 1024 * 1024)
+    if not uploads:
+        raise HTTPError(400, "需要上传 CSV 或 XLSX")
+    item = uploads[0]
+    try:
+        result = preview_import_file(
+            Path(item.path), item.filename,
+            mask_enabled=bool(app.config.get("kb_mask_pii", True)))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPError(400, str(exc)) from exc
+    return response_json({"preview": result, "filename": item.filename})
+
+
+def h_kb_import(app: App, req):
+    user = _auth(app, req)
+    max_mb = int(app.config.get("kb_max_batch_mb", 200))
+    fields, uploads = req.parse_multipart(max_mb * 1024 * 1024,
+                                          max_file_bytes=int(app.config.get(
+                                              "kb_max_file_mb", 50)) * 1024 * 1024)
+    mode = str(fields.get("mode") or "review")
+    if mode not in ("direct", "review"):
+        mode = "review"
+    kb_id = _kb_int(fields.get("kb_id"), 0)
+    if kb_id > 0:
+        _kb_require_visible(app, user, kb_id)
+    else:
+        kb_id = _kb_default_visible(app, user)
+    options: dict[str, Any] = {}
+    raw_mapping = str(fields.get("mapping") or "").strip()
+    if raw_mapping:
+        try:
+            parsed_mapping = json.loads(raw_mapping)
+            options["mapping"] = normalize_mapping(parsed_mapping)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPError(400, f"列映射无效：{exc}") from exc
+    if str(fields.get("sheet") or "").strip():
+        options["sheet"] = str(fields.get("sheet")).strip()[:120]
+    try:
+        job = app.kb.create_import_job(user, uploads, mode=mode, kb_id=kb_id,
+                                       options=options)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.import", job.get("id") or "",
+                 {"files": len(uploads), "mode": mode}, req.ip)
+    return response_json({"job": job}, status=202)
+
+
+def h_kb_jobs(app: App, req):
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_int(req.query.get("kb_id") or req.query.get("kb"), 0)
+    return response_json(app.kb.list_jobs(user, kb_id=kb_id or None))
+
+
+def h_kb_job(app: App, req, job_id: str):
+    user = _auth(app, req, csrf=False)
+    _kb_job_owned(app, user, job_id)
+    try:
+        return response_json({"job": app.kb.get_job(job_id)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_job_cancel(app: App, req, job_id: str):
+    user = _auth(app, req)
+    _kb_job_owned(app, user, job_id)
+    try:
+        return response_json(app.kb.cancel_job(job_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def _kb_job_ids(req) -> list[str]:
+    data = req.json()
+    ids = data.get("job_ids") or data.get("ids") or []
+    if not isinstance(ids, list):
+        raise HTTPError(400, "job_ids 必须是列表")
+    clean = [str(x) for x in ids if str(x).strip()][:100]
+    if not clean:
+        raise HTTPError(400, "请选择导入任务")
+    return clean
+
+
+def h_kb_jobs_rollback(app: App, req):
+    user = _admin(app, req)
+    try:
+        result = app.kb.rollback_jobs(_kb_job_ids(req), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.import_rollback", "",
+                 {"jobs": _kb_job_ids(req), "items": result.get("items")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_jobs_delete(app: App, req):
+    user = _admin(app, req)
+    try:
+        result = app.kb.delete_jobs(_kb_job_ids(req), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.import_delete", "",
+                 {"jobs": _kb_job_ids(req), "deleted": result.get("deleted")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_jobs_retry(app: App, req):
+    user = _admin(app, req)
+    try:
+        result = app.kb.retry_jobs(_kb_job_ids(req), user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.import_retry", "",
+                 {"jobs": _kb_job_ids(req), "queued": result.get("queued")}, req.ip)
+    return response_json(result)
+
+
+def h_kb_drafts(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_drafts(
+            user, str(req.query.get("status") or "reviewing"), kb_id=_kb_id_param(req)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft(app: App, req, draft_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json({"draft": app.kb.get_draft(draft_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft_update(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"draft": app.kb.update_draft(draft_id, req.json(), user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft_approve(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.approve_draft(draft_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.draft_approve", draft_id, result, req.ip)
+    return response_json(result)
+
+
+def h_kb_draft_reject(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.reject_draft(draft_id, user, str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.draft_reject", draft_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_chat(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    query = str(data.get("query") or data.get("message") or "").strip()
+    if not query:
+        messages = data.get("messages") or []
+        if isinstance(messages, list) and messages:
+            query = str((messages[-1] or {}).get("content") or "").strip()
+    if not query:
+        raise HTTPError(400, "请填写故障现象或问题")
+    if len(query) > 2000:
+        raise HTTPError(413, "问题过长（上限 2000 字）")
+    _kb_rate(app, user)
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    try:
+        raw_ids = data.get("kb_ids")
+        kb_ids = [int(x) for x in raw_ids if int(x) > 0] if isinstance(raw_ids, list) else []
+        kb_id = _kb_int(data.get("kb_id"), 0)
+        if kb_id > 0:
+            _kb_require_visible(app, user, kb_id)
+        else:
+            kb_id = _kb_default_visible(app, user)
+        result = app.kb.answer(query, user, filters=filters,
+                               limit=_kb_int(data.get("limit"), 0) or None,
+                               kb_ids=kb_ids or [kb_id], kb_id=kb_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(result)
+
+
+def h_kb_feedback(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    query_id = str(data.get("query_id") or "").strip()
+    if not query_id:
+        raise HTTPError(400, "缺少 query_id")
+    try:
+        return response_json(app.kb.feedback(
+            user, query_id=query_id, helpful=bool(data.get("helpful")),
+            reason=str(data.get("reason") or "")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_reindex(app: App, req):
+    user = _admin(app, req)
+    try:
+        stats = app.kb.rebuild_index()
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.reindex", "kb", stats, req.ip)
+    return response_json({"ok": True, "index": stats})
+
+
+def h_kb_queries(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_queries(user, _kb_int(req.query.get("limit"), 30)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_sample(app: App, req):
+    user = _admin(app, req)
+    try:
+        result = app.kb.import_sample(user, kb_id=_kb_id_param(req))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.sample", "kb", result, req.ip)
+    return response_json(result)
+
+
 def h_mcp_http(app: App, req):
     # 本机限制与 Bearer Token 在 MCPService 内校验；这里不使用网页会话。
     return app.mcp.handle_http(req)
 
 
 def h_mcp_info(app: App, req):
-    user = _admin(app, req, csrf=False)
+    user = _auth(app, req, csrf=False)
     return response_json({"mcp": app.mcp.token_info(user)})
 
 
 def h_mcp_token_create(app: App, req):
-    user = _admin(app, req)
+    user = _auth(app, req)
     data = req.json()
     return response_json({"mcp": app.mcp.rotate_token(user, str(data.get("mode") or "read"))},
                          status=201)
 
 
 def h_mcp_token_delete(app: App, req):
-    user = _admin(app, req)
+    user = _auth(app, req)
     return response_json({"mcp": app.mcp.revoke_token(user)})
 
 
@@ -3584,7 +5653,7 @@ def h_update_upload(app: App, req):
     fields, uploads = req.parse_multipart(max_mb * 1024 * 1024 + 16 * 1024 * 1024,
                                           max_file_bytes=max_mb * 1024 * 1024)
     if not uploads:
-        raise HTTPError(400, "请选择 .tar.gz 离线升级包")
+        raise HTTPError(400, "请选择 .tar.gz / .tgz / .zip 离线升级包")
     item = uploads[0]
     try:
         status = updater.create_job(
@@ -3616,8 +5685,12 @@ def h_update_list(app: App, req):
         "disk_free_mb": updater.disk_free(app) // (1024 * 1024),
         "max_update_mb": int(app.config.get("max_update_mb", 512)),
         "supported": updater.supported(app),
-        "helper": ("root/systemd 一次性助手" if not app.config.get("upgrade_helper_cmd")
-                   else "测试助手命令") if updater.supported(app) else "Windows 手动更新",
+        "mode": updater.apply_mode(app),
+        "rollback_supported": updater.rollback_supported(app),
+        "pending_update": (updater.pending_update(app) or {}).get("job_id") or "",
+        "helper": ("Windows 网页上传 + 重启生效" if updater.apply_mode(app) == "restart"
+                   else "自定义升级助手" if app.config.get("upgrade_helper_cmd")
+                   else "root/systemd 一次性助手"),
     })
 
 
@@ -3885,8 +5958,6 @@ def h_system_restart(app: App, req):
 
 def h_system_info(app: App, req):
     user = _auth(app, req, csrf=False)
-    if user["role"] == "reviewer":
-        raise HTTPError(403, "专家账号不能查看系统配置")
     import platform as _platform
     skills = app.db.all("SELECT status, COUNT(*) AS n FROM skills GROUP BY status")
     return response_json({
@@ -3903,6 +5974,7 @@ def h_system_info(app: App, req):
         },
         "skills": {r["status"]: r["n"] for r in skills},
         "workers": app.worker.stats(),
+        "system": system_snapshot(app.config.data_dir),
         "config": app.config.public(),
         "demo_installed": app.db.setting("demo_installed") == "1",
         "role": user["role"],

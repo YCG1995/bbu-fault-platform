@@ -12,6 +12,7 @@ import argparse
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -50,6 +51,15 @@ def main() -> int:
             print(f"[维护] 已应用待激活任务：{applied.get('action')} {applied.get('job_id')}")
         else:
             print(f"[维护] 待激活任务失败，继续使用原数据：{applied.get('error', '')}", file=sys.stderr)
+    if applied and applied.get("ok") and applied.get("action") == "update":
+        # 代码刚被替换，当前进程仍持有旧模块；重新执行入口以加载新版本。
+        print("[更新] 程序文件已替换，正在重新启动以加载新版本…")
+        sys.stdout.flush()
+        try:
+            _restart_self()
+        except OSError as exc:
+            print(f"[错误] 无法重新启动新版本：{exc}", file=sys.stderr)
+            return 3
 
     stopping = threading.Event()
     server_ref = [None]
@@ -122,6 +132,26 @@ def main() -> int:
         break
     print("[停止] 已退出")
     return 0
+
+
+def _restart_argv() -> list[str]:
+    """新进程的 argv；路径始终作为独立参数，避免 Windows 空格拆分。"""
+    return [sys.executable, str(BASE_DIR / "run.py"), *sys.argv[1:]]
+
+
+def _restart_self() -> None:
+    """加载刚替换的新代码：POSIX 用 execv，Windows 用 argv 列表启动子进程。
+
+    CPython 3.14 的 Windows ``os.execv`` 会把含空格的解释器路径拼成命令行，
+    ``C:\\Program Files\\...`` 被拆成 ``C:\\Program`` 与 ``Files\\...``，导致
+    重启失败。Windows 必须走 ``subprocess.Popen`` 的列表参数，由 CreateProcess
+    正确引用路径。
+    """
+    argv = _restart_argv()
+    if os.name == "nt":
+        subprocess.Popen(argv, cwd=str(BASE_DIR), close_fds=False)
+        return
+    os.execv(sys.executable, argv)
 
 
 if __name__ == "__main__":

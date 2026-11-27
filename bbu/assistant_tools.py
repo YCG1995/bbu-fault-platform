@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -19,7 +20,7 @@ from .external_im import ExternalIMService
 from .model_roles import MODEL_ROLES
 from .notifications import create_notification
 from .security import SecretBox, delete_user_sessions
-from .util import iso_now, new_id
+from .util import iso_now, new_id, safe_filename, sha256_file, unique_path, within_directory
 
 TASK_STATUSES = ("queued", "running", "done", "failed", "needs_data", "cancelled")
 MESSAGE_SCOPES = ("notifications", "task_events", "audit", "external")
@@ -145,6 +146,7 @@ class ToolRegistry:
     def __init__(self, app: Any, kb: KnowledgeBase, external: ExternalIMService) -> None:
         self.app = app
         self.kb = kb
+        self.fault_kb = getattr(app, "kb", None)
         self.external = external
         self._tools: dict[str, ToolSpec] = {}
         self._register_all()
@@ -163,7 +165,7 @@ class ToolRegistry:
             if source == "mcp":
                 if spec.mcp == "never":
                     continue
-                if spec.risk != "read" and token_mode != "admin":
+                if spec.risk != "read" and token_mode not in ("admin", "write"):
                     continue
             items.append(spec)
         return sorted(items, key=lambda s: (s.scope != "admin", s.risk != "read", s.name))
@@ -210,7 +212,7 @@ class ToolRegistry:
             if spec.mcp == "never":
                 raise ToolError("该工具不允许通过 MCP 调用", 403)
             if spec.risk != "read":
-                if ctx.token_mode != "admin":
+                if ctx.token_mode not in ("admin", "write"):
                     raise ToolError("当前 MCP Token 为只读模式，不能执行写操作", 403)
                 if mcp_confirm is not True:
                     raise ToolError("MCP 写操作需要在参数中传 confirm=true")
@@ -295,6 +297,30 @@ class ToolRegistry:
             summary=lambda a: f"检索文档“{a.get('query', '')}”",
         ))
         self._add(ToolSpec(
+            name="search_fault_kb", title="检索故障知识库",
+            description="按故障现象、板卡型号、领域、软件/逻辑版本检索历史故障案例；"
+                        "回答“这个故障以前怎么处理”时优先使用，不要用 search_docs 代替。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {
+                        "query": {"type": "string", "maxLength": 2000},
+                        "board": {"type": "string", "maxLength": 40},
+                        "domain": {"type": "string", "maxLength": 40},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    },
+                    "required": ["query"]},
+            handler=lambda reg, ctx, a: reg._search_fault_kb(ctx, a),
+            summary=lambda a: f"检索故障知识库“{_truncate(a.get('query'), 80)}”",
+        ))
+        self._add(ToolSpec(
+            name="get_fault_case", title="读取故障案例",
+            description="按案例 ID 读取完整现象、原因、处理方案和来源；用于核对引用和追问。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {"case_id": {"type": "string", "maxLength": 48}},
+                    "required": ["case_id"]},
+            handler=lambda reg, ctx, a: reg._get_fault_case(ctx, a),
+            summary=lambda a: f"读取故障案例 {a.get('case_id', '')}",
+        ))
+        self._add(ToolSpec(
             name="search_messages", title="检索平台消息",
             description="检索站内通知、任务事件、审计记录和外部 IM 消息；按角色限制范围。",
             schema={"type": "object", "additionalProperties": False,
@@ -328,6 +354,23 @@ class ToolRegistry:
                     "required": []},
             handler=lambda reg, ctx, a: reg._list_tasks(ctx, a),
             summary=lambda a: "列出最近任务",
+        ))
+        self._add(ToolSpec(
+            name="create_skill_diagnosis", title="创建指定技能诊断",
+            description="复用某个已有任务的日志与描述，创建一个只执行指定技能的新诊断任务；"
+                        "不复制日志内容给模型，技能仍按沙箱规则运行。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {
+                        "source_task_id": {"type": "string", "maxLength": 64},
+                        "skill": {"type": "string", "maxLength": 120},
+                        "title": {"type": "string", "maxLength": 120},
+                        "description": {"type": "string", "maxLength": 20000},
+                    },
+                    "required": ["source_task_id", "skill"]},
+            handler=lambda reg, ctx, a: reg._create_skill_diagnosis(ctx, a),
+            risk="medium", mcp="write",
+            summary=lambda a: f"用技能 {a.get('skill', '')} 创建诊断"
+                              f"（日志来源 {a.get('source_task_id', '')}）",
         ))
         self._add(ToolSpec(
             name="search_skills", title="检索技能",
@@ -513,7 +556,57 @@ class ToolRegistry:
                             else "平台文档中没有找到直接匹配"),
                 "sources": items}
 
-    # ---------------------------------------------------------------- 消息
+    def _search_fault_kb(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.fault_kb:
+            raise ToolError("故障知识库服务未启用", 503)
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ToolError("请提供故障现象或问题")
+        filters = {}
+        if args.get("board"):
+            filters["board"] = str(args["board"]).strip()
+        if args.get("domain"):
+            filters["domain"] = str(args["domain"]).strip()
+        try:
+            limit = max(1, min(10, int(args.get("limit") or 6)))
+        except (TypeError, ValueError):
+            limit = 6
+        try:
+            result = self.fault_kb.search(query, ctx.user, filters=filters, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 工具层不能把服务异常泄漏成 500
+            raise ToolError(str(exc) or "故障知识库检索失败",
+                            getattr(exc, "status", 503))
+        items = []
+        for item in result.get("items") or []:
+            item = dict(item)
+            item["excerpt"] = _truncate(item.get("symptom") or item.get("cause") or "", 500)
+            item["doc_title"] = item.get("title") or ""
+            item["heading"] = "故障案例"
+            items.append(item)
+        sources = [{"title": x.get("title") or "", "heading": "故障案例",
+                    "uri": x.get("uri") or "", "excerpt": x.get("excerpt") or "",
+                    "case_id": x.get("case_id")} for x in items]
+        return {"items": items, "sources": sources, "summary":
+                (f"检索到 {len(items)} 个历史故障案例" if items else "故障知识库未找到相关案例"),
+                "no_answer": bool(result.get("no_answer")), "query_id": result.get("query_id"),
+                "links": [{"label": "打开故障知识库", "href": "/#/kb"}]}
+
+    def _get_fault_case(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.fault_kb:
+            raise ToolError("故障知识库服务未启用", 503)
+        case_id = str(args.get("case_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", case_id):
+            raise ToolError("案例 ID 格式非法")
+        try:
+            data = self.fault_kb.get_case(case_id, ctx.user)
+        except Exception as exc:
+            raise ToolError(str(exc), getattr(exc, "status", 404))
+        return {"case": data["case"], "doc": data["doc"],
+                "summary": f"案例 {case_id}：{_truncate(data['case'].get('title'), 120)}",
+                "sources": [{"title": data["case"].get("title") or "", "heading": "故障案例",
+                            "uri": data["case"].get("uri") or "",
+                            "excerpt": _truncate(data["case"].get("cause") or "", 500)}]}
+
     def _search_messages(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()
         scopes = args.get("scopes") or list(MESSAGE_SCOPES)
@@ -645,6 +738,75 @@ class ToolRegistry:
         if report:
             item["report_excerpt"] = _truncate(report, 1800)
         return {"task": item, "summary": f"任务 {task_id} 当前为 {task['status']}",
+                "links": [{"label": "打开任务详情", "href": _task_link(task_id)}]}
+
+    def _create_skill_diagnosis(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        source_id = str(args.get("source_task_id") or "").strip()
+        skill_name = str(args.get("skill") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", source_id):
+            raise ToolError("来源任务 ID 格式非法")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", skill_name):
+            raise ToolError("技能名称格式非法")
+        source = self.app.db.one("SELECT * FROM tasks WHERE id=?", (source_id,))
+        if not source or not _can_view_task(ctx.user, source):
+            raise ToolError("来源任务不存在或无权查看", 404)
+        if source.get("user_id") != ctx.user.get("id") and not ctx.is_admin:
+            raise ToolError("只能复用自己创建的任务日志", 403)
+        if source.get("inputs_state") not in (None, "", "available"):
+            raise ToolError("来源任务的原始日志已释放，不能复用", 409)
+        skill = self.app.db.one(
+            "SELECT * FROM skills WHERE name=? AND status IN ('ready','degraded')", (skill_name,))
+        if not skill:
+            raise ToolError("指定技能不存在或不可用", 400)
+        source_inputs = _loads(source.get("input_json"), [])
+        if not isinstance(source_inputs, list) or not source_inputs:
+            raise ToolError("来源任务没有可复用的日志包", 409)
+        data_dir = Path(self.app.config.data_dir)
+        upload_root = data_dir / "uploads"
+        for item in source_inputs:
+            path = Path(str(item.get("stored_path") or ""))
+            if not path.is_file() or not within_directory(upload_root, path):
+                raise ToolError("来源任务日志缺失或路径非法", 409)
+        stats = self.app.worker.stats()
+        if stats["queued"] >= stats.get("max_queue", 32):
+            raise ToolError(f"任务队列已满（{stats['queued']}/{stats.get('max_queue', 32)}）", 429)
+        description = str(args.get("description") or source.get("description") or "").strip()
+        if not description:
+            raise ToolError("来源任务没有故障描述，请传入 description")
+        if len(description) > 20000:
+            raise ToolError("故障描述过长（上限 20000 字）")
+        title = str(args.get("title") or "").strip()
+        if not title:
+            title = _truncate(f"{source.get('title') or source_id}（指定技能）", 120)
+        task_id = new_id("T")
+        target_dir = upload_root / task_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for item in source_inputs:
+            src = Path(str(item.get("stored_path") or ""))
+            target = unique_path(target_dir, safe_filename(str(item.get("name") or src.name)))
+            shutil.copy2(src, target)
+            copied.append({"name": item.get("name") or target.name,
+                           "stored_name": target.name, "stored_path": str(target),
+                           "size": target.stat().st_size, "sha256": sha256_file(target)})
+        now = iso_now()
+        options = {"mode": "skill", "skill_name": skill_name, "skill_names": [skill_name],
+                   "model_override": source.get("model_override"),
+                   "include_canary": False, "created_via": ctx.source}
+        self.app.db.execute(
+            "INSERT INTO tasks(id,user_id,title,description,title_source,status,stage,progress,mode,"
+            "model_override,input_json,options_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (task_id, ctx.user["id"], title, description, "manual", "queued", "queued", 0,
+             "skill", source.get("model_override"),
+             json.dumps(copied, ensure_ascii=False),
+             json.dumps(options, ensure_ascii=False), now))
+        self.app.worker.submit(task_id)
+        self.app.db.audit(ctx.user["id"], ctx.user["username"], "task.create",
+                          task_id, {"mode": "skill", "skill": skill_name,
+                                    "source_task_id": source_id, "via": ctx.source}, ctx.ip)
+        row = self.app.db.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+        return {"task": _task_summary(row),
+                "summary": f"已创建任务 {task_id}，指定技能 {skill_name}；来源 {source_id}",
                 "links": [{"label": "打开任务详情", "href": _task_link(task_id)}]}
 
     def _list_tasks(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

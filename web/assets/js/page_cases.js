@@ -75,17 +75,17 @@ export async function renderCases() {
         </div>
       </div>
       <div class="card-body tight table-wrap">
-        ${filtered.length ? `<table class="data"><thead><tr>
+        ${filtered.length ? `<table class="data responsive"><thead><tr>
           <th>案例</th><th>现场</th><th>标签</th><th>复核</th><th>复核人</th><th>更新时间</th></tr></thead><tbody>
           ${filtered.map((c) => `<tr class="row-hover" data-href="#/cases/${encodeURIComponent(c.id)}">
-            <td><div style="font-weight:600">${esc(c.title)}</div>
+            <td data-label="案例"><div style="font-weight:600">${esc(c.title)}</div>
               <div class="mono muted tiny">${esc(c.id)} · ${esc(c.name)}</div>
               <div class="tiny muted" style="margin-top:4px">${esc(basenameList(c))}${c.raw_inputs_available === false ? ' <span class="danger-text">· 原始输入未迁移</span>' : ''}</div></td>
-            <td>${esc(c.site || '—')}<div class="tiny muted">${esc(c.device_type || '')} ${esc(c.software_version || '')}</div></td>
-            <td>${caseBadge(c.status)}<div class="tiny muted" style="margin-top:3px">${esc(c.split || 'unlabeled')}</div></td>
-            <td>${reviewBadge(c.review_status)}</td>
-            <td>${esc(c.reviewer_name || '—')}</td>
-            <td class="tiny">${esc(fmtDate(c.updated_at))}</td>
+            <td data-label="现场">${esc(c.site || '—')}<div class="tiny muted">${esc(c.device_type || '')} ${esc(c.software_version || '')}</div></td>
+            <td data-label="标签">${caseBadge(c.status)}<div class="tiny muted" style="margin-top:3px">${esc(c.split || 'unlabeled')}</div></td>
+            <td data-label="复核">${reviewBadge(c.review_status)}</td>
+            <td data-label="复核人">${esc(c.reviewer_name || '—')}</td>
+            <td data-label="更新时间" class="tiny">${esc(fmtDate(c.updated_at))}</td>
           </tr>`).join('')}</tbody></table>`
         : `<div class="empty">${icon('inbox')}<h3>当前筛选下没有案例</h3>
           <p>真实案例由管理员导入；专家只能看到分配给自己的案例。未标注案例不会进入准确率统计。</p></div>`}

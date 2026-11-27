@@ -165,9 +165,8 @@ class AuthHardeningTest(unittest.TestCase):
             b = Client(host, port)
             a.login("auth_user", "InitialUser!2026")
             b.login("auth_user", "InitialUser!2026")
-            status, raw = a.request("GET", "/api/tasks")
-            self.assertEqual(status, 403)
-            self.assertEqual(json.loads(raw)["detail"]["code"], "password_change_required")
+            status, _raw = a.request("GET", "/api/tasks")
+            self.assertEqual(status, 200)  # 首次登录不再强制改密，直接进入工作台
 
             a_changed = a.json("POST", "/api/auth/password", {
                 "old_password": "InitialUser!2026",
@@ -177,7 +176,7 @@ class AuthHardeningTest(unittest.TestCase):
             self.assertEqual(b.request("GET", "/api/auth/me")[0], 401)
             self.assertEqual(a.request("GET", "/api/auth/me")[0], 200)
 
-            # 管理员重置密码后，旧会话立即失效，且新密码登录后仍必须先改密
+            # 管理员重置密码后，旧会话立即失效；新密码可直接登录
             reset = admin.json("PUT", f"/api/users/{uid}", {
                 "password": "ResetUser!2026"})[1]
             self.assertGreaterEqual(reset["sessions_revoked"], 1)
@@ -185,7 +184,7 @@ class AuthHardeningTest(unittest.TestCase):
             e = Client(host, port)
             login = e.login("auth_user", "ResetUser!2026")
             self.assertEqual(login["user"]["must_change"], 1)
-            self.assertEqual(e.request("GET", "/api/tasks")[0], 403)
+            self.assertEqual(e.request("GET", "/api/tasks")[0], 200)
 
             e_changed = e.json("POST", "/api/auth/password", {
                 "old_password": "ResetUser!2026",

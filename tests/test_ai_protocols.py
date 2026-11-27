@@ -14,13 +14,28 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
-from bbu.ai import AIGateway, AIError  # noqa: E402
+from bbu.ai import AIGateway, AIError, list_models  # noqa: E402
 from bbu.db import Database  # noqa: E402
 from bbu.security import SecretBox  # noqa: E402
 
 
 class _Handler(BaseHTTPRequestHandler):
     seen: list[dict] = []
+    seen_get: list[dict] = []
+
+    def do_GET(self):  # noqa: N802
+        _Handler.seen_get.append({"path": self.path,
+                                  "headers": {k.lower(): v for k, v in self.headers.items()}})
+        if self.path.endswith("/models"):
+            body = {"data": [{"id": "test-model"}, {"id": "test-model-2"}]}
+        else:
+            body = {"error": "not found"}
+        raw = json.dumps(body).encode()
+        self.send_response(200 if self.path.endswith("/models") else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
@@ -91,6 +106,7 @@ class AIProtocolTests(unittest.TestCase):
         self.db = Database(Path(self.tmp.name) / "test.db")
         self.box = SecretBox(Path(self.tmp.name))
         _Handler.seen.clear()
+        _Handler.seen_get.clear()
 
     def _add_model(self, provider: str, base_url: str, extra: dict | None = None):
         key = self.box.encrypt("test-key")
@@ -113,6 +129,22 @@ class AIProtocolTests(unittest.TestCase):
         self.assertEqual(call["headers"].get("authorization"), "Bearer test-key")
         response_format = call["payload"].get("response_format") or {}
         self.assertEqual(response_format.get("type"), "json_object")
+
+    def test_list_openai_models(self):
+        model = {"provider": "openai", "base_url": f"http://127.0.0.1:{self.port}/v1",
+                 "api_key": "test-key", "extra": {}, "allow_private": True}
+        self.assertEqual(list_models(model), ["test-model", "test-model-2"])
+        call = _Handler.seen_get[-1]
+        self.assertEqual(call["path"], "/v1/models")
+        self.assertEqual(call["headers"].get("authorization"), "Bearer test-key")
+
+    def test_list_anthropic_models(self):
+        model = {"provider": "anthropic", "base_url": f"http://127.0.0.1:{self.port}",
+                 "api_key": "test-key", "extra": {}, "allow_private": True}
+        self.assertEqual(list_models(model), ["test-model", "test-model-2"])
+        call = _Handler.seen_get[-1]
+        self.assertEqual(call["path"], "/v1/models")
+        self.assertEqual(call["headers"].get("x-api-key"), "test-key")
 
     def test_anthropic_native(self):
         self._add_model("anthropic", f"http://127.0.0.1:{self.port}")

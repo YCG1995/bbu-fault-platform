@@ -338,15 +338,15 @@ function buildPanel() {
         <div class="assistant-sub" id="assistant-sub">正在读取状态…</div>
       </div>
       <span class="badge" id="assistant-mode">…</span>
+      <button type="button" class="btn btn-ghost btn-sm" id="assistant-clear" title="清空对话">${icon('trash')}</button>
       <button type="button" class="btn btn-ghost btn-sm" id="assistant-close" aria-label="收起">${icon('x')}</button>
     </header>
     <div class="assistant-log" id="assistant-log" role="log" aria-live="polite"></div>
     <form class="assistant-compose" id="assistant-form">
       <textarea id="assistant-input" rows="1" maxlength="2000"
-        placeholder="问平台用法，或查任务/通知/审计…（Enter 发送，Shift+Enter 换行）"></textarea>
+        aria-label="给小助手发消息"></textarea>
       <button type="submit" class="btn btn-primary assistant-send" id="assistant-send" aria-label="发送">${icon('send')}</button>
-    </form>
-    <div class="assistant-foot">写操作会先要求确认；高风险操作还需管理员密码。</div>`;
+    </form>`;
   document.body.appendChild(fab);
   document.body.appendChild(panel);
   log = panel.querySelector('#assistant-log');
@@ -366,6 +366,13 @@ function buildPanel() {
   };
   fab.addEventListener('click', () => (panel.hidden ? open() : close()));
   panel.querySelector('#assistant-close').addEventListener('click', close);
+  panel.querySelector('#assistant-clear').addEventListener('click', () => {
+    history = [];
+    pendingActions.clear();
+    log.innerHTML = '';
+    renderWelcome();
+    toast('对话已清空', 'ok');
+  });
   panel.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') close();
   });

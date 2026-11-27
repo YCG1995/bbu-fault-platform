@@ -31,6 +31,7 @@ HELPER_UNIT="/etc/systemd/system/bbu-upgrade-helper@.service"
 SUDOERS_FILE="/etc/sudoers.d/bbu-upgrade"
 MODE="repair"
 FIX_SUDO=0
+FIX_NNP=0
 
 log()  { echo "[修复] $*"; }
 warn() { echo "[警告] $*" >&2; }
@@ -49,6 +50,7 @@ usage() {
   --port PORT        平台端口（默认从程序目录 config.json 读取，否则 8080）
   --python-bin PATH  助手使用的 Python（默认 /opt/bbu-python313 或 python3）
   --fix-sudo         尝试恢复 /usr/bin/sudo 的 root:root + 4755 权限
+  --fix-nnp           移除主服务单元中的 NoNewPrivileges=true 并重启服务
   --diagnose         只诊断，不修改任何文件，不需要 root
   --manual           只打印 root 手工升级步骤
   -h, --help         显示帮助
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="${2:-}"; shift 2 ;;
     --python-bin) PYTHON_BIN="${2:-}"; shift 2 ;;
     --fix-sudo) FIX_SUDO=1; shift ;;
+    --fix-nnp) FIX_NNP=1; shift ;;
     --diagnose) MODE="diagnose"; shift ;;
     --manual) MODE="manual"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -153,6 +156,25 @@ systemd_state() {
   fi
 }
 
+unit_file() { echo "/etc/systemd/system/${SERVICE_NAME}.service"; }
+
+nnp_state() {
+  local unit show
+  unit="$(unit_file)"
+  if [[ -f "$unit" ]] && grep -qE '^[[:space:]]*NoNewPrivileges[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$' "$unit"; then
+    echo "enabled"
+    return
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    show="$(systemctl show "$SERVICE_NAME" -p NoNewPrivileges 2>/dev/null || true)"
+    if echo "$show" | grep -qE '=yes'; then
+      echo "enabled"
+      return
+    fi
+  fi
+  echo "disabled"
+}
+
 run_as_service_user() {
   if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     return 127
@@ -176,12 +198,17 @@ diagnose() {
   echo "------------------------------------------------------------------"
   sudo_detail
   echo "  systemd    : $(systemd_state)"
+  echo "  NoNewPrivileges : $(nnp_state) ($(unit_file))"
   echo "  触发器     : $([[ -x "$TRIGGER" ]] && echo 可执行 || echo '缺失/不可执行') ($TRIGGER)"
   echo "  助手 unit  : $([[ -f "$HELPER_UNIT" ]] && echo 存在 || echo '缺失') ($HELPER_UNIT)"
   echo "  sudoers    : $([[ -f "$SUDOERS_FILE" ]] && echo 存在 || echo '缺失') ($SUDOERS_FILE)"
   echo "  助手配置   : $([[ -f /etc/bbu-upgrade.json ]] && echo 存在 || echo '缺失') (/etc/bbu-upgrade.json)"
   echo "  升级脚本   : $([[ -x "$PREFIX/deploy/upgrade_offline.sh" ]] && echo 可执行 || echo '缺失')"
   echo "------------------------------------------------------------------"
+  if [[ "$(nnp_state)" == "enabled" ]]; then
+    echo "  结论       : 服务单元启用 NoNewPrivileges=true，setuid sudo 被内核禁用；需要 --fix-nnp。"
+    return 1
+  fi
   if [[ "$(sudo_state)" == "ok" && -x "$TRIGGER" && -f "$HELPER_UNIT" && -f "$SUDOERS_FILE" ]]; then
     local out rc
     set +e
@@ -214,8 +241,8 @@ manual_help() {
 手工升级步骤（需要 root 或能写程序目录、能停止平台的账号）：
 
   1. 校验并解压新包
-     sha256sum -c bbu-fault-platform-1.20.1-offline.tar.gz.sha256
-     tar -xzf bbu-fault-platform-1.20.1-offline.tar.gz -C /tmp
+     sha256sum -c bbu-fault-platform-1.20.2-offline.tar.gz.sha256
+     tar -xzf bbu-fault-platform-1.20.2-offline.tar.gz -C /tmp
 
   2. 停止平台
      systemctl stop ${SERVICE_NAME}
@@ -234,6 +261,28 @@ manual_help() {
   如果没有 root、sudo 也无法修复，网页自动升级在该机器上不可用；
   只能由具备程序目录写权限和维护权限的账号执行上面的手工升级。
 EOF
+}
+
+fix_nnp() {
+  [[ "$(id -u)" == "0" ]] || die "--fix-nnp 需要 root"
+  local unit
+  unit="$(unit_file)"
+  [[ -f "$unit" ]] || die "找不到服务单元: $unit"
+  if grep -qE '^[[:space:]]*NoNewPrivileges[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$' "$unit"; then
+    cp -p "$unit" "${unit}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    sed -i -E '/^[[:space:]]*NoNewPrivileges[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' "$unit"
+    log "已从服务单元移除 NoNewPrivileges=true"
+  fi
+  if [[ "$(systemd_state)" == "ok" ]]; then
+    systemctl daemon-reload
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+      systemctl restart "$SERVICE_NAME"
+    fi
+  fi
+  if [[ "$(nnp_state)" == "enabled" ]]; then
+    die "服务仍启用 NoNewPrivileges，请检查 systemd drop-in（systemctl cat $SERVICE_NAME）"
+  fi
+  log "NoNewPrivileges 已关闭；受限 sudo 升级助手可重新生效"
 }
 
 fix_sudo() {
@@ -298,6 +347,13 @@ main() {
   [[ "$(id -u)" == "0" ]] || die "修复需要 root。请用 root 控制台执行，或先运行 --diagnose 查看原因；没有 root 时只能 --manual"
 
   diagnose || true
+  if [[ "$(nnp_state)" == "enabled" ]]; then
+    if [[ "$FIX_NNP" -eq 1 ]]; then
+      fix_nnp
+    else
+      die "服务单元启用 NoNewPrivileges=true，sudo 无法提权；加 --fix-nnp 重试"
+    fi
+  fi
   if [[ "$(sudo_state)" != "ok" ]]; then
     if [[ "$FIX_SUDO" -eq 1 ]]; then
       fix_sudo

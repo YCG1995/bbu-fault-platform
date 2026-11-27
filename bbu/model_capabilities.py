@@ -75,7 +75,8 @@ class ModelCapabilityStore:
         if provider == "mock":
             return self.save(model, {"json_mode": True, "strict_schema": True,
                                      "usage": True, "context_window": 32768,
-                                     "max_output": 4096, "degraded": False},
+                                     "max_output": 4096, "max_output_declared": True,
+                                     "degraded": False},
                              source="mock")
         mode = self.mode()
         if declared:
@@ -84,27 +85,67 @@ class ModelCapabilityStore:
                     "usage": bool(declared.get("usage", True)),
                     "context_window": int(declared.get("context_window") or 32768),
                     "max_output": int(declared.get("max_output") or 4096),
+                    "max_output_declared": bool(declared.get("max_output")),
                     "degraded": bool(declared.get("degraded", False)),
                     "probe_error": ""}
+            # Preserve a recent schema degradation even when capabilities are
+            # explicitly declared; otherwise the admin capability view would
+            # always report degraded=false after a schema breaker trip.
+            cached = self.cached(model)
+            if cached and cached.get("degraded"):
+                base.update({
+                    "degraded": True,
+                    "probe_error": str(cached.get("probe_error") or "")[:300],
+                    "schema_failed_at": cached.get("schema_failed_at") or "",
+                })
             return self.save(model, base, source="declared")
         cached = self.cached(model)
         if cached and mode != "probe":
+            cached.setdefault("max_output_declared", bool(extra.get("max_output")))
             return cached
         if not probe or self.call_probe is None:
             base = {"json_mode": True, "strict_schema": False, "usage": True,
                     "context_window": int(extra.get("context_window") or 32768),
                     "max_output": int(extra.get("max_output") or model.get("max_tokens") or 4096),
+                    "max_output_declared": bool(extra.get("max_output")),
                     "degraded": True, "probe_error": "未探测，按支持 JSON Mode 的保守假设运行"}
             return self.save(model, base, source="assumed")
         try:
             caps = self.call_probe(model)
             return self.save(model, caps, source="probe")
         except Exception as exc:  # noqa: BLE001 - 探测失败要降级，不能阻断模型调用
+            # 本地排队拒绝不是端点故障；不要把它写成 degraded，否则下一次
+            # 能力查询会误显示“模型坏了”。直接返回保守能力，不落缓存。
+            if getattr(exc, "circuit_break", True) is False:
+                return {"json_mode": True, "strict_schema": False, "usage": False,
+                        "context_window": int(extra.get("context_window") or 32768),
+                        "max_output": int(extra.get("max_output") or model.get("max_tokens") or 4096),
+                        "max_output_declared": bool(extra.get("max_output")),
+                        "degraded": False,
+                        "probe_error": f"能力探测排队已满，暂按默认能力运行：{str(exc)[:240]}"}
             base = {"json_mode": False, "strict_schema": False, "usage": False,
                     "context_window": int(extra.get("context_window") or 32768),
                     "max_output": int(extra.get("max_output") or model.get("max_tokens") or 4096),
+                    "max_output_declared": bool(extra.get("max_output")),
                     "degraded": True, "probe_error": str(exc)[:300]}
             return self.save(model, base, source="probe_failed")
+
+    def mark_degraded(self, model: dict[str, Any], reason: str,
+                      caps: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Persist a schema/runtime degradation without re-probing the endpoint.
+
+        The cached capability is kept (json_mode/context_window are still
+        useful), but a degraded flag and the most recent error let the model
+        status page explain why the endpoint was skipped.
+        """
+        base = dict(caps or self.cached(model) or {})
+        if not base:
+            base = {"json_mode": True, "strict_schema": False, "usage": False,
+                    "context_window": 32768, "max_output": 4096,
+                    "max_output_declared": True}
+        base.update({"degraded": True, "probe_error": str(reason or "")[:300],
+                     "schema_failed_at": iso_now()})
+        return self.save(model, base, source="schema_failure")
 
     def public(self, model: dict[str, Any]) -> dict[str, Any]:
         return self.get(model, probe=True)

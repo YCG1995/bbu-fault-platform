@@ -14,8 +14,10 @@ from typing import Any
 import yaml
 
 from .ai import AIGateway, AIError, Budget, NoModelError
+from .approvals import publish_gate
 from .data_egress import DataEgressPolicy
 from .db import Database
+from .evidence_digest import build_digest
 from .prompts import (WORKSHOP_EXTRACT_SYSTEM, WORKSHOP_REVIEW_SCHEMA,
                       WORKSHOP_REVIEW_SYSTEM, WORKSHOP_SPEC_SCHEMA,
                       workshop_extract_user, workshop_repair_user,
@@ -26,7 +28,7 @@ from .workshop_spec import (audit_spec, compile_profile, derive_skill_name,
 from .workshop_recipes import list_recipes
 from .storage import extract_inputs, sample_text_files
 from .util import (env_with_vendor, iso_now, new_id, read_json, safe_filename,
-                   unique_path, write_json, write_text)
+                   sha256_file, unique_path, write_json, write_text)
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
 
@@ -134,6 +136,7 @@ class WorkshopService:
         self.registry = registry
         self.gateway = gateway
         self.meta = Path(config.meta_skill_dir)
+        self.domain_pack = str(getattr(config, "domain_pack", "bbu") or "bbu")
         # 生成是同步执行的；服务启动时仍停留在 generating/analyzing，说明上次进程异常中断。
         self._recover_interrupted()
 
@@ -433,20 +436,32 @@ class WorkshopService:
 
     # ---------- 日志与 AI 起草 ----------
     def attach_logs(self, draft_id: str, files: list[dict[str, Any]], *,
-                    progress: Any = None, model_override: int | None = None) -> dict[str, Any]:
+                    progress: Any = None, model_override: int | None = None,
+                    trace: Any = None, auto_cases: bool = False) -> dict[str, Any]:
         row = self.get(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
         log_dir = draft_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        moved: list[dict[str, Any]] = []
         for item in files:
             src = Path(item["stored_path"])
-            shutil.move(str(src), unique_path(log_dir, src.name))
+            relative = str(item.get("relative_path") or item.get("name") or src.name)
+            dest = unique_path(log_dir, src.name)
+            shutil.move(str(src), dest)
+            moved.append({"stored_path": str(dest), "name": relative,
+                          "relative_path": relative})
         self.db.execute("UPDATE workshop_drafts SET log_path=?, updated_at=? WHERE id=?",
                         (str(log_dir), iso_now(), draft_id))
-        return self.analyze(draft_id, progress=progress, model_override=model_override)
+        result = self.analyze(draft_id, progress=progress, model_override=model_override,
+                              trace=trace)
+        if auto_cases:
+            auto = self.auto_match_cases(draft_id, moved)
+            result = self.get(draft_id)
+            result["auto_cases"] = auto
+        return result
 
     def analyze(self, draft_id: str, *, progress: Any = None,
-                model_override: int | None = None) -> dict[str, Any]:
+                model_override: int | None = None, trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         self._invalidate_build(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
@@ -469,15 +484,29 @@ class WorkshopService:
                 self.db.execute("UPDATE workshop_drafts SET status='needs_confirmation', last_error=? WHERE id=?",
                                 (f"日志解压失败: {exc}", draft_id))
                 raise ValueError(f"日志解压失败: {exc}") from exc
-            extras = {"extract": extract_stats, "rule_candidates": self._scan_rules(extracted),
-                      "samples": sample_text_files(extracted, max_files=6, max_lines=30, max_chars=5000)}
+            rule_candidates = self._scan_rules(extracted)
+            digest = build_digest(
+                extracted,
+                max_chars=int(self.config.get("workshop_digest_max_chars",
+                                              self.config.get("workshop_egress_max_chars", 12000))),
+                max_lines=int(self.config.get("workshop_digest_max_lines", 4000)),
+                candidates=rule_candidates)
+            extras = {"extract": extract_stats, "rule_candidates": rule_candidates,
+                      "digest": digest,
+                      "samples": sample_text_files(
+                          extracted, max_files=6, max_lines=30, max_chars=5000, digest=digest)}
         elif not row.get("source_text"):
             raise ValueError("请先粘贴故障资料或上传日志/案例包")
         self._progress(progress, "extract", 22, "日志盘点完成，开始语义提取")
-        return self._generate(draft_id, extras, progress=progress, model_override=model_override)
+        if trace:
+            trace.append("stage", phase="extract", status="running", progress=22,
+                         message="日志盘点完成，开始语义提取")
+        return self._generate(draft_id, extras, progress=progress,
+                              model_override=model_override, trace=trace)
 
     def _generate(self, draft_id: str, extras: dict[str, Any] | None = None, *,
-                  progress: Any = None, model_override: int | None = None) -> dict[str, Any]:
+                  progress: Any = None, model_override: int | None = None,
+                  trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         self._invalidate_build(draft_id)
         source_text = str(row.get("source_text") or "").strip()
@@ -485,6 +514,11 @@ class WorkshopService:
         analysis.update({"model": "", "source": "deterministic", "notes": [], "attempts": [],
                          "extract_status": "not_run", "review_status": "not_run",
                          "repair_status": "not_run"})
+        digest = analysis.get("digest") or {}
+        if not source_text and digest.get("summary_text"):
+            source_text = str(digest["summary_text"])
+            analysis["upload_only"] = True
+            analysis["notes"].append("未粘贴需求文本，使用日志证据摘要作为确定性来源；请人工确认技能语义。")
         if not source_text:
             # 兼容自学习和手工旧草稿：没有原始需求文本时保留人工 profile，不用空骨架覆盖。
             analysis["ai_status"] = "not_applicable"
@@ -500,6 +534,42 @@ class WorkshopService:
             return self.get(draft_id)
 
         spec = parse_source(source_text, recipe_id=str(row.get("recipe_id") or ""))
+        if analysis.get("upload_only"):
+            # 纯日志草稿没有需求文本，必须从确定性摘要生成可执行规则，避免空 profile。
+            candidates = analysis.get("rule_candidates") or {}
+            suggestions = (candidates.get("rule_suggestions")
+                           if isinstance(candidates, dict) else []) or []
+            rules = []
+            for idx, item in enumerate(suggestions[:8], 1):
+                if not isinstance(item, dict):
+                    continue
+                any_of = [str(x) for x in item.get("any_of") or [] if str(x).strip()]
+                if not any_of:
+                    continue
+                rules.append({
+                    "id": f"E{idx}", "description": str(item.get("description") or "")[:120],
+                    "globs": [str(x) for x in item.get("globs") or []][:4] or ["**/*.log*"],
+                    "all_of": [], "any_of": any_of[:6], "none_of": [],
+                    "min_matches": 1, "verified": False, "critical": False,
+                })
+            if rules and not spec.get("evidence_rules"):
+                spec["evidence_rules"] = rules
+                spec["compiler"] = "log-digest"
+                spec["summary"] = spec.get("summary") or "根据上传日志的确定性摘要生成候选证据规则"
+            sources = []
+            seen = set()
+            for sample in digest.get("samples") or []:
+                file = str(sample.get("file") or "").replace("\\", "/")
+                base = file.rsplit("/", 1)[-1]
+                key = sample.get("class") or base
+                if not base or key in seen:
+                    continue
+                seen.add(key)
+                sources.append({"name": str(sample.get("class") or "日志"),
+                                "globs": [f"**/{base}", f"**/*{Path(base).suffix}"],
+                                "paths": [file], "notes": "来自日志摘要的代表样本"})
+            if sources and not spec.get("log_sources"):
+                spec["log_sources"] = sources
         ai_status = "not_configured"
         budget = Budget(4, int(self.config.get("max_total_tokens", 200000)))
         egress = DataEgressPolicy.for_workshop(self.config)
@@ -528,11 +598,12 @@ class WorkshopService:
                 self._progress(progress, "extract", 30, "AI 正在提取故障语义与证据规则")
                 result = self.gateway.complete(
                     "workshop", WORKSHOP_EXTRACT_SYSTEM,
-                    workshop_extract_user(source_context, safe_spec(spec)),
+                    workshop_extract_user(source_context, safe_spec(spec),
+                                          digest if digest else None),
                     json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:extract", budget=budget,
                     max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
                     model_override=model_override, stage="extract", stream=True,
-                    attempt_sink=attempt_sink)
+                    attempt_sink=attempt_sink, trace=trace)
                 spec = merge_specs(spec, result.data or {})
                 analysis["model"] = result.model_name
                 analysis["source"] = "ai"
@@ -569,7 +640,7 @@ class WorkshopService:
                     workshop_review_user(source_context, safe_spec(spec), quality),
                     json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review", budget=budget,
                     max_tokens=review_budget, temperature=0.1, model_override=model_override,
-                    stage="review", stream=True, attempt_sink=attempt_sink)
+                    stage="review", stream=True, attempt_sink=attempt_sink, trace=trace)
                 review = result.data or {}
                 analysis["review_status"] = "success"
                 quality = self._merge_review(quality, review)
@@ -582,7 +653,7 @@ class WorkshopService:
                         json_schema=WORKSHOP_SPEC_SCHEMA, purpose="workshop:repair", budget=budget,
                         max_tokens=min(12000, int(self.config.get("max_tokens", 16384))),
                         model_override=model_override, stage="repair", stream=True,
-                        attempt_sink=attempt_sink)
+                        attempt_sink=attempt_sink, trace=trace)
                     spec = merge_specs(spec, repair.data or {})
                     analysis["repair_status"] = "success"
                     quality = audit_spec(spec)
@@ -596,7 +667,7 @@ class WorkshopService:
                         json_schema=WORKSHOP_REVIEW_SCHEMA, purpose="workshop:review-final",
                         budget=budget, max_tokens=min(3000, review_budget),
                         temperature=0.1, model_override=model_override, stage="review-final",
-                        stream=True, attempt_sink=attempt_sink)
+                        stream=True, attempt_sink=attempt_sink, trace=trace)
                     review = result.data or {}
                     analysis["review_status"] = "success"
                     quality = self._merge_review(quality, review)
@@ -610,6 +681,15 @@ class WorkshopService:
             analysis["review_status"] = "skipped"
             analysis["repair_status"] = "skipped"
 
+        if digest:
+            analysis["digest"] = {
+                "inventory": digest.get("inventory") or {},
+                "timeline": digest.get("timeline") or [],
+                "candidates": digest.get("candidates") or [],
+                "samples": digest.get("samples") or [],
+                "coverage_notes": digest.get("coverage_notes") or [],
+                "anomaly_count": len(digest.get("anomaly_lines") or []),
+            }
         analysis["intake"] = public_spec(spec)
         analysis["quality"] = quality
         analysis["review"] = review
@@ -634,10 +714,21 @@ class WorkshopService:
         blocking = any(q.get("blocking") for q in quality.get("questions") or [])
         status = "needs_confirmation" if not quality["ok"] or not check["ok"] or blocking else "generated"
         last_error = "" if check["ok"] else "；".join(check.get("errors") or ["profile 校验未通过"])
+        if trace:
+            quality_errors = [str(x.get("message") or x) for x in quality.get("errors") or []]
+            trace.validation(
+                phase="check", name="workshop_profile_and_quality",
+                ok=bool(quality.get("ok")) and bool(check.get("ok")) and not blocking,
+                errors=(quality_errors + list(check.get("errors") or []))[:30],
+                details={"quality_score": quality.get("score"),
+                         "quality_ok": quality.get("ok"), "profile_ok": check.get("ok"),
+                         "blocking": blocking, "status": status})
         self.db.execute(
             "UPDATE workshop_drafts SET name=?, title=?, fault_name=?, category=?, description=?, profile_yaml=?, "
             "analysis_json=?, check_json=?, status=?, last_error=?, updated_at=? WHERE id=?",
-            (final_name, spec["title"], spec["fault_name"], spec.get("category") or "硬件故障",
+            (final_name, spec["title"], spec["fault_name"],
+             "自学习" if str(row.get("category") or "") == "自学习"
+             else (spec.get("category") or "硬件故障"),
              spec.get("summary") or row["description"], profile_yaml,
              json.dumps(analysis, ensure_ascii=False, default=str),
              json.dumps(check, ensure_ascii=False, default=str), status, last_error, iso_now(), draft_id))
@@ -664,7 +755,7 @@ class WorkshopService:
         return merged
 
     def refine(self, draft_id: str, text: str, *, progress: Any = None,
-               model_override: int | None = None) -> dict[str, Any]:
+               model_override: int | None = None, trace: Any = None) -> dict[str, Any]:
         row = self.get(draft_id)
         if row["status"] == "published":
             raise ValueError("已发布草稿不可重建，请新建版本")
@@ -696,6 +787,90 @@ class WorkshopService:
         return data
 
     # ---------- 校验与构建 ----------
+    def try_rules(self, draft_id: str) -> dict[str, Any]:
+        """用当前 profile 的规则对已解压日志做一次只读试跑。"""
+        row = self.get(draft_id)
+        draft_dir = self.config.data_dir / "workshop" / draft_id
+        extracted = draft_dir / "extracted"
+        if not extracted.exists() or not any(extracted.rglob("*")):
+            return {"ok": False, "error": "还没有可试跑的日志，请先在资料输入上传日志包并完成解析"}
+        try:
+            profile = yaml.safe_load(row.get("profile_yaml") or "") or {}
+        except yaml.YAMLError as exc:
+            return {"ok": False, "error": f"profile 不是合法 YAML: {exc}"}
+        rules = []
+        for step in (profile.get("analysis") or {}).get("steps") or []:
+            for rule in (step or {}).get("rules") or []:
+                item = {k: rule.get(k) for k in (
+                    "id", "description", "type", "globs", "all_of", "any_of", "none_of",
+                    "min_matches", "min_files", "file_scope", "critical",
+                    "context_lines", "case_sensitive", "value_pattern",
+                    "threshold", "abs_threshold", "sustained_count", "window_minutes",
+                    "trend", "associate_by") if rule.get(k) not in (None, "", [])}
+                item.setdefault("type", "text")
+                item.setdefault("case_sensitive", False)
+                item.setdefault("min_matches", 1)
+                item.setdefault("context_lines", 2)
+                item["step"] = step.get("id")
+                rules.append(item)
+        if not rules:
+            return {"ok": False, "error": "当前 profile 没有可执行规则"}
+        rules_path = draft_dir / "try-rules.yaml"
+        write_text(rules_path, yaml.safe_dump({"rules": rules}, allow_unicode=True, sort_keys=False))
+        out_json = draft_dir / "try-evidence.json"
+        script = self.meta / "scripts" / "search_evidence.py"
+        if not script.exists():
+            return {"ok": False, "error": "元 Skill 缺少 search_evidence.py"}
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script), str(extracted), "--rules", str(rules_path),
+                 "--json", str(out_json)], cwd=str(self.meta), env=env_with_vendor(),
+                capture_output=True, text=True, timeout=180)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if proc.returncode != 0:
+            return {"ok": False, "error": ((proc.stderr or proc.stdout or "未知错误")[-1200:])}
+        try:
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "error": f"试跑结果无法解析: {exc}"}
+        raw_results = data.get("results") or []
+        hits = []
+        details = []
+        for r in raw_results:
+            rid = r.get("rule_id") or r.get("id")
+            evidence = r.get("evidence") or []
+            detail = {
+                "id": rid, "hit": bool(r.get("hit")),
+                "match_count": r.get("match_count") or 0,
+                "files_eligible": r.get("files_eligible", r.get("files_scanned", 0)),
+                "files_hit": r.get("files_hit") or [],
+                "files_missed": r.get("files_missed") or [],
+                "hits_by_file": r.get("hits_by_file") or {},
+                "file_coverage": r.get("file_coverage", 0),
+                "file_scope": r.get("file_scope", "any"),
+                "min_files": r.get("min_files", 0),
+                "skipped_count": r.get("skipped_count", 0),
+                "near_misses": r.get("near_misses") or [],
+            }
+            details.append(detail)
+            if not r.get("hit"):
+                continue
+            hits.append({
+                "id": rid, "match_count": r.get("match_count") or 0,
+                "files": (r.get("files_hit") or [e.get("file") for e in evidence
+                                                  if e.get("file")])[:5],
+                "excerpts": [(e.get("text") or e.get("line") or "") for e in evidence][:5],
+            })
+        missed = [r.get("rule_id") or r.get("id") for r in raw_results if not r.get("hit")]
+        missed_files = sorted({f for d in details for f in d["files_missed"]})
+        return {"ok": True, "rules": len(rules), "hits": hits, "missed": missed,
+                "rule_details": details, "missed_files": missed_files,
+                "near_misses": [{"rule_id": d["id"], "lines": d["near_misses"]}
+                                for d in details if d["near_misses"]],
+                "root_causes": data.get("root_causes") or [],
+                "excerpt": (proc.stdout or "")[:5000]}
+
     def check(self, profile_yaml: str) -> dict[str, Any]:
         draft_dir = self.config.data_dir / "workshop" / "_check"
         draft_dir.mkdir(parents=True, exist_ok=True)
@@ -705,17 +880,25 @@ class WorkshopService:
             return {"ok": False, "output": "元 Skill 缺少 scaffold_child_skill.py"}
         try:
             proc = subprocess.run(
-                [sys.executable, str(script), "--profile", str(path), "--check"],
+                [sys.executable, str(script), "--profile", str(path), "--check", "--json",
+                 "--domain-pack", self.domain_pack],
                 cwd=str(self.meta), env=env_with_vendor(), capture_output=True,
                 text=True, timeout=120)
         except (subprocess.TimeoutExpired, OSError) as exc:
             return {"ok": False, "output": str(exc)}
         output = (proc.stdout or "") + (proc.stderr or "")
+        payload = {}
+        try:
+            payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            payload = {}
         return {
-            "ok": proc.returncode == 0,
+            "ok": proc.returncode == 0 and bool(payload.get("ok", True)),
             "exit_code": proc.returncode,
             "output": output[:6000],
-            "errors": self._extract_errors(output),
+            "errors": payload.get("errors") or self._extract_errors(output),
+            "warnings": payload.get("warnings") or [],
+            "domain_pack": payload.get("domain_pack") or {},
             "unverified_rules": self._unverified_rules(profile_yaml),
         }
         # path 保留用于排错；正常流程由 /check 复用
@@ -761,11 +944,52 @@ class WorkshopService:
         if not changed:
             raise ValueError("没有需要标记的未验证规则")
         new_yaml = yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False)
-        self.update_draft(draft_id, {"profile_yaml": new_yaml})
         check = self.check(new_yaml)
-        self.db.execute("UPDATE workshop_drafts SET check_json=?, updated_at=? WHERE id=?",
-                        (json.dumps(check, ensure_ascii=False), iso_now(), draft_id))
-        return {"ok": True, "changed": changed, "profile_yaml": new_yaml, "check": check}
+
+        # 规则确认必须同时更新草稿的“当前状态”，否则页面仍会从旧分析快照
+        # 读取 verified=false 和历史质量错误，出现“已确认但仍待确认”的矛盾。
+        analysis = dict(row.get("analysis") or {})
+        intake = dict(analysis.get("intake") or {})
+        for rule in intake.get("evidence_rules") or []:
+            rid = str((rule or {}).get("id") or "")
+            if rid in changed:
+                rule["verified"] = True
+        for suggestion in (analysis.get("rule_candidates") or {}).get("rule_suggestions") or []:
+            rule = (suggestion or {}).get("rule") or {}
+            rid = str(rule.get("id") or "")
+            if rid in changed:
+                rule["verified"] = True
+        quality = dict(analysis.get("quality") or {})
+        errors = list(quality.get("errors") or [])
+        kept_errors, resolved = [], []
+        for item in errors:
+            field = str((item or {}).get("field") or "")
+            if any(re.search(rf"(^|[^A-Za-z0-9_]){re.escape(rid)}($|[^A-Za-z0-9_])", field)
+                   for rid in changed):
+                resolved.append({**(item or {}), "resolved_by": "rule_confirmed"})
+            else:
+                kept_errors.append(item)
+        quality["errors"] = kept_errors
+        quality["resolved"] = list(quality.get("resolved") or []) + resolved
+        quality["ok"] = not kept_errors
+        if isinstance(quality.get("counts"), dict):
+            counts = dict(quality["counts"])
+            counts["errors"] = len(kept_errors)
+            quality["counts"] = counts
+        analysis["intake"] = intake
+        analysis["quality"] = quality
+        check["quality"] = quality
+        blocking = any(q.get("blocking") for q in quality.get("questions") or [])
+        status = "generated" if check.get("ok") and quality.get("ok") and not blocking else "needs_confirmation"
+        last_error = "" if check.get("ok") else "；".join(check.get("errors") or ["profile 校验未通过"])
+        self.db.execute(
+            "UPDATE workshop_drafts SET profile_yaml=?, analysis_json=?, check_json=?, status=?, "
+            "last_error=?, updated_at=? WHERE id=?",
+            (new_yaml, json.dumps(analysis, ensure_ascii=False, default=str),
+             json.dumps(check, ensure_ascii=False), status, last_error, iso_now(), draft_id))
+        self._invalidate_build(draft_id)
+        return {"ok": True, "changed": changed, "profile_yaml": new_yaml, "check": check,
+                "analysis": analysis, "status": status}
 
     def _extract_errors(self, output: str) -> list[str]:
         lines = []
@@ -798,7 +1022,10 @@ class WorkshopService:
                     "error": "领域配方已变更，当前 profile 仍是旧配方生成的规则；请先重新分析后再构建"}
         draft_dir = self.config.data_dir / "workshop" / draft_id
         profile_path = draft_dir / "profile.yaml"
-        write_text(profile_path, row["profile_yaml"])
+        parsed_profile.setdefault("rule_scope_v2",
+                                  str(self.config.get("rule_scope_v2", "shadow")))
+        write_text(profile_path, yaml.safe_dump(parsed_profile, allow_unicode=True,
+                                                sort_keys=False))
         check = self.check(row["profile_yaml"])
         self.db.execute("UPDATE workshop_drafts SET check_json=?, updated_at=? WHERE id=?",
                         (json.dumps(check, ensure_ascii=False), iso_now(), draft_id))
@@ -820,6 +1047,8 @@ class WorkshopService:
         cmd = [sys.executable, str(self.meta / "scripts" / "build_child_skill.py"),
                "--profile", str(profile_path), "--path", str(staging),
                "--json", str(build_json)]
+        domain_id = str((parsed.get("domain_pack") or {}).get("id") or self.domain_pack)
+        cmd += ["--domain-pack", domain_id]
         if regression_run:
             cmd += ["--cases-dir", str(self.config.cases_dir)]
         else:
@@ -842,7 +1071,11 @@ class WorkshopService:
             and int(regression.get("passed") or 0) == int(regression.get("total") or 0)
             and int(regression.get("failed") or 0) == 0
             and int(regression.get("errors") or 0) == 0)
-        verified_mode = bool(ok and regression_ok)
+        attestation = read_json(skill_dir / "assets" / "build-attestation.json", {}) or {}
+        attestation_verification = attestation.get("verification") or {}
+        attestation_ok = bool(attestation_verification.get("status") == "case_regression"
+                              and attestation_verification.get("ok"))
+        verified_mode = bool(ok and regression_ok and attestation_ok)
         payload = {
             "ok": ok,
             "verified": verified_mode,
@@ -851,6 +1084,8 @@ class WorkshopService:
             "output": output[-6000:],
             "result": result,
             "regression": regression,
+            "attestation": attestation,
+            "domain": (read_json(skill_dir / "assets" / "skill-manifest.json", {}) or {}).get("domain") or {},
             "skill_dir": str(skill_dir) if skill_dir.exists() else "",
         }
         if not ok:
@@ -882,7 +1117,83 @@ class WorkshopService:
              iso_now(), draft_id))
         return payload
 
-    def publish(self, draft_id: str, username: str) -> dict[str, Any]:
+    def _publish_coverage(self, row: dict[str, Any]) -> dict[str, Any]:
+        """O4：发布前重新计算案例覆盖，不信任 build.verified。"""
+        name = row["name"]
+        profile = yaml.safe_load(row.get("profile_yaml") or "") or {}
+        rules = {}
+        for step in (profile.get("analysis") or {}).get("steps") or []:
+            for rule in step.get("rules") or []:
+                if rule.get("id"):
+                    rules[str(rule["id"])] = rule
+        cases = []
+        case_root = self.config.cases_dir / name
+        if case_root.exists():
+            for p in sorted(case_root.glob("*/case.yaml")):
+                try:
+                    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                except (OSError, yaml.YAMLError):
+                    continue
+                cases.append(data)
+        roots = profile.get("root_causes") or []
+        positive_by_root = {str(rc.get("id")): [] for rc in roots}
+        covered_by_root = {str(rc.get("id")): set() for rc in roots}
+        for case in cases:
+            expected = case.get("expected") or {}
+            rid = str(expected.get("root_cause") or "")
+            kind = str(case.get("kind") or "positive")
+            if rid in positive_by_root and kind != "negative":
+                positive_by_root[rid].append(str(case.get("id") or ""))
+                covered_by_root[rid].update(str(x) for x in expected.get("hit_rules") or [])
+                covered_by_root[rid].update(str(x) for x in expected.get("not_hit_rules") or [])
+        blocking, warnings, rows = [], [], {}
+        for rc in roots:
+            rid = str(rc.get("id"))
+            required = set(re.findall(r"\b[A-Z]\d+\b", rc.get("condition", "") or ""))
+            missing = sorted(required - covered_by_root.get(rid, set()))
+            if not positive_by_root.get(rid):
+                blocking.append(f"根因 {rid} 没有非负例案例")
+            if missing:
+                blocking.append(f"根因 {rid} 的 condition 规则未被其案例验证: {missing}")
+            rows[rid] = {"cases": positive_by_root.get(rid, []),
+                         "required_rules": sorted(required), "missing_rules": missing}
+        critical = {rid for rid, r in rules.items() if r.get("critical") is True}
+        for rid in sorted(critical):
+            pos_hit = [c.get("id") for c in cases
+                       if str((c.get("expected") or {}).get("root_cause") or "") != "NONE"
+                       and rid in {str(x) for x in (c.get("expected") or {}).get("hit_rules") or []}]
+            neg = [c.get("id") for c in cases
+                   if str((c.get("expected") or {}).get("root_cause") or "NONE") == "NONE"
+                   or str(c.get("kind") or "") == "negative"]
+            if not pos_hit or not neg:
+                blocking.append(f"关键规则 {rid} 需要至少 1 个正例和 1 个反例")
+        if not [c for c in cases
+                if str((c.get("expected") or {}).get("root_cause") or "NONE") == "NONE"]:
+            blocking.append("发布前至少需要 1 个故障正例和 1 个正常/反例，并全部通过回归；"
+                            "根因缺少 negative 反证案例")
+        required_sources = (profile.get("evidence") or {}).get("required_sources") or []
+        source_rows = []
+        for src in required_sources:
+            if not isinstance(src, dict):
+                continue
+            sid = str(src.get("id") or "")
+            title = str(src.get("title") or sid)
+            source_rows.append({"id": sid, "title": title, "cases": len(cases),
+                                "required": bool(src.get("required", True))})
+            if not cases:
+                warnings.append(f"required source {sid or title} 无任何案例输入，无法验证覆盖")
+        for rid, rule in sorted(rules.items()):
+            if cases and rule.get("globs"):
+                continue
+            if rule.get("globs"):
+                warnings.append(f"规则 {rid} glob 无案例输入，无法验证覆盖")
+        return {"ok": not blocking, "blocking": blocking, "warnings": warnings,
+                "root_causes": rows, "critical_rules": sorted(critical),
+                "required_sources": source_rows, "cases": len(cases)}
+
+    def publish(self, draft_id: str, username: str, override_reason: str = "",
+                approvals: list[dict[str, Any]] | None = None,
+                channel: str = "stable", emergency_reason: str = "") -> dict[str, Any]:
         row = self.get(draft_id)
         build = row.get("build") or {}
         if not build.get("ok"):
@@ -893,16 +1204,23 @@ class WorkshopService:
         if quality and not quality.get("ok", True):
             raise ValueError("技能质量审查未通过，请先处理错误或补充确认")
         name = row["name"]
-        kinds = set()
-        case_root = self.config.cases_dir / name
-        if case_root.exists():
-            for path in case_root.glob("*/case.yaml"):
-                try:
-                    kinds.add(str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("kind") or ""))
-                except (OSError, yaml.YAMLError):
-                    continue
-        if "positive" not in kinds or "negative" not in kinds:
-            raise ValueError("发布前至少需要 1 个故障正例和 1 个正常/反例，并全部通过回归")
+        if approvals or emergency_reason:
+            gate = publish_gate(channel=channel, approvals=approvals,
+                                emergency_reason=emergency_reason, actor=username)
+            if not gate.get("ok"):
+                raise ValueError(str(gate.get("message") or "发布审批未通过"))
+            if gate.get("emergency"):
+                self.db.audit(None, username, "skill.publish.emergency", draft_id,
+                              {"reason": emergency_reason, "channel": channel,
+                               "follow_up_within_hours": 24})
+        coverage = self._publish_coverage(row)
+        override = ""
+        if not coverage["ok"]:
+            reason = str(override_reason or "").strip()
+            if len(reason) < 10:
+                raise ValueError("发布覆盖不足：" + "；".join(coverage["blocking"])
+                                 + "。如确需发布，请填写不少于 10 字的理由")
+            override = reason
         version = build.get("version") or "0.1.0"
         src = self.config.data_dir / "skill_versions" / name / version
         if not src.exists():
@@ -919,10 +1237,16 @@ class WorkshopService:
                        {"draft_id": draft_id, "published_at": iso_now(),
                         "published_by": username, "verified": build.get("verified")})
             from .supply import sign_skill
+            attestation_path = target / "assets" / "build-attestation.json"
+            attestation = read_json(attestation_path, {}) or {}
             sign_skill(
                 target, data_dir=self.config.data_dir, name=name, version=version,
                 builder="workshop",
                 verification={"status": "case_regression", "ok": bool(build.get("verified")),
+                              "attestation_sha256": sha256_file(attestation_path)
+                              if attestation_path.exists() else "",
+                              "engine_digest": str((attestation.get("engine") or {}).get("digest") or ""),
+                              "domain": attestation.get("domain") or {},
                               "regression": build.get("regression") or
                               (build.get("result") or {}).get("regression") or {},
                               "draft_id": draft_id, "published_by": username})
@@ -938,10 +1262,12 @@ class WorkshopService:
         self.db.execute("UPDATE workshop_drafts SET status='published', last_error='', updated_at=? WHERE id=?",
                         (iso_now(), draft_id))
         self.registry.scan()
-        self.db.audit(None, username, "skill.publish", name,
-                      {"version": version, "verified": bool(build.get("verified"))})
+        self.db.audit(None, username, "skill.publish.override" if override else "skill.publish",
+                      name, {"version": version, "verified": bool(build.get("verified")),
+                             "coverage": coverage, "override_reason": override})
         return {"ok": True, "skill": name, "version": version,
-                "verified": bool(build.get("verified"))}
+                "verified": bool(build.get("verified")),
+                "coverage": coverage, "override": bool(override)}
 
     def rollback(self, skill_name: str, version: str, username: str) -> dict[str, Any]:
         src = self.config.data_dir / "skill_versions" / skill_name / version
@@ -987,6 +1313,241 @@ class WorkshopService:
         return {"ok": True, "skill": skill_name, "version": version}
 
     # ---------- 案例 ----------
+    @staticmethod
+    def _auto_case_norm(value: Any) -> str:
+        """统一案例包名/文件名，便于跨 Windows 路径、括号和扩展名匹配。"""
+        text = str(value or "").replace("\\", "/").lower()
+        text = re.sub(r"\.(?:tar\.gz|tgz|zip|7z|rar|tar|gz|bz2|xz|zst|log|txt|bak|exe)\b", " ", text)
+        text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _auto_case_tokens(cls, value: Any) -> set[str]:
+        return {token for token in cls._auto_case_norm(value).split()
+                if len(token) >= 2}
+
+    @classmethod
+    def _auto_case_score(cls, case: dict[str, Any], file: dict[str, Any]) -> int:
+        """给案例和上传文件打分；包名精确/包含优先，其次案例编号和描述词。"""
+        norm = cls._auto_case_norm(file.get("name") or file.get("basename") or "")
+        tokens = set(norm.split())
+        score = 0
+        packages = [str(x).strip() for x in (case.get("packages") or []) if str(x).strip()]
+        for package in packages:
+            package_norm = cls._auto_case_norm(package)
+            if not package_norm:
+                continue
+            package_tokens = cls._auto_case_tokens(package)
+            if package_norm == norm:
+                score = max(score, 140)
+            elif package_norm in norm or norm in package_norm:
+                score = max(score, 100)
+            elif package_tokens:
+                overlap = len(package_tokens & tokens)
+                if overlap:
+                    score = max(score, min(90, 15 + overlap * 9))
+        case_id = cls._auto_case_norm(case.get("id"))
+        if case_id and (case_id in tokens or case_id in norm):
+            score += 30
+        description_tokens = cls._auto_case_tokens(
+            " ".join([str(case.get("description") or ""), str(case.get("expected_text") or "")]))
+        overlap = len(description_tokens & tokens)
+        if overlap:
+            score += min(24, overlap * 4)
+        return score
+
+    def _auto_case_plan(self, spec: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, Any]:
+        """把资料中的案例元数据和上传文件做确定性匹配。一个案例可绑定多个文件。"""
+        cases = [case for case in (spec.get("cases") or []) if isinstance(case, dict)]
+        roots = [root for root in (spec.get("root_causes") or []) if isinstance(root, dict)]
+        root_ids = {str(root.get("id") or "") for root in roots}
+        first_root = str(roots[0].get("id") or "") if roots else ""
+        warnings: list[str] = []
+        groups: list[dict[str, Any]] = []
+        if not cases:
+            # 没有文字案例时，按上传目录分组；同一目录下的多个文件视为同一案例。
+            by_folder: dict[str, list[dict[str, Any]]] = {}
+            for file in files:
+                parts = [part for part in str(file.get("name") or "").replace("\\", "/").split("/")
+                         if part and part not in (".", "..")]
+                key = parts[0] if len(parts) > 1 else ""
+                by_folder.setdefault(key, []).append(file)
+            for idx, (folder, group_files) in enumerate(by_folder.items(), 1):
+                if not first_root:
+                    warnings.append(f"{folder or '上传文件'}：当前技能没有可用的根因，无法自动建立正例")
+                    continue
+                groups.append({
+                    "case": {
+                        "id": f"case-{idx:02d}", "kind": "positive",
+                        "description": folder or "上传日志自动归组",
+                        "expected_root_cause": first_root,
+                    },
+                    "files": group_files,
+                    "reason": "按上传目录自动归组" if folder else "单组上传文件自动归组",
+                })
+            return {"groups": groups, "unmatched_cases": [], "unassigned": [],
+                    "warnings": warnings, "source_cases": 0}
+
+        candidates: list[tuple[int, int, int]] = []
+        for case_idx, case in enumerate(cases):
+            for file_idx, file in enumerate(files):
+                score = self._auto_case_score(case, file)
+                if score:
+                    candidates.append((score, case_idx, file_idx))
+        assigned: dict[int, int] = {}
+        for score, case_idx, file_idx in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if file_idx in assigned:
+                continue
+            case = cases[case_idx]
+            # 有明确包名时只接受强匹配；没有包名时允许按案例编号/描述匹配。
+            threshold = 60 if case.get("packages") else (20 if len(cases) > 1 else 1)
+            if score < threshold:
+                continue
+            assigned[file_idx] = case_idx
+        if len(cases) == 1:
+            # 只有一个文字案例时，剩余文件都归入该案例，满足“一故障多文件”。
+            for file_idx in range(len(files)):
+                assigned.setdefault(file_idx, 0)
+        for case_idx, case in enumerate(cases):
+            group_files = [files[file_idx] for file_idx, owner in assigned.items()
+                           if owner == case_idx]
+            groups.append({"case": case, "files": group_files,
+                           "reason": "按案例包名/编号/描述匹配"})
+        unmatched_cases = [case for case_idx, case in enumerate(cases)
+                           if not any(owner == case_idx for owner in assigned.values())]
+        unassigned = [files[file_idx] for file_idx in range(len(files)) if file_idx not in assigned]
+        # 多案例但没有包名时，无法可靠分配的文件不强行塞进某个案例。
+        if unmatched_cases and not any(case.get("packages") for case in cases):
+            warnings.append("有案例没有匹配到文件；请检查资料中的案例编号、日志包名或手动上传案例")
+        if unassigned:
+            warnings.append(f"{len(unassigned)} 个上传文件未匹配到任何案例，保留在日志目录")
+        return {"groups": groups, "unmatched_cases": unmatched_cases,
+                "unassigned": unassigned, "warnings": warnings,
+                "source_cases": len(cases)}
+
+    def _auto_case_id(self, draft_id: str, source_id: Any, used: set[str]) -> str:
+        raw = str(source_id or "").strip().lower()
+        candidate = ""
+        match = re.fullmatch(r"c(\d+)", raw)
+        if match:
+            candidate = f"case-{int(match.group(1)):02d}"
+        elif re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", raw):
+            candidate = raw
+        while (not candidate or candidate in used
+               or self.db.one("SELECT id FROM cases WHERE skill_name=? AND case_id=?",
+                              (self.get(draft_id)["name"], candidate))):
+            candidate = self.next_case_id(draft_id)
+        used.add(candidate)
+        return candidate
+
+    def auto_match_cases(self, draft_id: str, files: list[dict[str, Any]]) -> dict[str, Any]:
+        """在日志分析完成后，按资料案例自动建立案例目录并归档匹配文件。
+
+        只做确定性匹配：不读取附件内容当作指令，不猜测文本未声明的根因。
+        文件匹配失败时保留日志目录并返回警告，不阻断工坊主流程。
+        """
+        row = self.get(draft_id)
+        analysis = row.get("analysis") or {}
+        spec = analysis.get("intake") or {}
+        file_items: list[dict[str, Any]] = []
+        for item in files:
+            path = Path(str(item.get("stored_path") or ""))
+            if not path.is_file():
+                continue
+            relative = str(item.get("relative_path") or item.get("name") or path.name)
+            file_items.append({"path": path, "name": relative,
+                               "basename": safe_filename(relative)})
+        if not file_items:
+            return {"enabled": True, "source_cases": 0, "matched": [], "unmatched_cases": [],
+                    "unassigned_files": [], "warnings": ["没有可归档的上传文件"],
+                    "created": []}
+
+        plan = self._auto_case_plan(spec, file_items)
+        roots = [root for root in (spec.get("root_causes") or []) if isinstance(root, dict)]
+        root_ids = {str(root.get("id") or "") for root in roots}
+        first_root_id = str(roots[0].get("id") or "") if roots else ""
+        root_names = {self._auto_case_norm(root.get("name")): str(root.get("id") or "")
+                      for root in roots if root.get("name") and root.get("id")}
+        draft_dir = self.config.data_dir / "workshop" / draft_id
+        staging_root = draft_dir / "auto_case_stage"
+        if staging_root.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        used_ids: set[str] = set()
+        created: list[dict[str, Any]] = []
+        warnings = list(plan.get("warnings") or [])
+        for group in plan.get("groups") or []:
+            case = group.get("case") or {}
+            group_files = [item for item in group.get("files") or [] if item.get("path")]
+            if not group_files:
+                continue
+            source_id = case.get("id")
+            case_id = self._auto_case_id(draft_id, source_id, used_ids)
+            kind = "negative" if case.get("kind") == "negative" else "positive"
+            root = "NONE" if kind == "negative" else str(case.get("expected_root_cause") or "").strip()
+            if kind == "positive" and root and root not in root_ids:
+                # 模型可能返回根因名称而不是 R 编号；按名称再映射一次。
+                mapped = root_names.get(self._auto_case_norm(root), "")
+                if not mapped:
+                    warnings.append(
+                        f"{source_id or case_id}：期望根因 {root} 不在当前技能根因列表中，已跳过自动建例")
+                    continue
+                root = mapped
+            if kind == "positive" and not root:
+                root = first_root_id
+            if kind == "positive" and root not in root_ids:
+                warnings.append(f"{source_id or case_id}：缺少有效根因，已跳过自动建例")
+                continue
+            stage = staging_root / case_id
+            stage.mkdir(parents=True, exist_ok=True)
+            payload: list[dict[str, Any]] = []
+            try:
+                for file in group_files:
+                    dest = unique_path(stage, safe_filename(file.get("basename") or file.get("name")))
+                    shutil.copy2(file["path"], dest)
+                    payload.append({"stored_path": str(dest), "name": file.get("name") or dest.name})
+                description = str(case.get("description") or case.get("expected_text") or "").strip()
+                if source_id:
+                    description = (description + f"（自动匹配 {source_id}）").strip()
+                hit_rules = [str(x).strip() for x in (case.get("evidence") or [])
+                             if re.fullmatch(r"E\d+", str(x).strip())]
+                result = self.attach_case(draft_id, payload, {
+                    "case_id": case_id, "kind": kind, "root_cause": root,
+                    "hit_rules": hit_rules, "description": description or "自动匹配案例",
+                })
+                created.append({"case_id": case_id, "kind": kind, "root_cause": root,
+                                "source_id": str(source_id or ""),
+                                "files": [file.get("name") for file in group_files],
+                                "path": result.get("path")})
+                if result.get("warning"):
+                    warnings.append(str(result["warning"]))
+            except (OSError, ValueError, RuntimeError) as exc:
+                warnings.append(f"{source_id or case_id}：自动建例失败：{exc}")
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        try:
+            staging_root.rmdir()
+        except OSError:
+            pass
+        auto = {
+            "enabled": True,
+            "source_cases": int(plan.get("source_cases") or 0),
+            "matched": created,
+            "unmatched_cases": [
+                {"id": str(case.get("id") or ""),
+                 "description": str(case.get("description") or ""),
+                 "packages": [str(x) for x in (case.get("packages") or [])]}
+                for case in plan.get("unmatched_cases") or []],
+            "unassigned_files": [item.get("name") for item in plan.get("unassigned") or []],
+            "warnings": warnings,
+        }
+        fresh = self.get(draft_id)
+        analysis = fresh.get("analysis") or {}
+        analysis["auto_cases"] = auto
+        self.db.execute("UPDATE workshop_drafts SET analysis_json=?, updated_at=? WHERE id=?",
+                        (json.dumps(analysis, ensure_ascii=False, default=str), iso_now(), draft_id))
+        return auto
+
     def attach_case(self, draft_id: str, files: list[dict[str, Any]],
                     expected: dict[str, Any]) -> dict[str, Any]:
         row = self.get(draft_id)
@@ -1046,7 +1607,7 @@ class WorkshopService:
             "kind": kind,
             "device": str(expected.get("device") or ""),
             "tags": expected.get("tags") or [],
-            "input": {"archive": archive_path},
+            "input": {"archive": "input" if len(files) > 1 else archive_path},
             "pipeline": ["unpack", "search"],
         })
         if expected.get("unpacked_dir"):
@@ -1128,8 +1689,9 @@ class WorkshopService:
                     expected = {}
             input_dir = path / "input"
             if input_dir.exists():
-                for f in sorted(p for p in input_dir.iterdir() if p.is_file()):
-                    files.append({"name": f.name, "size": f.stat().st_size})
+                for f in sorted(p for p in input_dir.rglob("*") if p.is_file()):
+                    files.append({"name": f.relative_to(input_dir).as_posix(),
+                                  "size": f.stat().st_size})
             out.append({**item, "expected": expected, "files": files,
                         "total_bytes": sum(f["size"] for f in files)})
         return out
