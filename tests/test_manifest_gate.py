@@ -187,7 +187,7 @@ def test_ui_manifest_matches_static_source():
     assert set(manifest["forms"]) == set(forms)
 
 
-def test_version_is_1_33_0():
+def test_version_is_1_33_1():
     from bbu import __version__
 
-    assert __version__ == "1.33.0"
+    assert __version__ == "1.33.1"

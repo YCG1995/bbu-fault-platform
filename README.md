@@ -22,6 +22,10 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.33.1 Windows 自更新重启修复
+
+1.33.1 修复 Windows + Python 3.14 在自动更新后无法重启的问题：`os.execv` 会把含空格的解释器路径拆成 `C:\Program` 与 `Files\Python314\python.exe`，新进程报 `can't open file`。Windows 分支改用 `subprocess.Popen` 的 argv 列表启动，POSIX 保持 `execv`。功能、schema 27、REST 243 与 1.33.0 一致；详见 `docs/版本说明-1.33.1.md`。
+
 ## 1.33.0 知识库评测、术语与运营闭环
 
 1.33.0 是第二波增强：把知识库从“可导入、可检索”推进到“可度量、可治理、可运营”。新增评测台、库内同义词检索扩展、近重复合并向导、导入列映射、批量导出报告和 AI 自动发布 dry-run；schema 由 26 升到 **27**，REST 路由由 222 增至 **243**，仍为零第三方依赖的单机离线包。
