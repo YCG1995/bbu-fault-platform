@@ -123,6 +123,9 @@ def main() -> int:
             discovered = page.eval_on_selector_all(
                 "#model-options option", "els => els.map(e => e.value)")
             assert discovered == ["test-model", "test-model-2"], discovered
+            expect(page.locator("#model-select option")).to_have_count(3)
+            page.select_option("#model-select", "test-model-2")
+            assert page.locator("#model-name").input_value() == "test-model-2"
             page.wait_for_timeout(4200)
             page.screenshot(path=str(out / "model-presets-1280.png"), full_page=True)
 
@@ -130,6 +133,18 @@ def main() -> int:
             page.locator('[data-act="save"]').click()
             page.wait_for_selector('.modal-mask', state="detached")
             expect(page.locator("#view")).to_contain_text("test-model", timeout=5000)
+
+            # 编辑已有配置时，datalist 会按当前值过滤；真实 select 必须仍能
+            # 展开并选择刚获取到的其他模型。
+            page.locator('[data-act="edit"]').first.click()
+            page.wait_for_selector(".modal-mask")
+            page.locator("#model-discover").click()
+            expect(page.locator("#model-options option")).to_have_count(2, timeout=10000)
+            expect(page.locator("#model-select option")).to_have_count(3)
+            page.select_option("#model-select", "test-model")
+            assert page.locator("#model-name").input_value() == "test-model"
+            page.locator('[data-act="cancel"]').click()
+            page.wait_for_selector(".modal-mask", state="detached")
 
             page.set_viewport_size({"width": 390, "height": 844})
             page.locator('#page-actions [data-act="new-model"]').click()

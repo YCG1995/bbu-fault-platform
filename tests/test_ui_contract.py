@@ -35,6 +35,13 @@ def test_async_ui_base_and_new_panels_exist():
     assert "来源覆盖" in detail and "站点证据矩阵" in detail
 
 
+def test_model_config_has_real_select_for_discovered_models():
+    admin = _text("web/assets/js/page_admin.js")
+    assert 'id="model-select"' in admin
+    assert "syncModelSelect" in admin
+    assert "modelSelect.addEventListener('change'" in admin
+
+
 def test_list_responses_are_null_safe():
     workshop = _text("web/assets/js/page_workshop.js")
     traces = _text("web/assets/js/page_traces.js")

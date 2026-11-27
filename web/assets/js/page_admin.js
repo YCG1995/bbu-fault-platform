@@ -154,6 +154,7 @@ function openModelModal(model, onDone) {
             <input class="input mono" name="model" id="model-name" list="model-options" value="${esc(initialModel)}" placeholder="${esc(maasModel)}" required style="flex:1;min-width:0">
             <button class="btn" type="button" id="model-discover" data-act="discover">${icon('refresh')}获取</button>
           </div>
+          <select class="select" id="model-select" aria-label="从模型列表选择模型" style="margin-top:8px"></select>
           <datalist id="model-options">${initialModels.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(`${name} · 建议 ${maxTokens}`)}"></option>`).join('')}</datalist>
           <div class="help" id="model-discover-hint">${initialSuggestion ? `建议 max_tokens ${initialSuggestion[1]}` : '获取后可下拉选择，也可直接输入模型名。'}</div>
         </div>
@@ -190,6 +191,7 @@ function openModelModal(model, onDone) {
   const platformSelect = m.body.querySelector('#model-platform');
   const modelInput = m.body.querySelector('#model-name');
   const modelOptions = m.body.querySelector('#model-options');
+  const modelSelect = m.body.querySelector('#model-select');
   const maxInput = m.body.querySelector('#max-tokens');
   const platformNote = m.body.querySelector('#platform-note');
   const discoverHint = m.body.querySelector('#model-discover-hint');
@@ -197,7 +199,28 @@ function openModelModal(model, onDone) {
   let discovering = false;
 
   function renderModelOptions(items) {
-    modelOptions.innerHTML = items.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}"></option>`).join('');
+    const rows = [];
+    const seen = new Set();
+    for (const item of items || []) {
+      const name = String(item?.[0] || '').trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      rows.push([name, item?.[1] || '']);
+    }
+    const current = modelInput.value.trim();
+    if (current && !seen.has(current)) rows.push([current, '']);
+    modelOptions.innerHTML = rows.map(([name, maxTokens]) => `<option value="${esc(name)}" label="${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}"></option>`).join('');
+    // 原生 datalist 在已有值时只会过滤出当前值，编辑配置时用户看不到
+    // 刚获取的其他模型；这里额外提供真实 select，确保所有结果都可选。
+    modelSelect.innerHTML = `<option value="">选择模型…</option>` + rows.map(([name, maxTokens]) =>
+      `<option value="${esc(name)}">${esc(maxTokens ? `${name} · 建议 ${maxTokens}` : name)}</option>`).join('');
+    modelSelect.value = current && rows.some(([name]) => name === current) ? current : '';
+  }
+
+  function syncModelSelect() {
+    const current = modelInput.value.trim();
+    modelSelect.value = current && [...modelSelect.options].some((opt) => opt.value === current)
+      ? current : '';
   }
 
   function applyModelMax() {
@@ -208,6 +231,7 @@ function openModelModal(model, onDone) {
     } else if (modelInput.value) {
       discoverHint.textContent = '自定义模型名，max_tokens 请按服务端限制填写。';
     }
+    syncModelSelect();
   }
 
   function autoName(preset) {
@@ -262,6 +286,13 @@ function openModelModal(model, onDone) {
   });
   baseInput.addEventListener('change', syncFromBase);
   modelInput.addEventListener('change', applyModelMax);
+  modelInput.addEventListener('input', syncModelSelect);
+  modelSelect.addEventListener('change', () => {
+    if (!modelSelect.value) return;
+    modelInput.value = modelSelect.value;
+    applyModelMax();
+  });
+  renderModelOptions(initialModels);
 
   providerSelect.addEventListener('change', () => {
     const defaults = { openai: maasBase, anthropic: 'https://api.anthropic.com', mock: '' };

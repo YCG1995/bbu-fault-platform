@@ -16,6 +16,8 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -44,12 +46,31 @@ class AIError(RuntimeError):
 
     def __init__(self, message: str, *, http_status: int = 0,
                  response_body: str = "", retryable: bool = True,
-                 circuit_break: bool = True) -> None:
+                 circuit_break: bool = True, retry_after: float = 0.0) -> None:
         super().__init__(message)
         self.http_status = int(http_status or 0)
         self.response_body = str(response_body or "")
         self.retryable = bool(retryable)
         self.circuit_break = bool(circuit_break)
+        self.retry_after = max(0.0, float(retry_after or 0))
+
+
+def parse_retry_after(value: Any) -> float:
+    """Parse an HTTP ``Retry-After`` value (seconds or HTTP-date)."""
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return max(0.0, float(text))
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 class NoModelError(AIError):
@@ -920,6 +941,8 @@ class AIGateway:
             self.config.get("llm_retry_backoff_sec", 2.0) if self.config else 1.2))
         jitter = max(0.0, float(
             self.config.get("llm_retry_jitter_sec", 0.5) if self.config else 0.0))
+        rate_limit_backoff = max(0.0, float(
+            self.config.get("llm_rate_limit_backoff_sec", 30) if self.config else 30))
         margin_tokens = max(0, int(
             self.config.get("llm_context_margin_tokens", 256) if self.config else 256))
         attempt_stage = stage or purpose or "model"
@@ -961,8 +984,10 @@ class AIGateway:
             self._emit_usage(item, model, purpose)
 
         errors: list[str] = []
-        for model in models:
+        rate_limited = False
+        for model_index, model in enumerate(models):
             key = self._model_breaker_key(model)
+            has_alternative = model_index < len(models) - 1
             for attempt in range(retries_per_model + 1):
                 reservation: dict[str, int] | None = None
                 repair_in_flight = False
@@ -1212,15 +1237,26 @@ class AIGateway:
                         except Exception:
                             pass
                     errors.append(f"{model['name']}: {exc}")
+                    status = int(getattr(exc, "http_status", 0) or 0)
+                    if status == 429:
+                        rate_limited = True
                     if getattr(exc, "circuit_break", True):
                         # 队列/本地并发拒绝不是端点故障，不能计入模型健康失败。
                         self._note_model(model, False, error=str(exc))
                         self.breaker.fail(key)
                     # 只有可重试错误才在同一模型上退避重试；401/400/JSON
-                    # Content-Type 等确定性错误立即换下一个模型。
+                    # Content-Type 等确定性错误立即换下一个模型。429 表示
+                    # 当前 Key/端点配额已满，若还有备用模型就立即切换，避免
+                    # 三次快速重试继续撞同一个限流窗口。
                     retryable = bool(getattr(exc, "retryable", True)) and not repair_in_flight
                     if retryable and attempt < retries_per_model:
+                        if status == 429 and has_alternative:
+                            break
                         delay = min(8.0, backoff * (2 ** attempt))
+                        if status == 429:
+                            retry_after = max(0.0, float(getattr(exc, "retry_after", 0) or 0))
+                            delay = max(delay, rate_limit_backoff, retry_after)
+                            delay = min(300.0, delay)
                         if jitter:
                             delay += random.uniform(0, jitter)
                         if delay > 0:
@@ -1228,7 +1264,9 @@ class AIGateway:
                         continue
                     break
         hint = ""
-        if self._personal_model(self._uid()):
+        if rate_limited:
+            hint = "；模型服务限流（HTTP 429），已尝试可用模型；请稍后重试，或切换模型/Key"
+        elif self._personal_model(self._uid()):
             hint = "；个人 MaaS Key 调用失败，请到个人中心更新 Key 后重试"
         else:
             url = str(self.config.get("personal_api_key_url") or "") if self.config else ""
@@ -1308,7 +1346,8 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
     except urllib.error.HTTPError as exc:
         raw_text = error_body(exc, min(policy.max_bytes, 4096))
         raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
-                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
+                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429,
+                      retry_after=parse_retry_after(exc.headers.get("Retry-After"))) from exc
     except OutboundPolicyError as exc:
         raise AIError(str(exc), http_status=403, retryable=False) from exc
     except OutboundResponseTooLarge as exc:
@@ -1529,7 +1568,8 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
     except urllib.error.HTTPError as exc:
         raw_text = error_body(exc, min(policy.max_bytes, 4096))
         raise AIError(f"HTTP {exc.code}: {raw_text[:500]}", http_status=exc.code,
-                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429) from exc
+                      response_body=raw_text, retryable=exc.code >= 500 or exc.code == 429,
+                      retry_after=parse_retry_after(exc.headers.get("Retry-After"))) from exc
     except OutboundPolicyError as exc:
         raise AIError(str(exc), http_status=403, retryable=False) from exc
     except OutboundResponseTooLarge as exc:

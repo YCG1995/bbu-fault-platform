@@ -78,6 +78,28 @@ class RetryAndBudgetTests(_Base):
                 self.gateway().complete("default", "sys", "user", retries_per_model=2)
         self.assertEqual(post.call_count, 3)
 
+    def test_429_switches_to_another_model_without_repeating_same_endpoint(self):
+        self.config.values["model_schema_mode"] = "off"
+        self.add_model(name="limited", priority=0)
+        self.add_model(name="backup", priority=1)
+        gateway = self.gateway()
+        calls = []
+
+        def fake_call(model, system, user, schema, max_tokens, temperature,
+                      purpose, stream):
+            calls.append(model["name"])
+            if model["name"] == "limited":
+                raise AIError("HTTP 429: Too many requests", http_status=429,
+                              retryable=True, retry_after=7)
+            return AIResult(text="backup-ok", usage=Usage(total_tokens=2))
+
+        gateway._call = fake_call
+        with patch("bbu.ai.time.sleep") as sleep:
+            result = gateway.complete("default", "sys", "user", retries_per_model=2)
+        self.assertEqual(result.text, "backup-ok")
+        self.assertEqual(calls, ["limited", "backup"])
+        sleep.assert_not_called()
+
     def test_failed_attempt_counts_against_call_budget(self):
         self.config.values["model_schema_mode"] = "off"
         self.add_model()
