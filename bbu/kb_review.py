@@ -219,7 +219,7 @@ class ReviewService:
             "SELECT * FROM kb_reviews WHERE content_hash=? AND prompt_version=? AND model=? "
             "AND status IN ('done','manual') ORDER BY created_at DESC LIMIT 1",
             (content_hash, self.prompt_version, self.model_label()))
-        review_id = new_id("RV", with_time=False)
+        review_id = new_id("RV", with_time=False, entropy=8)
         now = iso_now()
         if cached and cached.get("status") == "done":
             self.db.execute(

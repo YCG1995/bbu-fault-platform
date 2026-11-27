@@ -264,6 +264,9 @@ class KBServiceTests(unittest.TestCase):
             result = svc.search("看门狗复位", self.engineer)
             self.assertFalse(result["no_answer"])
             self.assertIn("看门狗", result["items"][0]["title"])
+            scores = [item["score"] for item in result["items"]]
+            self.assertEqual(scores, sorted(scores, reverse=True),
+                             "通道补位不能用低分项污染首条排序")
             filtered = svc.search("复位", self.engineer, filters={"board": "VBPE2"})
             self.assertTrue(filtered["items"])
             for item in filtered["items"]:
@@ -273,6 +276,13 @@ class KBServiceTests(unittest.TestCase):
             self.assertEqual(empty["items"], [])
         finally:
             svc.shutdown()
+
+    def test_kb_ids_have_wide_entropy(self) -> None:
+        """22xx 条真实 CSV 导入曾因 6 位十六进制 ID 生日碰撞失败。"""
+        from bbu.kb_service import _kb_id
+        ids = {_kb_id("K") for _ in range(3000)}
+        self.assertEqual(len(ids), 3000)
+        self.assertGreaterEqual(len(next(iter(ids))), 17)
 
     def test_answer_fallback_and_citation_sanitize(self) -> None:
         svc = self.service()

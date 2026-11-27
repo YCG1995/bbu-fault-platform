@@ -81,6 +81,10 @@ USER_TEMPLATE = """用户问题：
 MAX_EVIDENCE_CASE_CHARS = 900
 
 
+def _kb_id(prefix: str) -> str:
+    return new_id(prefix, with_time=False, entropy=8)
+
+
 class KBError(Exception):
     def __init__(self, message: str, status: int = 400, code: str = "kb_error") -> None:
         super().__init__(message)
@@ -565,7 +569,7 @@ class KBService:
         total = sum(int(getattr(item, "size", 0) or 0) for item in files)
         if total > max_batch:
             raise KBError("单批文件超过上限", 413, "too_large")
-        job_id = new_id("J", with_time=False)
+        job_id = _kb_id("J")
         job_dir = self.staging_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         clean_mode = "direct" if mode == "direct" else "review"
@@ -631,7 +635,7 @@ class KBService:
         self.db.execute(
             "INSERT INTO kb_import_files(id,job_id,name,rel_path,size,sha256,mime,status,error,"
             "stored_path) VALUES(?,?,?,?,?,?,'',?,?,?)",
-            (new_id("F", with_time=False), job_id, name, rel_path, size, sha, status,
+            (_kb_id("F"), job_id, name, rel_path, size, sha, status,
              error[:300], stored_path))
 
     def _update_job_counts(self, job_id: str) -> None:
@@ -884,7 +888,7 @@ class KBService:
         index = self.ensure_index()
         result = retrieve(index, query, filters=filters, limit=limit,
                           threshold=float(self.config.get("kb_no_answer_threshold", 0.18)))
-        query_id = new_id("Q", with_time=False)
+        query_id = _kb_id("Q")
         result["query_id"] = query_id
         if log:
             self._log_query(user, query, filters or {}, result)
@@ -956,7 +960,7 @@ class KBService:
         self.db.execute(
             "INSERT INTO kb_feedback(id,query_id,user_id,helpful,reason,created_at) "
             "VALUES(?,?,?,?,?,?)",
-            (new_id("FB", with_time=False), query_id[:80], user["id"], 1 if helpful else 0,
+            (_kb_id("FB"), query_id[:80], user["id"], 1 if helpful else 0,
              reason[:1000], iso_now()))
         top_ids = [str(x) for x in _json_list(log.get("top_ids_json"))]
         day = str(log.get("created_at") or iso_now())[:10]
@@ -1509,7 +1513,7 @@ class KBService:
             actor_type=actor_type, actor_id=user_id, actor_name=self._user_name(user_id),
             source=source, reason=reason, before=before, after=after,
             request_id=request_id, review_id=review_id, model=model,
-            prompt_version=prompt_version, new_id_fn=lambda: new_id("R", with_time=False))
+            prompt_version=prompt_version, new_id_fn=lambda: _kb_id("R"))
 
     def _case_row(self, conn, case_id: str) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM kb_cases WHERE id=?", (case_id,)).fetchone()
@@ -1537,7 +1541,7 @@ class KBService:
                          ordinal: int, now: str, user_id: int, *, action: str,
                          actor_type: str, reason: str) -> tuple[str, dict[str, Any]]:
         values = self._case_values(case, doc, ordinal)
-        case_id = new_id("K", with_time=False)
+        case_id = _kb_id("K")
         case_vals = {
             "title": values["title"], "title_clean": values["title_clean"],
             "symptom": values["symptom"], "environment": values["environment"],
@@ -1625,7 +1629,7 @@ class KBService:
         cases = list(payload.get("cases") or [])
         if not doc or not cases:
             raise KBError("文档没有可入库的案例", 400, "empty_document")
-        doc_id = new_id("D", with_time=False)
+        doc_id = _kb_id("D")
         now = iso_now()
         raw = str(doc.get("raw_text") or "")
         masked = str(doc.get("masked_text") or raw)
@@ -1658,7 +1662,7 @@ class KBService:
             conn.execute(
                 "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
                 "created_at) VALUES(?,?,?,?,?,?,?)",
-                (new_id("V", with_time=False), doc_id, 1,
+                (_kb_id("V"), doc_id, 1,
                  json.dumps(version_payload, ensure_ascii=False),
                  hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
         return doc_id
@@ -1732,13 +1736,13 @@ class KBService:
             conn.execute(
                 "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
                 "created_at) VALUES(?,?,?,?,?,?,?)",
-                (new_id("V", with_time=False), doc_id, version,
+                (_kb_id("V"), doc_id, version,
                  json.dumps(version_payload, ensure_ascii=False),
                  hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
 
     def _create_draft(self, payload: dict[str, Any], user_id: int, *, job_id: str,
                       title: str, confidence: float, warnings: list[str]) -> str:
-        draft_id = new_id("DR", with_time=False)
+        draft_id = _kb_id("DR")
         self.db.execute(
             "INSERT INTO kb_drafts(id,job_id,user_id,title,payload_json,confidence,"
             "warnings_json,status,created_at) VALUES(?,?,?,?,?,?,?, 'reviewing',?)",

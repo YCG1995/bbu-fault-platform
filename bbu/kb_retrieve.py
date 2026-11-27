@@ -280,8 +280,12 @@ def search(index: KBIndex, query: str, *, filters: dict[str, Any] | None = None,
                                 reasons=[f"{name} 首选"])
         if any(x.case.id == top_hit.case.id for x in selected):
             continue
-        selected.insert(0, top_hit)
-        selected = _dedupe(selected, limit)
+        # 保证通道第一名不被挤出，但不能用一个 0.01 的补位分把它强行顶到第一位；
+        # 先保留在结果集内，最后按真实分数排序，避免不相关词法命中毒化首条。
+        if len(selected) >= limit:
+            selected = selected[:limit - 1]
+        selected.append(top_hit)
+        selected.sort(key=lambda item: (-item.score, item.case.id))
 
     top_score = selected[0].score if selected else 0.0
     no_answer = (
