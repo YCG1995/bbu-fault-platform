@@ -146,6 +146,7 @@ class ToolRegistry:
     def __init__(self, app: Any, kb: KnowledgeBase, external: ExternalIMService) -> None:
         self.app = app
         self.kb = kb
+        self.fault_kb = getattr(app, "kb", None)
         self.external = external
         self._tools: dict[str, ToolSpec] = {}
         self._register_all()
@@ -294,6 +295,30 @@ class ToolRegistry:
                     "required": ["query"]},
             handler=lambda reg, ctx, a: reg._search_docs(a),
             summary=lambda a: f"检索文档“{a.get('query', '')}”",
+        ))
+        self._add(ToolSpec(
+            name="search_fault_kb", title="检索故障知识库",
+            description="按故障现象、板卡型号、领域、软件/逻辑版本检索历史故障案例；"
+                        "回答“这个故障以前怎么处理”时优先使用，不要用 search_docs 代替。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {
+                        "query": {"type": "string", "maxLength": 2000},
+                        "board": {"type": "string", "maxLength": 40},
+                        "domain": {"type": "string", "maxLength": 40},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                    },
+                    "required": ["query"]},
+            handler=lambda reg, ctx, a: reg._search_fault_kb(ctx, a),
+            summary=lambda a: f"检索故障知识库“{_truncate(a.get('query'), 80)}”",
+        ))
+        self._add(ToolSpec(
+            name="get_fault_case", title="读取故障案例",
+            description="按案例 ID 读取完整现象、原因、处理方案和来源；用于核对引用和追问。",
+            schema={"type": "object", "additionalProperties": False,
+                    "properties": {"case_id": {"type": "string", "maxLength": 48}},
+                    "required": ["case_id"]},
+            handler=lambda reg, ctx, a: reg._get_fault_case(ctx, a),
+            summary=lambda a: f"读取故障案例 {a.get('case_id', '')}",
         ))
         self._add(ToolSpec(
             name="search_messages", title="检索平台消息",
@@ -531,7 +556,57 @@ class ToolRegistry:
                             else "平台文档中没有找到直接匹配"),
                 "sources": items}
 
-    # ---------------------------------------------------------------- 消息
+    def _search_fault_kb(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.fault_kb:
+            raise ToolError("故障知识库服务未启用", 503)
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ToolError("请提供故障现象或问题")
+        filters = {}
+        if args.get("board"):
+            filters["board"] = str(args["board"]).strip()
+        if args.get("domain"):
+            filters["domain"] = str(args["domain"]).strip()
+        try:
+            limit = max(1, min(10, int(args.get("limit") or 6)))
+        except (TypeError, ValueError):
+            limit = 6
+        try:
+            result = self.fault_kb.search(query, ctx.user, filters=filters, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 工具层不能把服务异常泄漏成 500
+            raise ToolError(str(exc) or "故障知识库检索失败",
+                            getattr(exc, "status", 503))
+        items = []
+        for item in result.get("items") or []:
+            item = dict(item)
+            item["excerpt"] = _truncate(item.get("symptom") or item.get("cause") or "", 500)
+            item["doc_title"] = item.get("title") or ""
+            item["heading"] = "故障案例"
+            items.append(item)
+        sources = [{"title": x.get("title") or "", "heading": "故障案例",
+                    "uri": x.get("uri") or "", "excerpt": x.get("excerpt") or "",
+                    "case_id": x.get("case_id")} for x in items]
+        return {"items": items, "sources": sources, "summary":
+                (f"检索到 {len(items)} 个历史故障案例" if items else "故障知识库未找到相关案例"),
+                "no_answer": bool(result.get("no_answer")), "query_id": result.get("query_id"),
+                "links": [{"label": "打开故障知识库", "href": "/#/kb"}]}
+
+    def _get_fault_case(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        if not self.fault_kb:
+            raise ToolError("故障知识库服务未启用", 503)
+        case_id = str(args.get("case_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", case_id):
+            raise ToolError("案例 ID 格式非法")
+        try:
+            data = self.fault_kb.get_case(case_id)
+        except Exception as exc:
+            raise ToolError(str(exc), getattr(exc, "status", 404))
+        return {"case": data["case"], "doc": data["doc"],
+                "summary": f"案例 {case_id}：{_truncate(data['case'].get('title'), 120)}",
+                "sources": [{"title": data["case"].get("title") or "", "heading": "故障案例",
+                            "uri": data["case"].get("uri") or "",
+                            "excerpt": _truncate(data["case"].get("cause") or "", 500)}]}
+
     def _search_messages(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()
         scopes = args.get("scopes") or list(MESSAGE_SCOPES)

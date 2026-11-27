@@ -29,6 +29,61 @@
       }
     },
     {
+      "name": "search_fault_kb",
+      "title": "检索故障知识库",
+      "description": "按故障现象、板卡型号、领域、软件/逻辑版本检索历史故障案例；回答“这个故障以前怎么处理”时优先使用，不要用 search_docs 代替。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "board": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "domain": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "get_fault_case",
+      "title": "读取故障案例",
+      "description": "按案例 ID 读取完整现象、原因、处理方案和来源；用于核对引用和追问。",
+      "scope": "user",
+      "risk": "read",
+      "mcp": "read",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "maxLength": 48
+          }
+        },
+        "required": [
+          "case_id"
+        ]
+      }
+    },
+    {
       "name": "search_messages",
       "title": "检索平台消息",
       "description": "检索站内通知、任务事件、审计记录和外部 IM 消息；按角色限制范围。",
@@ -539,7 +594,7 @@
     "notifications/cancelled"
   ],
   "counts": {
-    "assistant_tools": 21,
+    "assistant_tools": 23,
     "mcp_methods": 14
   }
 }

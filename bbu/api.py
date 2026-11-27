@@ -77,6 +77,7 @@ from .netguard import OutboundPolicyError, endpoint_target
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
+from .kb_service import KBService
 from .pipeline import TaskPipeline
 from .review import ReviewService
 from .agent import BoundedAgent
@@ -108,6 +109,8 @@ from .task_storage import TaskStorageService
 
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_LOCK = threading.Lock()
+KB_CHAT_RATE: dict[int, list[float]] = {}
+KB_CHAT_RATE_LOCK = threading.Lock()
 
 
 def _loads(text: str | None, default: Any) -> Any:
@@ -327,6 +330,7 @@ class App:
         self.relay_tests_lock = threading.Lock()
         self.gateway = AIGateway(self.db, config, secret_box=self.secret_box,
                                  relay=self.relay)
+        self.kb = KBService(self.db, config, gateway=self.gateway)
         self.usage = UsageStore(self.db, config)
         self.gateway.on_usage = self._record_llm_usage
         self.traces = TraceStore(self.db, config)
@@ -343,7 +347,7 @@ class App:
         self.pipeline = TaskPipeline(self.db, config, self.registry,
                                      self.gateway, self.runner,
                                      experiences=self.learning.experiences,
-                                     traces=self.traces)
+                                     traces=self.traces, kb=self.kb)
         self.evidence_store = EvidenceStore(self.db)
         self.assistant = AssistantService(self)
         self.mcp = MCPService(self, self.assistant)
@@ -373,6 +377,10 @@ class App:
         self.learning.shutdown()
         self.workshop_jobs.shutdown()
         self.storage.shutdown()
+        try:
+            self.kb.shutdown()
+        except Exception:
+            pass
         try:
             self.relay.shutdown()
         except Exception:
@@ -436,6 +444,33 @@ class App:
               h_assistant_confirm)
         r.add("POST", r"/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/cancel",
               h_assistant_cancel)
+        r.add("GET", r"/api/kb/status", h_kb_status)
+        r.add("GET", r"/api/kb/facets", h_kb_facets)
+        r.add("GET", r"/api/kb/docs", h_kb_docs)
+        r.add("POST", r"/api/kb/docs", h_kb_doc_create)
+        r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_detail)
+        r.add("GET", r"/api/kb/search", h_kb_search)
+        r.add("PUT", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_update)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/status", h_kb_doc_status)
+        r.add("DELETE", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)", h_kb_doc_delete)
+        r.add("GET", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions", h_kb_doc_versions)
+        r.add("POST", r"/api/kb/docs/(?P<doc_id>[A-Za-z0-9_-]+)/versions/"
+              r"(?P<version_id>[A-Za-z0-9_-]+)/restore", h_kb_doc_restore)
+        r.add("GET", r"/api/kb/files/(?P<file_id>[A-Za-z0-9_-]+)", h_kb_file)
+        r.add("POST", r"/api/kb/import", h_kb_import)
+        r.add("GET", r"/api/kb/import/jobs", h_kb_jobs)
+        r.add("GET", r"/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)", h_kb_job)
+        r.add("POST", r"/api/kb/import/jobs/(?P<job_id>[A-Za-z0-9_-]+)/cancel", h_kb_job_cancel)
+        r.add("GET", r"/api/kb/drafts", h_kb_drafts)
+        r.add("GET", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_kb_draft)
+        r.add("PUT", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)", h_kb_draft_update)
+        r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/approve", h_kb_draft_approve)
+        r.add("POST", r"/api/kb/drafts/(?P<draft_id>[A-Za-z0-9_-]+)/reject", h_kb_draft_reject)
+        r.add("POST", r"/api/kb/chat", h_kb_chat)
+        r.add("POST", r"/api/kb/feedback", h_kb_feedback)
+        r.add("POST", r"/api/kb/reindex", h_kb_reindex)
+        r.add("GET", r"/api/kb/queries", h_kb_queries)
+        r.add("POST", r"/api/kb/sample", h_kb_sample)
         r.add("GET", r"/api/mcp/info", h_mcp_info)
         r.add("POST", r"/api/mcp/token", h_mcp_token_create)
         r.add("DELETE", r"/api/mcp/token", h_mcp_token_delete)
@@ -610,6 +645,7 @@ def h_public_config(app: App, req):
                           "allow_engineer_workshop": bool(app.config.get("allow_engineer_workshop", True)),
                           "allow_self_register": bool(app.config.get("allow_self_register", False)),
                           "assistant_enabled": bool(app.config.get("assistant_enabled", True)),
+                          "kb_enabled": bool(app.config.get("kb_enabled", True)),
                           "mcp_endpoint": "/mcp",
                           "personal_model_base_url": app.config.get("personal_model_base_url"),
                           "personal_model_default": app.config.get("personal_model_default"),
@@ -4281,6 +4317,322 @@ def h_assistant_confirm(app: App, req, action_id: str):
 def h_assistant_cancel(app: App, req, action_id: str):
     user = _auth(app, req)
     return response_json(app.assistant.cancel_action(user, action_id))
+
+
+def _kb_raise(exc: Exception) -> None:
+    status = getattr(exc, "status", 400)
+    raise HTTPError(int(status), str(exc)) from exc
+
+
+def _kb_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _kb_job_owned(app: App, user: dict[str, Any], job_id: str) -> dict[str, Any]:
+    row = app.db.one("SELECT * FROM kb_import_jobs WHERE id=?", (job_id,))
+    if not row:
+        raise HTTPError(404, "导入任务不存在")
+    if user.get("role") != "admin" and int(row.get("user_id") or 0) != int(user.get("id") or 0):
+        raise HTTPError(403, "无权查看该导入任务")
+    return row
+
+
+def _kb_rate(app: App, user: dict[str, Any]) -> None:
+    limit = int(app.config.get("kb_rate_per_min", 20) or 20)
+    if limit <= 0:
+        return
+    now = time.time()
+    with KB_CHAT_RATE_LOCK:
+        bucket = [t for t in KB_CHAT_RATE.get(user["id"], []) if now - t < 60]
+        if len(bucket) >= limit:
+            raise HTTPError(429, "知识库提问过于频繁，请稍后重试")
+        bucket.append(now)
+        KB_CHAT_RATE[user["id"]] = bucket
+
+
+# ---------------------------- 故障知识库 ----------------------------
+def h_kb_status(app: App, req):
+    user = _auth(app, req, csrf=False)
+    return response_json({"status": app.kb.status(user)})
+
+
+def h_kb_facets(app: App, req):
+    _auth(app, req, csrf=False)
+    return response_json(app.kb.facets())
+
+
+def h_kb_search(app: App, req):
+    user = _auth(app, req, csrf=False)
+    query = str(req.query.get("q") or req.query.get("query") or "").strip()
+    if not query:
+        raise HTTPError(400, "请填写故障现象或关键词")
+    _kb_rate(app, user)
+    filters = {k: str(req.query.get(k) or "") for k in ("board", "domain") if req.query.get(k)}
+    try:
+        result = app.kb.search(query, user, filters=filters,
+                               limit=_kb_int(req.query.get("limit"), 10))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(result)
+
+
+def h_kb_docs(app: App, req):
+    user = _auth(app, req, csrf=False)
+    try:
+        data = app.kb.list_documents(
+            q=str(req.query.get("q") or ""), board=str(req.query.get("board") or ""),
+            domain=str(req.query.get("domain") or ""),
+            status=str(req.query.get("status") or "active"),
+            page=_kb_int(req.query.get("page"), 1), size=_kb_int(req.query.get("size"), 20),
+            reveal=user.get("role") == "admin")
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(data)
+
+
+def h_kb_doc_create(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    title = str(data.get("title") or "").strip()
+    text = str(data.get("text") or data.get("content") or "").strip()
+    if not text:
+        raise HTTPError(400, "粘贴文本不能为空")
+    if len(text) > 2 * 1024 * 1024:
+        raise HTTPError(413, "文本超过 2 MB")
+    try:
+        result = app.kb.create_paste(user, title=title, text=text)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_create", result.get("doc_id") or "",
+                 {"status": result.get("status")}, req.ip)
+    return response_json(result, status=201 if result.get("status") == "active" else 202)
+
+
+def h_kb_doc_detail(app: App, req, doc_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        data = app.kb.get_document(doc_id, reveal=user.get("role") == "admin")
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json({"doc": data})
+
+
+def h_kb_doc_update(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.update_document(doc_id, data, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_update", doc_id, {}, req.ip)
+    return response_json({"doc": result})
+
+
+def h_kb_doc_status(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    status = str(data.get("status") or "").strip()
+    try:
+        result = app.kb.set_document_status(doc_id, status, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_status", doc_id,
+                 {"status": status}, req.ip)
+    return response_json(result)
+
+
+def h_kb_doc_delete(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.delete_document(doc_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.doc_delete", doc_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_doc_versions(app: App, req, doc_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json(app.kb.list_versions(doc_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_doc_restore(app: App, req, doc_id: str, version_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"doc": app.kb.restore_version(doc_id, version_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_file(app: App, req, file_id: str):
+    user = _auth(app, req, csrf=False)
+    try:
+        path, row = app.kb.file_path(file_id)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    # 导入文件只对上传者/管理员开放；知识库文档附件不在这里暴露。
+    owner_row = app.db.one("SELECT user_id FROM kb_import_jobs WHERE id=?",
+                           (row.get("job_id"),)) or {}
+    if user.get("role") != "admin" and int(owner_row.get("user_id") or 0) != int(user.get("id") or 0):
+        raise HTTPError(403, "无权下载该文件")
+    return response_file(path, str(row.get("mime") or "application/octet-stream"),
+                         str(row.get("name") or "file"), inline=False)
+
+
+def h_kb_import(app: App, req):
+    user = _auth(app, req)
+    max_mb = int(app.config.get("kb_max_batch_mb", 200))
+    fields, uploads = req.parse_multipart(max_mb * 1024 * 1024,
+                                          max_file_bytes=int(app.config.get(
+                                              "kb_max_file_mb", 50)) * 1024 * 1024)
+    mode = str(fields.get("mode") or "review")
+    if mode not in ("direct", "review"):
+        mode = "review"
+    try:
+        job = app.kb.create_import_job(user, uploads, mode=mode)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.import", job.get("id") or "",
+                 {"files": len(uploads), "mode": mode}, req.ip)
+    return response_json({"job": job}, status=202)
+
+
+def h_kb_jobs(app: App, req):
+    user = _auth(app, req, csrf=False)
+    return response_json(app.kb.list_jobs(user))
+
+
+def h_kb_job(app: App, req, job_id: str):
+    user = _auth(app, req, csrf=False)
+    _kb_job_owned(app, user, job_id)
+    try:
+        return response_json({"job": app.kb.get_job(job_id)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_job_cancel(app: App, req, job_id: str):
+    user = _auth(app, req)
+    _kb_job_owned(app, user, job_id)
+    try:
+        return response_json(app.kb.cancel_job(job_id, user))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_drafts(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_drafts(user, str(req.query.get("status") or "reviewing")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft(app: App, req, draft_id: str):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json({"draft": app.kb.get_draft(draft_id, user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft_update(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    try:
+        return response_json({"draft": app.kb.update_draft(draft_id, req.json(), user)})
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_draft_approve(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    try:
+        result = app.kb.approve_draft(draft_id, user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.draft_approve", draft_id, result, req.ip)
+    return response_json(result)
+
+
+def h_kb_draft_reject(app: App, req, draft_id: str):
+    user = _admin(app, req)
+    data = req.json()
+    try:
+        result = app.kb.reject_draft(draft_id, user, str(data.get("reason") or ""))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.draft_reject", draft_id, {}, req.ip)
+    return response_json(result)
+
+
+def h_kb_chat(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    query = str(data.get("query") or data.get("message") or "").strip()
+    if not query:
+        messages = data.get("messages") or []
+        if isinstance(messages, list) and messages:
+            query = str((messages[-1] or {}).get("content") or "").strip()
+    if not query:
+        raise HTTPError(400, "请填写故障现象或问题")
+    if len(query) > 2000:
+        raise HTTPError(413, "问题过长（上限 2000 字）")
+    _kb_rate(app, user)
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    try:
+        result = app.kb.answer(query, user, filters=filters,
+                               limit=_kb_int(data.get("limit"), 0) or None)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    return response_json(result)
+
+
+def h_kb_feedback(app: App, req):
+    user = _auth(app, req)
+    data = req.json()
+    query_id = str(data.get("query_id") or "").strip()
+    if not query_id:
+        raise HTTPError(400, "缺少 query_id")
+    try:
+        return response_json(app.kb.feedback(
+            user, query_id=query_id, helpful=bool(data.get("helpful")),
+            reason=str(data.get("reason") or "")))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_reindex(app: App, req):
+    user = _admin(app, req)
+    try:
+        stats = app.kb.rebuild_index()
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.reindex", "kb", stats, req.ip)
+    return response_json({"ok": True, "index": stats})
+
+
+def h_kb_queries(app: App, req):
+    user = _admin(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_queries(user, _kb_int(req.query.get("limit"), 30)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+
+
+def h_kb_sample(app: App, req):
+    user = _admin(app, req)
+    try:
+        result = app.kb.import_sample(user)
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
+    app.db.audit(user["id"], user["username"], "kb.sample", "kb", result, req.ip)
+    return response_json(result)
 
 
 def h_mcp_http(app: App, req):

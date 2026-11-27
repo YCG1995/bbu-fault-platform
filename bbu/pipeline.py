@@ -90,7 +90,7 @@ class TaskPipeline:
     def __init__(self, db: Database, config: Any, registry: SkillRegistry,
                  gateway: AIGateway, runner: SkillRunner,
                  experiences: ExperienceStore | None = None,
-                 traces: Any = None) -> None:
+                 traces: Any = None, kb: Any = None) -> None:
         self.db = db
         self.config = config
         self.registry = registry
@@ -99,6 +99,7 @@ class TaskPipeline:
         self.matcher = Matcher(registry)
         self.experiences = experiences or ExperienceStore(db)
         self.traces = traces
+        self.kb = kb
         self.egress = DataEgressPolicy.for_diagnostic(config)
         self.evidence_store = EvidenceStore(db)
         self.tools = ToolPolicy(db, config)
@@ -653,6 +654,47 @@ class TaskPipeline:
             return truncate(f"{hints[0]}相关现场故障诊断", 60)
         return truncate(f"{task.get('title') or 'BBU 现场故障诊断'}", 60)
 
+    def _kb_history(self, task: dict[str, Any], inventory: dict[str, Any]) -> list[dict[str, Any]]:
+        """检索历史相似故障，只作为规划参考；失败不影响诊断。"""
+        if not self.kb or not bool(self.config.get("kb_enabled", True)):
+            return []
+        try:
+            status = self.kb.status()
+            if int((status.get("index") or {}).get("cases") or 0) <= 0:
+                return []
+            user = self.db.one("SELECT * FROM users WHERE id=?", (task.get("user_id"),))
+            if not user:
+                return []
+            hints = " ".join(str(x) for x in (inventory.get("detected_hints") or [])[:8])
+            members = " ".join(str(x) for x in (inventory.get("top_members") or [])[:12])
+            query = " ".join(part for part in (
+                str(task.get("title") or ""), str(task.get("description") or "")[:500],
+                hints, members) if part).strip()
+            if not query:
+                return []
+            result = self.kb.search(query[:800], user, limit=5)
+            if result.get("no_answer"):
+                return []
+            history: list[dict[str, Any]] = []
+            for item in (result.get("items") or [])[:5]:
+                history.append({
+                    "title": truncate(item.get("title") or "", 80),
+                    "root_cause": truncate(item.get("cause") or "", 260),
+                    "solution": truncate(item.get("solution") or "", 260),
+                    "boards": item.get("boards") or [],
+                    "doc_id": item.get("doc_id") or "",
+                    "case_id": item.get("case_id") or "",
+                    "doc_title": truncate(item.get("doc_title") or item.get("title") or "", 80),
+                })
+            return history
+        except Exception as exc:  # noqa: BLE001 - 历史参考不能阻断诊断
+            try:
+                self._emit(task["id"], "debug", f"故障知识库历史参考不可用：{exc}",
+                           "planning")
+            except Exception:
+                pass
+            return []
+
     def _plan(self, task: dict[str, Any], inventory: dict[str, Any],
               catalog: list[dict[str, Any]], experiences: list[dict[str, Any]],
               scores: dict[str, float], budget: Budget,
@@ -661,8 +703,11 @@ class TaskPipeline:
         threshold = float(self.config.get("min_route_score", 30))
         det = self._det_candidates(catalog, scores, mode)
         det_plan = deterministic_plan(det, self.config, mode)
+        kb_history = self._kb_history(task, inventory)
+        task["_kb_history"] = kb_history
         role = self._planner_role()
-        meta: dict[str, Any] = {"llm_used": False, "notes": [], "model": ""}
+        meta: dict[str, Any] = {"llm_used": False, "notes": [], "model": "",
+                                "kb_cases": len(kb_history)}
         if not role:
             meta["notes"].append("未配置真实 planner/router 模型，使用确定性计划")
             self._emit(task["id"], "info", "无真实规划模型，使用确定性计划", "planning")
@@ -681,7 +726,8 @@ class TaskPipeline:
                 "description": task.get("description") or "",
                 "inventory": prompt_inventory,
                 "catalog": catalog,
-                "experiences": experiences,
+                "experiences": list(experiences) + [
+                    {"source": "历史故障知识库", **x} for x in kb_history],
             }
             safe_payload = self.egress.sanitize_structure(source_payload)
             self._audit_model_egress(task, f"planner:{role}", source_payload, safe_payload)
@@ -1466,6 +1512,15 @@ class TaskPipeline:
         stats = self._stats(started, stage_times, budget, models_used)
         md = compose_markdown(task, results, arbitration, inventory, stats, narrative, plan)
         md += claims_markdown(claims, claim_check, narrative_check)
+        kb_history = task.get("_kb_history") or []
+        if kb_history:
+            md += "\n\n## 历史相似故障参考\n\n"
+            md += "> 仅供现场排查参考，不参与根因仲裁，也不能替代当前日志证据。\n\n"
+            for idx, item in enumerate(kb_history[:5], start=1):
+                md += (f"{idx}. **{item.get('title') or '历史案例'}**  \n"
+                       f"   历史原因：{item.get('root_cause') or '—'}  \n"
+                       f"   历史方案：{item.get('solution') or '—'}  \n"
+                       f"   查看：`#/kb/docs/{item.get('doc_id') or ''}`\n\n")
         return (md, render_html(md, f"{task['title']} - 诊断报告",
                                 self.config.get("brand")), narrative,
                 claims, claim_check, narrative_check)

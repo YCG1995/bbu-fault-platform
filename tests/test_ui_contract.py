@@ -18,7 +18,7 @@ def test_manifest_actions_and_forms_are_consistent():
     manifest = json.loads((ROOT / "tests/manifests/ui_actions.json").read_text(encoding="utf-8"))
     counts = manifest["counts"]
     assert counts["distinct_actions"] > 0 and counts["action_instances"] >= counts["distinct_actions"]
-    assert counts["forms"] == 19
+    assert counts["forms"] == 21
     ids = set(manifest["forms"])
     assert "login-form" in ids and "workshop" not in ids
     for action in manifest["actions"]:

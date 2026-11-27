@@ -2,12 +2,12 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 102,
-    "action_instances": 262,
-    "buttons_all": 231,
-    "buttons_page": 214,
-    "modal_calls": 29,
-    "forms": 19
+    "distinct_actions": 113,
+    "action_instances": 281,
+    "buttons_all": 248,
+    "buttons_page": 231,
+    "modal_calls": 30,
+    "forms": 21
   },
   "actions": [
     {
@@ -34,9 +34,17 @@
     },
     {
       "action": "approve",
-      "instances": 2,
+      "instances": 4,
       "files": [
-        "web/assets/js/page_cases.js"
+        "web/assets/js/page_cases.js",
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "ask",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -76,11 +84,12 @@
     },
     {
       "action": "cancel",
-      "instances": 29,
+      "instances": 31,
       "files": [
         "web/assets/js/app.js",
         "web/assets/js/core.js",
         "web/assets/js/page_admin.js",
+        "web/assets/js/page_kb.js",
         "web/assets/js/page_skills.js",
         "web/assets/js/page_task_detail.js",
         "web/assets/js/page_workshop.js"
@@ -171,9 +180,10 @@
     },
     {
       "action": "delete",
-      "instances": 1,
+      "instances": 2,
       "files": [
-        "web/assets/js/page_admin.js"
+        "web/assets/js/page_admin.js",
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -261,6 +271,27 @@
       ]
     },
     {
+      "action": "draft-approve",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "draft-reject",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "draft-view",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "edit",
       "instances": 1,
       "files": [
@@ -272,6 +303,13 @@
       "instances": 1,
       "files": [
         "web/assets/js/page_admin.js"
+      ]
+    },
+    {
+      "action": "example",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -289,6 +327,13 @@
       ]
     },
     {
+      "action": "filter-docs",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "force",
       "instances": 2,
       "files": [
@@ -297,8 +342,9 @@
     },
     {
       "action": "import",
-      "instances": 1,
+      "instances": 2,
       "files": [
+        "web/assets/js/page_kb.js",
         "web/assets/js/page_skills.js"
       ]
     },
@@ -485,6 +531,13 @@
       ]
     },
     {
+      "action": "reindex",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "reject",
       "instances": 2,
       "files": [
@@ -532,6 +585,13 @@
       "files": [
         "web/assets/js/page_admin.js",
         "web/assets/js/page_traces.js"
+      ]
+    },
+    {
+      "action": "restore-version",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -605,6 +665,13 @@
       ]
     },
     {
+      "action": "sample",
+      "instances": 2,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "save",
       "instances": 19,
       "files": [
@@ -612,6 +679,13 @@
         "web/assets/js/page_admin.js",
         "web/assets/js/page_task_detail.js",
         "web/assets/js/page_workshop.js"
+      ]
+    },
+    {
+      "action": "save-doc",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -644,10 +718,11 @@
     },
     {
       "action": "search",
-      "instances": 3,
+      "instances": 4,
       "files": [
         "web/assets/js/app.js",
-        "web/assets/js/page_admin.js"
+        "web/assets/js/page_admin.js",
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -699,6 +774,13 @@
       "files": [
         "web/assets/js/page_admin.js",
         "web/assets/js/page_skills.js"
+      ]
+    },
+    {
+      "action": "toggle-status",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -759,6 +841,8 @@
     "case-label-form",
     "create-form",
     "invite-form",
+    "kb-doc-edit",
+    "kb-import-form",
     "login-form",
     "model-form",
     "pwd-form",
@@ -776,6 +860,7 @@
     "page_admin.js",
     "page_cases.js",
     "page_dashboard.js",
+    "page_kb.js",
     "page_skills.js",
     "page_task_detail.js",
     "page_tasks.js",

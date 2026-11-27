@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -665,6 +665,185 @@ CREATE TABLE IF NOT EXISTS skill_approvals (
   UNIQUE(skill, version, approver_id)
 );
 CREATE INDEX IF NOT EXISTS idx_skill_approvals ON skill_approvals(skill, version, decision);
+
+-- 故障知识库（schema 24）。文档层负责来源/权限/版本，案例层是检索与引用单元。
+CREATE TABLE IF NOT EXISTS kb_documents (
+  id TEXT PRIMARY KEY,
+  kb_id INTEGER NOT NULL DEFAULT 1,
+  title TEXT NOT NULL DEFAULT '',
+  title_clean TEXT NOT NULL DEFAULT '',
+  doc_type TEXT NOT NULL DEFAULT 'fault',
+  source_type TEXT NOT NULL DEFAULT 'paste',
+  source_name TEXT NOT NULL DEFAULT '',
+  source_sha256 TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  quality REAL NOT NULL DEFAULT 0,
+  confidence REAL NOT NULL DEFAULT 0.9,
+  pii_masked INTEGER NOT NULL DEFAULT 1,
+  boards_json TEXT NOT NULL DEFAULT '[]',
+  domains_json TEXT NOT NULL DEFAULT '[]',
+  versions_json TEXT NOT NULL DEFAULT '[]',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  raw_text TEXT NOT NULL DEFAULT '',
+  masked_text TEXT NOT NULL DEFAULT '',
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_status ON kb_documents(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_hash ON kb_documents(source_sha256);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_title ON kb_documents(title_clean);
+
+CREATE TABLE IF NOT EXISTS kb_cases (
+  id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL DEFAULT 1,
+  is_derived INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL DEFAULT '',
+  title_clean TEXT NOT NULL DEFAULT '',
+  symptom TEXT NOT NULL DEFAULT '',
+  environment TEXT NOT NULL DEFAULT '',
+  expected TEXT NOT NULL DEFAULT '',
+  actual TEXT NOT NULL DEFAULT '',
+  repro TEXT NOT NULL DEFAULT '',
+  found_date TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  cause TEXT NOT NULL DEFAULT '',
+  cause_detail TEXT NOT NULL DEFAULT '',
+  solution TEXT NOT NULL DEFAULT '',
+  prevention TEXT NOT NULL DEFAULT '',
+  root_cause_key TEXT NOT NULL DEFAULT '',
+  sections_json TEXT NOT NULL DEFAULT '[]',
+  boards_json TEXT NOT NULL DEFAULT '[]',
+  domains_json TEXT NOT NULL DEFAULT '[]',
+  versions_json TEXT NOT NULL DEFAULT '[]',
+  quality REAL NOT NULL DEFAULT 0,
+  confidence REAL NOT NULL DEFAULT 0.9,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_cases_doc ON kb_cases(doc_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_kb_cases_status ON kb_cases(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_case_tags (
+  case_id TEXT NOT NULL REFERENCES kb_cases(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY(case_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_case_tags_value ON kb_case_tags(kind, value);
+
+CREATE TABLE IF NOT EXISTS kb_import_jobs (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  mode TEXT NOT NULL DEFAULT 'direct',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  total_files INTEGER NOT NULL DEFAULT 0,
+  done_files INTEGER NOT NULL DEFAULT 0,
+  failed_files INTEGER NOT NULL DEFAULT 0,
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_import_jobs_user ON kb_import_jobs(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_import_files (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES kb_import_jobs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '',
+  rel_path TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  mime TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued',
+  error TEXT NOT NULL DEFAULT '',
+  doc_id TEXT NOT NULL DEFAULT '',
+  draft_id TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0,
+  stored_path TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_import_files_job ON kb_import_files(job_id, id);
+
+CREATE TABLE IF NOT EXISTS kb_drafts (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  confidence REAL NOT NULL DEFAULT 0.9,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'reviewing',
+  reviewed_by INTEGER,
+  reviewed_at TEXT,
+  doc_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_drafts_status ON kb_drafts(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_doc_versions (
+  id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL DEFAULT 1,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  sha256 TEXT NOT NULL DEFAULT '',
+  created_by INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_doc_versions(doc_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS kb_query_logs (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  query TEXT NOT NULL DEFAULT '',
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  analysis_json TEXT NOT NULL DEFAULT '{}',
+  top_ids_json TEXT NOT NULL DEFAULT '[]',
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  zero_result INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_query_logs_time ON kb_query_logs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_feedback (
+  id TEXT PRIMARY KEY,
+  query_id TEXT NOT NULL DEFAULT '',
+  user_id INTEGER NOT NULL,
+  helpful INTEGER NOT NULL DEFAULT 1,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_feedback_time ON kb_feedback(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_index_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0,
+  doc_count INTEGER NOT NULL DEFAULT 0,
+  case_count INTEGER NOT NULL DEFAULT 0,
+  terms INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  build_ms INTEGER NOT NULL DEFAULT 0,
+  built_at TEXT NOT NULL DEFAULT '',
+  checksum TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'empty',
+  error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS kb_terms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'synonym',
+  term TEXT NOT NULL DEFAULT '',
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  weight REAL NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_terms_kind ON kb_terms(kind, term);
 
 """
 

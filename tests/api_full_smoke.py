@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 CURRENT_VERSION = re.search(
@@ -198,6 +199,32 @@ EXPECTED_ROUTES = {
     "POST /api/assistant/chat",
     "POST /api/assistant/actions/{id}/confirm",
     "POST /api/assistant/actions/{id}/cancel",
+    "GET /api/kb/status",
+    "GET /api/kb/facets",
+    "GET /api/kb/docs",
+    "POST /api/kb/docs",
+    "GET /api/kb/docs/{id}",
+    "PUT /api/kb/docs/{id}",
+    "POST /api/kb/docs/{id}/status",
+    "DELETE /api/kb/docs/{id}",
+    "GET /api/kb/docs/{id}/versions",
+    "POST /api/kb/docs/{id}/versions/{version_id}/restore",
+    "GET /api/kb/files/{id}",
+    "POST /api/kb/import",
+    "GET /api/kb/import/jobs",
+    "GET /api/kb/import/jobs/{id}",
+    "POST /api/kb/import/jobs/{id}/cancel",
+    "GET /api/kb/drafts",
+    "GET /api/kb/drafts/{id}",
+    "PUT /api/kb/drafts/{id}",
+    "POST /api/kb/drafts/{id}/approve",
+    "POST /api/kb/drafts/{id}/reject",
+    "POST /api/kb/chat",
+    "POST /api/kb/feedback",
+    "POST /api/kb/reindex",
+    "GET /api/kb/queries",
+    "POST /api/kb/sample",
+    "GET /api/kb/search",
     "GET /api/mcp/info",
     "POST /api/mcp/token",
     "DELETE /api/mcp/token",
@@ -1516,6 +1543,111 @@ def main() -> int:
         _, revoked = admin_client.json("DELETE", "/api/mcp/token")
         assert revoked["mcp"]["configured"] is False
         hit("DELETE /api/mcp/token")
+
+        # 故障知识库：状态、导入、检索、问答、审核、版本和文件下载
+        _, kb_status = admin_client.json("GET", "/api/kb/status")
+        assert kb_status["status"]["enabled"] is True
+        hit("GET /api/kb/status")
+        _, kb_facets = admin_client.json("GET", "/api/kb/facets")
+        assert "boards" in kb_facets and "domains" in kb_facets
+        hit("GET /api/kb/facets")
+        _, sample = admin_client.json("POST", "/api/kb/sample", {})
+        assert sample["documents"] >= 1
+        hit("POST /api/kb/sample")
+        _, kb_docs = admin_client.json("GET", "/api/kb/docs?size=10&status=all")
+        assert kb_docs["items"]
+        doc_id = kb_docs["items"][0]["id"]
+        hit("GET /api/kb/docs")
+        _, kb_detail = admin_client.json("GET", f"/api/kb/docs/{doc_id}")
+        assert kb_detail["doc"]["cases"]
+        hit("GET /api/kb/docs/{id}")
+        _, kb_search = admin_client.json("GET", "/api/kb/search?q=" + quote("看门狗复位"))
+        assert kb_search["items"]
+        hit("GET /api/kb/search")
+        _, kb_chat = admin_client.json("POST", "/api/kb/chat", {"query": "看门狗复位"})
+        assert kb_chat["query_id"]
+        hit("POST /api/kb/chat")
+        admin_client.json("POST", "/api/kb/feedback", {
+            "query_id": kb_chat["query_id"], "helpful": True, "reason": "api-smoke",
+        })
+        hit("POST /api/kb/feedback")
+        admin_client.json("POST", "/api/kb/reindex", {})
+        hit("POST /api/kb/reindex")
+        admin_client.json("GET", "/api/kb/queries")
+        hit("GET /api/kb/queries")
+
+        _, created_doc = admin_client.json("POST", "/api/kb/docs", {
+            "title": "API 粘贴案例",
+            "text": "【详细描述:单板复位】\n【原因分析】喂狗异常\n【处理方案】升级逻辑",
+        }, expected=201)
+        doc_created_id = created_doc["doc_id"]
+        hit("POST /api/kb/docs")
+        admin_client.json("PUT", f"/api/kb/docs/{doc_created_id}",
+                          {"title": "API 粘贴案例-改名"})
+        hit("PUT /api/kb/docs/{id}")
+        _, versions = admin_client.json("GET", f"/api/kb/docs/{doc_created_id}/versions")
+        assert versions["items"]
+        hit("GET /api/kb/docs/{id}/versions")
+        admin_client.json("POST",
+                          f"/api/kb/docs/{doc_created_id}/versions/{versions['items'][0]['id']}/restore",
+                          {})
+        hit("POST /api/kb/docs/{id}/versions/{version_id}/restore")
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "disabled"})
+        admin_client.json("POST", f"/api/kb/docs/{doc_created_id}/status", {"status": "active"})
+        hit("POST /api/kb/docs/{id}/status")
+        admin_client.json("DELETE", f"/api/kb/docs/{doc_created_id}")
+        hit("DELETE /api/kb/docs/{id}")
+
+        # 工程师粘贴进入审核；管理员改标题、批准或退回。
+        _, eng_doc = engineer.json("POST", "/api/kb/docs", {
+            "title": "工程师待审案例",
+            "text": "【详细描述:SSD 只读】\n【原因分析】系统盘写保护\n【处理方案】更换 SSD",
+        }, expected=202)
+        draft_id = eng_doc["draft_id"]
+        _, drafts = admin_client.json("GET", "/api/kb/drafts")
+        assert drafts["items"]
+        hit("GET /api/kb/drafts")
+        admin_client.json("GET", f"/api/kb/drafts/{draft_id}")
+        hit("GET /api/kb/drafts/{id}")
+        admin_client.json("PUT", f"/api/kb/drafts/{draft_id}",
+                          {"title": "工程师待审案例-已改"})
+        hit("PUT /api/kb/drafts/{id}")
+        admin_client.json("POST", f"/api/kb/drafts/{draft_id}/approve", {})
+        hit("POST /api/kb/drafts/{id}/approve")
+        _, eng_doc2 = engineer.json("POST", "/api/kb/docs", {
+            "title": "工程师待退回案例",
+            "text": "【原因分析】待补充\n【处理方案】待补充",
+        }, expected=202)
+        admin_client.json("POST", f"/api/kb/drafts/{eng_doc2['draft_id']}/reject",
+                          {"reason": "资料不足"})
+        hit("POST /api/kb/drafts/{id}/reject")
+
+        # 导入任务 + 文件下载 + 取消
+        csv_bytes = ("问题,答案\n" + '"VBPE2 复位","【原因分析】逻辑异常' + '\n' +
+                     '【处理方案】升级逻辑"\n').encode("utf-8")
+        _, imported = admin_client.multipart(
+            "/api/kb/import", {"mode": "direct"},
+            [("files", "api-kb.csv", csv_bytes, "text/csv")], expected=202)
+        job_id = imported["job"]["id"]
+        hit("POST /api/kb/import")
+        _, jobs = admin_client.json("GET", "/api/kb/import/jobs")
+        assert any(x["id"] == job_id for x in jobs["items"])
+        hit("GET /api/kb/import/jobs")
+        deadline = time.time() + 20
+        job = imported["job"]
+        while time.time() < deadline:
+            _, job = admin_client.json("GET", f"/api/kb/import/jobs/{job_id}")
+            if job["job"]["status"] in ("completed", "partial", "failed"):
+                break
+            time.sleep(0.3)
+        hit("GET /api/kb/import/jobs/{id}")
+        assert job["job"]["files"]
+        file_id = job["job"]["files"][0]["id"]
+        status, _, _ = admin_client.request("GET", f"/api/kb/files/{file_id}")
+        assert status == 200
+        hit("GET /api/kb/files/{id}")
+        admin_client.json("POST", f"/api/kb/import/jobs/{job_id}/cancel", {})
+        hit("POST /api/kb/import/jobs/{id}/cancel")
 
         # 迁移：列表、预检、导出/详情/下载/删除，导入错误路径
         _, migrations = admin_client.json("GET", "/api/system/migrations")

@@ -10,6 +10,7 @@ import { renderWorkshop } from './page_workshop.js';
 import { renderModels, renderUsers, renderAudit, renderSystem } from './page_admin.js';
 import { renderTraceDetail, renderTraces } from './page_traces.js';
 import { renderCases, renderCaseDetail } from './page_cases.js';
+import { renderKb, renderKbDocs, renderKbDoc } from './page_kb.js';
 import { renderUsage } from './page_usage.js';
 import { openPersonalModelModal } from './personal_model.js';
 import { mountAssistant, unmountAssistant } from './assistant.js';
@@ -21,6 +22,7 @@ const NAV = [
   { href: '#/tasks', label: '任务记录', icon: 'list' },
   { href: '#/usage', label: '用量统计', icon: 'activity' },
   { href: '#/cases', label: '真实案例', icon: 'inbox' },
+  { href: '#/kb', label: '故障知识库', icon: 'search' },
   { href: '#/skills', label: '技能库', icon: 'layers' },
   { href: '#/workshop', label: '技能工坊', icon: 'flask' },
   { href: '#/system', label: '系统信息', icon: 'info' },
@@ -118,7 +120,8 @@ function updateNav() {
   const path = currentPath();
   document.querySelectorAll('#nav a').forEach((a) => {
     const href = a.getAttribute('href');
-    const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path));
+    const active = href === path || (href === '#/tasks' && /^#\/tasks\/(?!new$)/.test(path))
+      || (href === '#/kb' && /^#\/kb(?:$|\/|\?)/.test(path));
     a.classList.toggle('active', active);
   });
 }
@@ -778,6 +781,10 @@ function route() {
   if (path === '#/usage') return renderUsage();
   if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();
+  if (path === '#/kb' || path === '#/kb/') return renderKb();
+  if (path === '#/kb/docs' || path.startsWith('#/kb/docs?')) return renderKbDocs();
+  const kbDocMatch = path.match(/^#\/kb\/docs\/([^/?]+)$/);
+  if (kbDocMatch) return renderKbDoc(decodeURIComponent(kbDocMatch[1]));
   const caseMatch = path.match(/^#\/cases\/([^/]+)$/);
   if (caseMatch) return renderCaseDetail(decodeURIComponent(caseMatch[1]));
   const taskMatch = path.match(/^#\/tasks\/([^/]+)$/);
