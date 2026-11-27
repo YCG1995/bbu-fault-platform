@@ -115,6 +115,8 @@ function citationChips(citations, caseMap) {
 function renderResult(data) {
   const cases = data.cases || [];
   const caseMap = Object.fromEntries(cases.map((c) => [c.citation, c]));
+  const libNames = data.library_names || {};
+  const multiLibrary = (data.kb_ids || []).length > 1 || Number(data.libraries || 0) > 1;
   const noAnswer = data.no_answer;
   const parts = [];
   if (noAnswer) {
@@ -143,7 +145,7 @@ function renderResult(data) {
       <div class="card-body kb-case-list">
         ${cases.map((c) => `<a class="kb-case-card" href="#/kb/docs/${encodeURIComponent(c.doc_id)}">
           <div class="inline"><span class="kb-cite">${esc(c.citation)}</span>
-            <strong>${esc(c.title)}</strong><span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
+            <strong>${esc(c.title)}</strong>${multiLibrary ? `<span class="badge">${esc(libNames[c.kb_id] || `库 ${c.kb_id || '—'}`)}</span>` : ''}<span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
           <div class="tiny muted" style="margin-top:6px">${esc((c.boards || []).join('、') || '未识别板卡')} · ${esc((c.domains || []).join('、') || '未识别领域')} ${c.versions?.length ? '· ' + esc(c.versions.join('、')) : ''}</div>
           <div class="kb-snippet"><span>现象</span>${esc(c.symptom || '—')}</div>
           <div class="kb-snippet"><span>原因</span>${esc(c.cause || '—')}</div>
@@ -188,18 +190,20 @@ function domainOptions(facets) {
 
 export async function renderKb() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
-  const kbId = Math.max(1, Number(params.get('kb') || 1));
+  let kbId = Math.max(0, Number(params.get('kb') || 0));
   const view = mount('故障问答', '先查现场历史案例；结论必须能回到具体文档和案例', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   let status;
   let facets;
   let recent = [];
   try {
-    const [statusResp, facetData, recentResp] = await Promise.all([
-      api(`/api/kb/status?kb=${kbId}`), loadFacets(kbId),
+    const statusResp = await api(`/api/kb/status${kbId ? `?kb=${kbId}` : ''}`);
+    status = statusResp.status;
+    kbId = kbId || Number(status.kb_id || 1);
+    const [facetData, recentResp] = await Promise.all([
+      loadFacets(kbId),
       api(`/api/kb/docs?size=6&status=active&kb=${kbId}`).catch(() => ({ items: [] })),
     ]);
-    status = statusResp.status;
     facets = facetData;
     recent = recentResp.items || [];
   } catch (err) {
@@ -211,7 +215,16 @@ export async function renderKb() {
     return;
   }
   const empty = Number(status.documents || 0) === 0;
-  const libraryOptions = (status.libraries || []).filter((x) => x.status === 'active')
+  const activeLibraries = (status.libraries || []).filter((x) => x.status === 'active');
+  let savedCrossIds = [];
+  try { savedCrossIds = JSON.parse(localStorage.getItem('kb.cross.ids') || '[]'); } catch {}
+  if (!Array.isArray(savedCrossIds)) savedCrossIds = [];
+  const paramCrossIds = String(params.get('kb_ids') || '').split(',').map((x) => Number(x)).filter((x) => x > 0);
+  const initialCrossIds = [...new Set((paramCrossIds.length ? paramCrossIds : savedCrossIds)
+    .filter((x) => activeLibraries.some((lib) => Number(lib.id) === Number(x))))].slice(0, 5);
+  if (!initialCrossIds.length && activeLibraries.length) initialCrossIds.push(Number(status.kb_id || 1));
+  const crossChoices = activeLibraries.map((lib) => `<label class="check tiny"><input type="checkbox" class="kb-cross-option" value="${esc(lib.id)}" ${initialCrossIds.includes(Number(lib.id)) ? 'checked' : ''}> ${esc(lib.name)}</label>`).join('');
+  const libraryOptions = activeLibraries
     .map((x) => `<option value="${esc(x.id)}" ${Number(x.id) === Number(status.kb_id || 1) ? 'selected' : ''}>${esc(x.name)} · ${x.documents || 0} 文档</option>`).join('')
     || '<option value="1">故障知识库</option>';
   view.innerHTML = `
@@ -220,6 +233,10 @@ export async function renderKb() {
       <select class="input" id="kb-library-select" style="max-width:260px">${libraryOptions}</select>
       <label class="check"><input type="checkbox" id="kb-cross" ${params.get('cross') === '1' ? 'checked' : ''}> 跨库检索（融合排序）</label>
       <span class="tiny muted">专家库、语料库与故障库逻辑隔离；跨库检索只合并结果，不合并数据。</span>
+      <div id="kb-cross-scope" class="kb-cross-scope" style="display:${params.get('cross') === '1' ? 'flex' : 'none'};flex-basis:100%;gap:10px;flex-wrap:wrap;align-items:center">
+        <span class="tiny muted">检索范围</span>${crossChoices || '<span class="tiny muted">没有可见知识库</span>'}
+        <span class="tiny muted" id="kb-cross-count">最多 5 个库</span>
+      </div>
     </div></div>
     <div class="grid grid-4 kb-stats">
       <div class="card stat"><div><div class="stat-val">${status.documents || 0}</div>
@@ -267,6 +284,33 @@ export async function renderKb() {
       历史案例不是厂商正式公告，执行前需结合当前版本、现场日志和变更记录复核。
     </div></div>`;
 
+  const crossToggle = view.querySelector('#kb-cross');
+  const crossScope = view.querySelector('#kb-cross-scope');
+  const crossCount = view.querySelector('#kb-cross-count');
+  const selectedCross = () => [...view.querySelectorAll('.kb-cross-option:checked')]
+    .map((x) => Number(x.value)).filter((x) => x > 0);
+  const syncCross = () => {
+    if (crossCount) crossCount.textContent = `已选 ${selectedCross().length} / 最多 5 个`;
+    try { localStorage.setItem('kb.cross.ids', JSON.stringify(selectedCross())); } catch {}
+  };
+  crossToggle?.addEventListener('change', () => {
+    if (crossScope) crossScope.style.display = crossToggle.checked ? 'flex' : 'none';
+    if (crossToggle.checked && !selectedCross().length) {
+      const current = view.querySelector('#kb-library-select')?.value;
+      const cb = [...view.querySelectorAll('.kb-cross-option')].find((x) => x.value === current);
+      if (cb) cb.checked = true;
+    }
+    syncCross();
+  });
+  view.querySelectorAll('.kb-cross-option').forEach((cb) => cb.addEventListener('change', () => {
+    if (selectedCross().length > 5) {
+      cb.checked = false;
+      toast('跨库检索最多选择 5 个知识库', 'error');
+    }
+    syncCross();
+  }));
+  syncCross();
+
   let running = false;
   let progress = null;
   const run = async (endpoint, button) => {
@@ -278,7 +322,15 @@ export async function renderKb() {
     const filters = {};
     const board = view.querySelector('#kb-board').value;
     const domain = view.querySelector('#kb-domain').value;
-    const kbIds = cross ? [...view.querySelectorAll('#kb-library-select option')].map((x) => Number(x.value)).filter((x) => x > 0) : [selectedKb];
+    let kbIds = [selectedKb];
+    if (cross) {
+      const checked = [...view.querySelectorAll('.kb-cross-option:checked')].map((x) => Number(x.value)).filter((x) => x > 0);
+      if (checked.length > 5) { toast('跨库检索最多选择 5 个知识库', 'error'); return; }
+      kbIds = checked.length ? checked : [selectedKb];
+      if (kbIds.length > 5) { toast('跨库检索最多选择 5 个知识库', 'error'); return; }
+      try { localStorage.setItem('kb.cross.ids', JSON.stringify(kbIds)); } catch {}
+      history.replaceState(null, '', `#/kb?kb=${selectedKb}&cross=1&kb_ids=${kbIds.join(',')}`);
+    }
     if (board) filters.board = board;
     if (domain) filters.domain = domain;
     running = true;
@@ -290,12 +342,15 @@ export async function renderKb() {
         : await api(`/api/kb/search?q=${encodeURIComponent(query)}&board=${encodeURIComponent(board)}&domain=${encodeURIComponent(domain)}&limit=10&kb_ids=${kbIds.join(',')}`);
       if (!view.isConnected) return;
       progress.finish();
+      const libNames = data.library_names || Object.fromEntries(activeLibraries.map((lib) => [String(lib.id), lib.name]));
+      const multiLibrary = kbIds.length > 1;
+      const scopeText = multiLibrary ? ` · 检索范围 ${kbIds.length} 个库` : '';
       if (endpoint === 'search') {
         const items = data.items || [];
         view.querySelector('#kb-result').innerHTML = items.length
-          ? `<div class="card"><div class="card-head"><h2>检索结果</h2><span class="sub">${data.no_answer ? '低于拒答阈值，仅供参考' : `${items.length} 个案例`} · ${data.latency_ms || 0} ms</span></div>
+          ? `<div class="card"><div class="card-head"><h2>检索结果</h2><span class="sub">${data.no_answer ? '低于拒答阈值，仅供参考' : `${items.length} 个案例`}${scopeText} · ${data.latency_ms || 0} ms</span></div>
             <div class="card-body kb-case-list">${items.map((c, i) => `<a class="kb-case-card" href="#/kb/docs/${encodeURIComponent(c.doc_id)}">
-              <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong><span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
+              <div class="inline"><span class="kb-cite">K${i + 1}</span><strong>${esc(c.title)}</strong>${multiLibrary ? `<span class="badge">${esc(libNames[c.kb_id] || `库 ${c.kb_id || '—'}`)}</span>` : ''}<span class="badge info" style="margin-left:auto">${scoreText(c.score)}</span></div>
               <div class="kb-snippet"><span>现象</span>${esc(c.symptom || '—')}</div>
               <div class="kb-snippet"><span>原因</span>${esc(c.cause || '—')}</div>
               <div class="kb-snippet"><span>方案</span>${esc(c.solution || '—')}</div></a>`).join('')}</div></div>${kbRecordFooter(data)}`
@@ -542,6 +597,36 @@ function bindKbTabActions(view) {
         toast('已创建知识库', 'ok'); renderKbDocs();
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
+    'library-rename': async (el) => {
+      const name = window.prompt('知识库新名称', el.dataset.name || '');
+      if (name === null) return;
+      const next = name.trim();
+      if (!next) { toast('名称不能为空', 'error'); return; }
+      setBusy(el, true, '保存中…');
+      try {
+        await api(`/api/kb/libraries/${encodeURIComponent(el.dataset.id)}`, { method: 'PUT', body: { name: next } });
+        toast('已重命名', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'library-visibility': async (el) => {
+      const next = el.dataset.visibility === 'admin' ? 'all' : 'admin';
+      if (!(await confirmDialog(next === 'admin'
+        ? '设为仅管理员可见？工程师将不会在问答页看到该库。'
+        : '设为全员可见？所有登录用户可在问答页选择该库。'))) return;
+      setBusy(el, true, '保存中…');
+      try {
+        await api(`/api/kb/libraries/${encodeURIComponent(el.dataset.id)}`, { method: 'PUT', body: { visibility: next } });
+        toast('已更新可见性', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
+    'library-default': async (el) => {
+      if (!(await confirmDialog('设为默认知识库？新会话和未指定库的问答将优先使用该库。'))) return;
+      setBusy(el, true, '保存中…');
+      try {
+        await api(`/api/kb/libraries/${encodeURIComponent(el.dataset.id)}`, { method: 'PUT', body: { is_default: true } });
+        toast('已设为默认', 'ok'); renderKbDocs();
+      } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
+    },
     'library-archive': async (el) => {
       if (!(await confirmDialog('归档该知识库？归档后不再出现在问答库列表；数据保留，可由管理员离线清理。'))) return;
       setBusy(el, true, '归档中…');
@@ -565,10 +650,12 @@ function bindKbTabActions(view) {
       fd.append('file', file, file.name);
       const name = view.querySelector('#kb-lib-restore-name')?.value.trim() || '';
       if (name) fd.append('name', name);
+      const target = view.querySelector('#kb-lib-restore-target')?.value || '';
+      if (target) fd.append('target_kb_id', target);
       setBusy(el, true, '恢复中…');
       try {
         const r = await api('/api/kb/libraries/restore', { method: 'POST', body: fd, timeoutMs: 300000 });
-        toast(`已恢复到新库：${r.documents || 0} 个文档`, 'ok'); renderKbDocs();
+        toast(`${r.merged ? '已合并' : '已恢复到新库'}：${r.documents || 0} 个文档`, 'ok'); renderKbDocs();
       } catch (err) { toast(err.message, 'error'); setBusy(el, false); }
     },
     'job-rollback': (el) => batchJobAction(view, el, '/api/kb/import/jobs/rollback',
@@ -609,6 +696,32 @@ function bindKbTabActions(view) {
         catch { failed += 1; }
       }
       toast(`已退回 ${ok} 个${failed ? `，${failed} 个失败` : ''}`, failed ? 'error' : 'ok');
+      renderKbDocs();
+    },
+    'review-bulk-reject': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      const note = prompt('批量驳回原因（可留空）');
+      if (note === null) return;
+      setBusy(el, true, '批量驳回中…');
+      let ok = 0; let failed = 0;
+      for (const id of ids) {
+        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`, { method: 'POST', body: { decision: 'reject', note } }); ok += 1; }
+        catch { failed += 1; }
+      }
+      toast(`已驳回 ${ok} 条${failed ? `，${failed} 条失败` : ''}`, failed ? 'error' : 'ok');
+      renderKbDocs();
+    },
+    'review-bulk-retry': async (el) => {
+      const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
+      if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      setBusy(el, true, '批量重试中…');
+      let ok = 0; let failed = 0;
+      for (const id of ids) {
+        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} }); ok += 1; }
+        catch { failed += 1; }
+      }
+      toast(`已重试 ${ok} 条${failed ? `，${failed} 条失败` : ''}`, failed ? 'error' : 'ok');
       renderKbDocs();
     },
     'review-bulk-approve': async (el) => {
@@ -800,17 +913,21 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
               <span style="font-weight:600">${esc(x.name)}</span>
               <span class="badge ${x.status === 'active' ? 'ok' : 'warn'}">${x.status === 'active' ? '生效' : '已归档'}</span>
               <span class="badge info">${esc(kindLabel[x.kind] || x.kind)}</span>
+              <span class="badge ${x.visibility === 'admin' ? 'warn' : ''}">${x.visibility === 'admin' ? '仅管理员' : '全员可见'}</span>
               <span class="tiny muted">${x.documents || 0} 文档 / ${x.cases || 0} 案例</span>
               ${x.is_default ? '<span class="badge">默认</span>' : ''}
               <span style="margin-left:auto" class="inline">
                 <a class="btn btn-sm" href="/api/kb/libraries/${encodeURIComponent(x.id)}/backup">${icon('download')} 备份</a>
+                ${x.status === 'active' ? `<button class="btn btn-sm" data-act="library-rename" data-id="${esc(x.id)}" data-name="${esc(x.name)}">重命名</button>
+                <button class="btn btn-sm" data-act="library-visibility" data-id="${esc(x.id)}" data-visibility="${esc(x.visibility || 'all')}">${x.visibility === 'admin' ? '设为全员' : '设为仅管理员'}</button>
+                ${!x.is_default ? `<button class="btn btn-sm" data-act="library-default" data-id="${esc(x.id)}">设为默认</button>` : ''}` : ''}
                 ${x.status === 'archived' && !x.is_default ? `<button class="btn btn-sm" data-act="library-unarchive" data-id="${esc(x.id)}">恢复</button>` : ''}
                 ${x.status === 'active' && !x.is_default ? `<button class="btn btn-sm btn-danger" data-act="library-archive" data-id="${esc(x.id)}">归档</button>` : ''}
               </span>
               ${x.description ? `<div class="tiny muted" style="flex-basis:100%">${esc(x.description)}</div>` : ''}
             </div>`).join('') || '<div class="empty small">还没有知识库</div>'}
           </div></div></div>
-        <div class="card"><div class="card-head"><h2>新建 / 恢复</h2><span class="sub">备份格式 *.kbbackup.zip，含文档与案例 JSONL</span></div>
+        <div class="card"><div class="card-head"><h2>新建 / 恢复</h2><span class="sub">备份格式 *.kbbackup.zip（v2），含文档/案例/草稿/审核/修订/版本</span></div>
           <div class="card-body">
             <div class="form-row"><label>名称</label><input class="input" id="kb-lib-name" maxlength="80" placeholder="例如：专家经验库"></div>
             <div class="form-row"><label>类型</label><select class="input" id="kb-lib-kind">
@@ -819,7 +936,11 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
             <button class="btn btn-primary" data-act="library-create">${icon('plus')} 创建知识库</button>
             <hr style="margin:16px 0;border:0;border-top:1px solid var(--line)">
             <div class="form-row"><label>从备份恢复</label><input class="input" id="kb-lib-file" type="file" accept=".zip,.kbbackup.zip">
-              <input class="input" id="kb-lib-restore-name" placeholder="恢复后的名称（可选）" style="margin-top:6px"></div>
+              <input class="input" id="kb-lib-restore-name" placeholder="恢复后的名称（新建库时可选）" style="margin-top:6px">
+              <select class="input" id="kb-lib-restore-target" style="margin-top:6px">
+                <option value="">恢复为新知识库</option>
+                ${(libraries.items || []).filter((x) => x.status === 'active').map((x) => `<option value="${esc(x.id)}">合并到：${esc(x.name)}</option>`).join('')}
+              </select></div>
             <button class="btn" data-act="library-restore">${icon('upload')} 上传并恢复</button>
           </div></div>
       </div>`;
@@ -908,8 +1029,8 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
     try { drafts = await api(`/api/kb/drafts?kb=${kbId}`); } catch { /* optional */ }
     try { reviews = await api(`/api/kb/reviews?status=pending&limit=100&kb=${kbId}`); } catch { /* optional */ }
     const reviewTabs = [
-      ['drafts', `待入库草稿 ${drafts.items?.length || 0}`],
-      ['reviews', `AI / 人工审核 ${reviews.items?.length || 0}`],
+      ['drafts', `待入库草稿 ${drafts.total ?? drafts.items?.length ?? 0}`],
+      ['reviews', `AI / 人工审核 ${reviews.total ?? reviews.items?.length ?? 0}`],
     ];
     const panels = {
       drafts: `${(drafts.items || []).length ? `<table class="data responsive"><thead><tr>
@@ -934,8 +1055,10 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
         ${r.status !== 'decided' ? `<button class="btn btn-sm" data-act="review-decision" data-id="${esc(r.id)}">终审</button>` : ''}</td></tr>`).join('')}
         </tbody></table>` : emptyState('check', '没有待处理审核', '导入或编辑后会生成审核记录。')}
         <div class="inline" style="margin-top:10px"><button class="btn btn-sm btn-primary" data-act="review-bulk-approve">批量通过</button>
+        <button class="btn btn-sm btn-danger" data-act="review-bulk-reject">批量驳回</button>
+        <button class="btn btn-sm" data-act="review-bulk-retry">批量重试</button>
         <button class="btn btn-sm" data-act="review-batch">${icon('refresh')} 处理排队中的 AI 预审</button>
-        <span class="tiny muted">批量通过仍会拒绝 blocker；需要逐条备注时点“终审”。</span></div>`,
+        <span class="tiny muted">批量通过仍会拒绝 blocker；批量驳回/重试只处理勾选的未决记录。</span></div>`,
     };
     view.innerHTML = `${header}
       <div class="card"><div class="card-head"><h2>审核队列</h2><span class="sub">草稿与 AI 预审分开展示；处理后再发布</span></div>
@@ -1017,13 +1140,14 @@ export async function renderKbDocs() {
   const docStatus = params.get('status') || 'all';
   const docQ = params.get('q') || '';
   const page = Math.max(1, Number(params.get('page') || 1));
-  const kbId = Math.max(1, Number(params.get('kb') || 1));
+  let kbId = Math.max(0, Number(params.get('kb') || 0));
   const view = mount('知识库管理', '文档库、导入、审核、变更与审计；原始文本仅管理员可见', '');
   view.innerHTML = `<div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
   if (tab !== 'docs') {
     try {
-      const [statusResp, facets] = await Promise.all([
-        api(`/api/kb/status?kb=${kbId}`), loadFacets(kbId)]);
+      const statusResp = await api(`/api/kb/status${kbId ? `?kb=${kbId}` : ''}`);
+      kbId = kbId || Number(statusResp.status.kb_id || 1);
+      const facets = await loadFacets(kbId);
       await renderKbTab(tab, view, statusResp.status, facets, kbId);
     } catch (err) {
       view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
@@ -1033,10 +1157,9 @@ export async function renderKbDocs() {
   let status;
   let docs;
   try {
-    [status, docs] = await Promise.all([
-      api(`/api/kb/status?kb=${kbId}`).then((r) => r.status),
-      api(`/api/kb/docs?size=50&page=${page}&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&kb=${kbId}`),
-    ]);
+    status = (await api(`/api/kb/status${kbId ? `?kb=${kbId}` : ''}`)).status;
+    kbId = kbId || Number(status.kb_id || 1);
+    docs = await api(`/api/kb/docs?size=50&page=${page}&status=${encodeURIComponent(docStatus)}&q=${encodeURIComponent(docQ)}&kb=${kbId}`);
   } catch (err) {
     view.innerHTML = `<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return view;

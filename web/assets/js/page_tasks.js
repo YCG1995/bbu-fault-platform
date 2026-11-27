@@ -29,8 +29,12 @@ function operationKind(item) {
 async function renderKbOperationRecords(view, admin) {
   view.innerHTML = `${taskModeNav(true)}
     <div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const selectedKb = Number(params.get('kb') || 0);
+  let libraries = [];
+  try { libraries = (await api('/api/kb/libraries')).items || []; } catch { /* optional */ }
   let data;
-  try { data = await api('/api/kb/operations?limit=200'); }
+  try { data = await api(`/api/kb/operations?limit=200${selectedKb ? `&kb=${selectedKb}` : ''}`); }
   catch (err) {
     view.innerHTML = `${taskModeNav(true)}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
     return view;
@@ -55,6 +59,10 @@ async function renderKbOperationRecords(view, admin) {
     <div class="card">
       <div class="toolbar" style="padding:12px 14px">
         <div class="search">${icon('search')}<input class="input" id="kb-op-search" placeholder="搜索问题 / 对象 / 操作人"></div>
+        <select class="input" id="kb-op-kb" style="max-width:220px" aria-label="按知识库过滤">
+          <option value="">全部知识库</option>
+          ${libraries.map((x) => `<option value="${esc(x.id)}" ${selectedKb === Number(x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+        </select>
         <span class="small muted" id="kb-op-total">共 ${items.length} 条</span>
         ${admin ? '<a class="btn btn-sm" href="#/kb/docs?tab=audit" style="margin-left:auto">完整审计 →</a>' : ''}
         <button class="btn btn-sm" data-act="reload-kb-ops">${icon('refresh')}刷新</button>
@@ -70,6 +78,10 @@ async function renderKbOperationRecords(view, admin) {
     view.querySelector('#kb-op-total').textContent = `共 ${rows.length} 条`;
   };
   search?.addEventListener('input', applyFilter);
+  view.querySelector('#kb-op-kb')?.addEventListener('change', (e) => {
+    const kb = e.target.value;
+    location.hash = `#/tasks?tab=kb${kb ? `&kb=${encodeURIComponent(kb)}` : ''}`;
+  });
   bindActions(view, { 'reload-kb-ops': () => renderKbOperationRecords(view, admin) });
   return view;
 }

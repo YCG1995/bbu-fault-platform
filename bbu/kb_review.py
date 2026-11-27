@@ -312,9 +312,14 @@ class ReviewService:
             args.append(target_type)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
+        count = self.db.one("SELECT COUNT(*) AS n FROM kb_reviews" +
+                            (" WHERE " + " AND ".join(clauses) if clauses else ""),
+                            tuple(args)) or {}
+        total = int(count.get("n") or 0)
         sql += " ORDER BY created_at DESC LIMIT ?"
         args.append(max(1, min(200, int(limit or 50))))
-        return {"items": [self._public(dict(r)) for r in self.db.all(sql, tuple(args))]}
+        return {"items": [self._public(dict(r)) for r in self.db.all(sql, tuple(args))],
+                "total": total}
 
     def run(self, review_id: str) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM kb_reviews WHERE id=?", (review_id,))

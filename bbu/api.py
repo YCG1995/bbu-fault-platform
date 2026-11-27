@@ -2630,6 +2630,11 @@ def _trace_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
         elif action == "review":
             title = f"审核 {meta.get('target_type') or ''} {meta.get('target_id') or ''}"
             item["ref_url"] = "#/kb/docs?tab=review"
+        elif action in {"library_backup", "library_restore"}:
+            lib = app.db.one("SELECT name FROM kb_libraries WHERE id=?", (ref_id,)) or {}
+            label = "备份" if action == "library_backup" else "恢复"
+            title = f"知识库{label}：{lib.get('name') or ref_id}"
+            item["ref_url"] = "#/kb/docs?tab=libraries"
         else:
             title = "知识库检索"
             item["ref_url"] = "#/kb"
@@ -4440,6 +4445,50 @@ def _kb_id_param(obj: Any, default: int = 1) -> int:
     return value if value > 0 else default
 
 
+def _kb_require_visible(app: App, user: dict[str, Any], kb_id: int | None) -> None:
+    """非管理员不能通过显式 kb_id 读取仅管理员库或归档库。"""
+    if user.get("role") == "admin":
+        return
+    if int(kb_id or 0) not in app.kb._visible_library_ids(user):
+        raise HTTPError(404, "知识库不存在")
+
+
+def _kb_raw_param(obj: Any) -> int:
+    value = None
+    if hasattr(obj, "query"):
+        value = obj.query.get("kb_id") or obj.query.get("kb")
+    if value is None and hasattr(obj, "json"):
+        try:
+            body = obj.json()
+            value = body.get("kb_id") if isinstance(body, dict) else None
+        except Exception:
+            value = None
+    return _kb_int(value, 0) if value not in (None, "") else 0
+
+
+def _kb_default_visible(app: App, user: dict[str, Any]) -> int:
+    kb_id = app.kb.default_kb_id()
+    if user.get("role") != "admin":
+        visible = app.kb._visible_library_ids(user)
+        if kb_id not in visible:
+            kb_id = visible[0] if visible else kb_id
+    return kb_id
+
+
+def _kb_request_id(app: App, user: dict[str, Any], obj: Any) -> int:
+    """显式库 ID 必须可见；未指定时使用当前默认库。"""
+    raw = _kb_raw_param(obj)
+    if raw > 0:
+        _kb_require_visible(app, user, raw)
+        return raw
+    return _kb_default_visible(app, user)
+
+
+def _kb_require_case_visible(app: App, user: dict[str, Any], case_id: str) -> None:
+    row = app.db.one("SELECT kb_id FROM kb_cases WHERE id=?", (case_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
+
+
 def _kb_ids_param(obj: Any, default: int = 1) -> list[int]:
     raw = obj.query.get("kb_ids") if hasattr(obj, "query") else None
     if not raw and hasattr(obj, "json"):
@@ -4483,13 +4532,18 @@ def _kb_rate(app: App, user: dict[str, Any]) -> None:
 # ---------------------------- 故障知识库 ----------------------------
 def h_kb_status(app: App, req):
     user = _auth(app, req, csrf=False)
-    return response_json({"status": app.kb.status(user, kb_id=_kb_id_param(req))})
+    kb_id = _kb_int(req.query.get("kb_id") or req.query.get("kb"), 0) or app.kb.default_kb_id()
+    return response_json({"status": app.kb.status(user, kb_id=kb_id)})
 
 
 def h_kb_libraries_list(app: App, req):
-    _auth(app, req, csrf=False)
-    return response_json(app.kb.list_libraries(
-        include_archived=str(req.query.get("include_archived") or "") == "1"))
+    user = _auth(app, req, csrf=False)
+    data = app.kb.list_libraries(
+        include_archived=str(req.query.get("include_archived") or "") == "1")
+    if user.get("role") != "admin":
+        data = {"items": [x for x in data.get("items") or []
+                          if x.get("visibility") != "admin" and x.get("status") == "active"]}
+    return response_json(data)
 
 
 def h_kb_library_create(app: App, req):
@@ -4513,8 +4567,10 @@ def h_kb_library_update(app: App, req, kb_id: str):
         result = app.kb.update_library(int(kb_id), req.json(), user)
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
+    lib = result.get("library", {})
     app.db.audit(user["id"], user["username"], "kb.library_update", str(kb_id),
-                 {"name": result.get("library", {}).get("name")}, req.ip)
+                 {"name": lib.get("name"), "visibility": lib.get("visibility"),
+                  "is_default": bool(lib.get("is_default"))}, req.ip)
     return response_json(result)
 
 
@@ -4552,8 +4608,9 @@ def h_kb_library_restore(app: App, req):
     if not path.is_file():
         raise HTTPError(400, "备份包不可读")
     try:
-        result = app.kb.restore_library(user, path.read_bytes(),
-                                        name=str(fields.get("name") or ""))
+        result = app.kb.restore_library(
+            user, path.read_bytes(), name=str(fields.get("name") or ""),
+            target_kb_id=_kb_int(fields.get("target_kb_id"), 0) or None)
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     app.db.audit(user["id"], user["username"], "kb.library_restore",
@@ -4564,15 +4621,18 @@ def h_kb_library_restore(app: App, req):
 def h_kb_operations(app: App, req):
     user = _auth(app, req, csrf=False)
     try:
+        raw_kb = req.query.get("kb_id") or req.query.get("kb")
         return response_json(app.kb.list_operations(
-            user, limit=_kb_int(req.query.get("limit"), 50)))
+            user, limit=_kb_int(req.query.get("limit"), 50),
+            kb_id=_kb_int(raw_kb, 0) or None if raw_kb else None))
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
 
 
 def h_kb_facets(app: App, req):
-    _auth(app, req, csrf=False)
-    return response_json(app.kb.facets(kb_id=_kb_id_param(req)))
+    user = _auth(app, req, csrf=False)
+    kb_id = _kb_request_id(app, user, req)
+    return response_json(app.kb.facets(kb_id=kb_id))
 
 
 def h_kb_search(app: App, req):
@@ -4585,7 +4645,7 @@ def h_kb_search(app: App, req):
     try:
         result = app.kb.search(query, user, filters=filters,
                                limit=_kb_int(req.query.get("limit"), 10),
-                               kb_ids=_kb_ids_param(req))
+                               kb_ids=_kb_ids_param(req, _kb_request_id(app, user, req)))
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     return response_json(result)
@@ -4593,13 +4653,14 @@ def h_kb_search(app: App, req):
 
 def h_kb_docs(app: App, req):
     user = _auth(app, req, csrf=False)
+    kb_id = _kb_request_id(app, user, req)
     try:
         data = app.kb.list_documents(
             q=str(req.query.get("q") or ""), board=str(req.query.get("board") or ""),
             domain=str(req.query.get("domain") or ""),
             status=str(req.query.get("status") or "active"),
             page=_kb_int(req.query.get("page"), 1), size=_kb_int(req.query.get("size"), 20),
-            reveal=user.get("role") == "admin", kb_id=_kb_id_param(req))
+            reveal=user.get("role") == "admin", kb_id=kb_id)
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     return response_json(data)
@@ -4616,7 +4677,7 @@ def h_kb_doc_create(app: App, req):
         raise HTTPError(413, "文本超过 2 MB")
     try:
         result = app.kb.create_paste(user, title=title, text=text,
-                                     kb_id=_kb_id_param(req))
+                                     kb_id=_kb_request_id(app, user, req))
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     app.db.audit(user["id"], user["username"], "kb.doc_create", result.get("doc_id") or "",
@@ -4626,6 +4687,8 @@ def h_kb_doc_create(app: App, req):
 
 def h_kb_doc_detail(app: App, req, doc_id: str):
     user = _auth(app, req, csrf=False)
+    row = app.db.one("SELECT kb_id FROM kb_documents WHERE id=?", (doc_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
     try:
         data = app.kb.get_document(doc_id, reveal=user.get("role") == "admin")
     except Exception as exc:  # noqa: BLE001
@@ -4640,6 +4703,8 @@ def _kb_csv(text: str, name: str) -> tuple[int, dict[str, str], bytes]:
 
 def h_kb_case_detail(app: App, req, case_id: str):
     user = _auth(app, req, csrf=False)
+    row = app.db.one("SELECT kb_id FROM kb_cases WHERE id=?", (case_id,)) or {}
+    _kb_require_visible(app, user, row.get("kb_id"))
     try:
         return response_json(app.kb.get_case(case_id))
     except Exception as exc:  # noqa: BLE001
@@ -4648,6 +4713,7 @@ def h_kb_case_detail(app: App, req, case_id: str):
 
 def h_kb_case_update(app: App, req, case_id: str):
     user = _auth(app, req)
+    _kb_require_case_visible(app, user, case_id)
     data = req.json()
     try:
         result = app.kb.update_case(case_id, data, user)
@@ -4660,6 +4726,7 @@ def h_kb_case_update(app: App, req, case_id: str):
 
 def h_kb_case_status(app: App, req, case_id: str):
     user = _auth(app, req)
+    _kb_require_case_visible(app, user, case_id)
     data = req.json()
     status = str(data.get("status") or "")
     try:
@@ -4673,6 +4740,7 @@ def h_kb_case_status(app: App, req, case_id: str):
 
 def h_kb_case_revisions(app: App, req, case_id: str):
     user = _auth(app, req, csrf=False)
+    _kb_require_case_visible(app, user, case_id)
     try:
         return response_json(app.kb.list_case_revisions(
             case_id, user, page=_kb_int(req.query.get("page"), 1),
@@ -4683,6 +4751,7 @@ def h_kb_case_revisions(app: App, req, case_id: str):
 
 def h_kb_case_revision(app: App, req, case_id: str, revision: str):
     user = _auth(app, req, csrf=False)
+    _kb_require_case_visible(app, user, case_id)
     try:
         return response_json({"revision": app.kb.get_case_revision(case_id, revision, user)})
     except Exception as exc:  # noqa: BLE001
@@ -4915,9 +4984,13 @@ def h_kb_import(app: App, req):
     mode = str(fields.get("mode") or "review")
     if mode not in ("direct", "review"):
         mode = "review"
+    kb_id = _kb_int(fields.get("kb_id"), 0)
+    if kb_id > 0:
+        _kb_require_visible(app, user, kb_id)
+    else:
+        kb_id = _kb_default_visible(app, user)
     try:
-        job = app.kb.create_import_job(user, uploads, mode=mode,
-                                       kb_id=_kb_int(fields.get("kb_id"), 1))
+        job = app.kb.create_import_job(user, uploads, mode=mode, kb_id=kb_id)
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     app.db.audit(user["id"], user["username"], "kb.import", job.get("id") or "",
@@ -5056,7 +5129,11 @@ def h_kb_chat(app: App, req):
     try:
         raw_ids = data.get("kb_ids")
         kb_ids = [int(x) for x in raw_ids if int(x) > 0] if isinstance(raw_ids, list) else []
-        kb_id = _kb_int(data.get("kb_id"), 1)
+        kb_id = _kb_int(data.get("kb_id"), 0)
+        if kb_id > 0:
+            _kb_require_visible(app, user, kb_id)
+        else:
+            kb_id = _kb_default_visible(app, user)
         result = app.kb.answer(query, user, filters=filters,
                                limit=_kb_int(data.get("limit"), 0) or None,
                                kb_ids=kb_ids or [kb_id], kb_id=kb_id)

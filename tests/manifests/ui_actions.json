@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 135,
-    "action_instances": 311,
-    "buttons_all": 277,
-    "buttons_page": 260,
+    "distinct_actions": 140,
+    "action_instances": 316,
+    "buttons_all": 282,
+    "buttons_page": 265,
     "modal_calls": 33,
     "forms": 21
   },
@@ -448,6 +448,20 @@
       ]
     },
     {
+      "action": "library-default",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-rename",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "library-restore",
       "instances": 1,
       "files": [
@@ -456,6 +470,13 @@
     },
     {
       "action": "library-unarchive",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "library-visibility",
       "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
@@ -753,6 +774,20 @@
     },
     {
       "action": "review-bulk-approve",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "review-bulk-reject",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
+      "action": "review-bulk-retry",
       "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"

@@ -538,7 +538,18 @@
       "auth": "user",
       "mutating": false,
       "binary": false,
-      "params": [],
+      "params": [
+        {
+          "in": "query",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "kb_id",
+          "required": false
+        }
+      ],
       "expected_errors": [],
       "case_ids": [
         "rest-025-happy",
@@ -708,6 +719,16 @@
       "mutating": false,
       "binary": false,
       "params": [
+        {
+          "in": "query",
+          "name": "kb",
+          "required": false
+        },
+        {
+          "in": "query",
+          "name": "kb_id",
+          "required": false
+        },
         {
           "in": "query",
           "name": "limit",

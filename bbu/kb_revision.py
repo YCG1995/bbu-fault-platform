@@ -134,6 +134,36 @@ def write_revision(
             "entry_hash": entry_hash, "prev_hash": prev_hash}
 
 
+def write_revision_snapshot(
+    conn,
+    *, case_id: str, doc_id: str, revision: int, action: str,
+    actor_type: str, actor_id: int | None, actor_name: str,
+    source: str, reason: str, diff: list[dict[str, Any]] | None,
+    snapshot: dict[str, Any], request_id: str = "", review_id: str = "",
+    model: str = "", prompt_version: str = "", created_at: str | None = None,
+    prev_hash: str = "", new_id_fn=None,
+) -> dict[str, Any]:
+    """按原始快照重建一条修订；用于备份恢复，保留修订链语义但不复用源 ID。"""
+    created_at = created_at or iso_now()
+    snapshot_json = _canonical(snapshot)
+    snapshot_sha = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+    entry_hash = _entry_hash(prev_hash, snapshot_sha, action, actor_type,
+                             actor_id, actor_name, created_at)
+    row_id = (new_id_fn or (lambda: hashlib.sha256(
+        f"{case_id}:{revision}:{created_at}:restore".encode()).hexdigest()[:20]))()
+    conn.execute(
+        "INSERT INTO kb_case_revisions(id,case_id,doc_id,revision,action,actor_type,actor_id,"
+        "actor_name,source,reason,diff_json,snapshot_z,request_id,review_id,model,"
+        "prompt_version,prev_hash,entry_hash,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (row_id, case_id, doc_id, int(revision), action, actor_type, actor_id or 0,
+         actor_name[:120], source, reason[:500], _canonical(diff or []),
+         zlib.compress(snapshot_json.encode("utf-8")), request_id[:80], review_id[:80],
+         model[:120], prompt_version[:80], prev_hash, entry_hash, created_at))
+    return {"id": row_id, "revision": int(revision), "entry_hash": entry_hash,
+            "prev_hash": prev_hash}
+
+
 def decode_snapshot(value: Any) -> dict[str, Any]:
     if value in (None, b"", ""):
         return {}

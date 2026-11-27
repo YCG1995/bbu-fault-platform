@@ -161,6 +161,17 @@ def main() -> int:
                 errors.append("问答页缺少知识库选择")
             if page.locator("#kb-cross").count() != 1:
                 errors.append("问答页缺少跨库检索开关")
+            page.click("#kb-cross")
+            page.wait_for_selector("#kb-cross-scope", state="visible", timeout=5000)
+            if page.locator(".kb-cross-option").count() < 2:
+                errors.append("跨库范围没有列出多个库")
+            page.locator(f'.kb-cross-option[value="{expert_id}"]').check()
+            page.fill("#kb-query", "专家库专用")
+            page.click('.kb-filters [data-act="search"]')
+            page.wait_for_selector(".kb-case-card", timeout=20000)
+            cross_body = page.locator("#view").inner_text()
+            if "检索范围 2 个库" not in cross_body or "专家经验库" not in cross_body:
+                errors.append("跨库检索没有显示范围/来源库")
             page.fill("#kb-query", "看门狗复位")
             page.click('[data-act="ask"]')
             page.wait_for_selector(".kb-answer", timeout=20000)
@@ -204,6 +215,9 @@ def main() -> int:
             review_body = page.locator("#view").inner_text()
             if "审核队列" not in review_body or "专家库专用案例" not in review_body:
                 errors.append("审核标签没有显示专家库审核对象")
+            for token in ("批量驳回", "批量重试", "处理排队中的 AI 预审"):
+                if token not in review_body:
+                    errors.append(f"审核标签缺少：{token}")
             if page.locator(".kb-tabbar").count() < 2:
                 errors.append("审核区没有草稿/审核二级标签")
             for tab in page.locator(".kb-tabbar").nth(1).locator("a").all():
@@ -236,7 +250,8 @@ def main() -> int:
             page.goto(f"http://{host}:{port}/#/kb/docs?tab=libraries", wait_until="domcontentloaded")
             page.wait_for_selector("#kb-lib-name", timeout=15000)
             lib_body = page.locator("#view").inner_text()
-            for token in ("知识库列表", "专家经验库", "新建 / 恢复", "备份"):
+            for token in ("知识库列表", "专家经验库", "新建 / 恢复", "备份", "重命名",
+                          "设为默认", "合并到"):
                 if token not in lib_body:
                     errors.append(f"库管理缺少：{token}")
             page.screenshot(path=str(out / "kb-libraries.png"), full_page=True)
@@ -248,6 +263,12 @@ def main() -> int:
             if "专家库专用案例" not in audit_body:
                 errors.append("审计对象没有显示案例名称")
             page.screenshot(path=str(out / "kb-audit.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/tasks?tab=kb&kb={expert_id}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-op-kb", timeout=15000)
+            if page.locator("#kb-op-kb").input_value() != str(expert_id):
+                errors.append("操作记录没有按知识库过滤")
 
             page.goto(f"http://{host}:{port}/#/traces", wait_until="domcontentloaded")
             page.wait_for_timeout(800)
