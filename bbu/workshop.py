@@ -437,18 +437,28 @@ class WorkshopService:
     # ---------- 日志与 AI 起草 ----------
     def attach_logs(self, draft_id: str, files: list[dict[str, Any]], *,
                     progress: Any = None, model_override: int | None = None,
-                    trace: Any = None) -> dict[str, Any]:
+                    trace: Any = None, auto_cases: bool = False) -> dict[str, Any]:
         row = self.get(draft_id)
         draft_dir = self.config.data_dir / "workshop" / draft_id
         log_dir = draft_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        moved: list[dict[str, Any]] = []
         for item in files:
             src = Path(item["stored_path"])
-            shutil.move(str(src), unique_path(log_dir, src.name))
+            relative = str(item.get("relative_path") or item.get("name") or src.name)
+            dest = unique_path(log_dir, src.name)
+            shutil.move(str(src), dest)
+            moved.append({"stored_path": str(dest), "name": relative,
+                          "relative_path": relative})
         self.db.execute("UPDATE workshop_drafts SET log_path=?, updated_at=? WHERE id=?",
                         (str(log_dir), iso_now(), draft_id))
-        return self.analyze(draft_id, progress=progress, model_override=model_override,
-                            trace=trace)
+        result = self.analyze(draft_id, progress=progress, model_override=model_override,
+                              trace=trace)
+        if auto_cases:
+            auto = self.auto_match_cases(draft_id, moved)
+            result = self.get(draft_id)
+            result["auto_cases"] = auto
+        return result
 
     def analyze(self, draft_id: str, *, progress: Any = None,
                 model_override: int | None = None, trace: Any = None) -> dict[str, Any]:
@@ -1303,6 +1313,241 @@ class WorkshopService:
         return {"ok": True, "skill": skill_name, "version": version}
 
     # ---------- 案例 ----------
+    @staticmethod
+    def _auto_case_norm(value: Any) -> str:
+        """统一案例包名/文件名，便于跨 Windows 路径、括号和扩展名匹配。"""
+        text = str(value or "").replace("\\", "/").lower()
+        text = re.sub(r"\.(?:tar\.gz|tgz|zip|7z|rar|tar|gz|bz2|xz|zst|log|txt|bak|exe)\b", " ", text)
+        text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _auto_case_tokens(cls, value: Any) -> set[str]:
+        return {token for token in cls._auto_case_norm(value).split()
+                if len(token) >= 2}
+
+    @classmethod
+    def _auto_case_score(cls, case: dict[str, Any], file: dict[str, Any]) -> int:
+        """给案例和上传文件打分；包名精确/包含优先，其次案例编号和描述词。"""
+        norm = cls._auto_case_norm(file.get("name") or file.get("basename") or "")
+        tokens = set(norm.split())
+        score = 0
+        packages = [str(x).strip() for x in (case.get("packages") or []) if str(x).strip()]
+        for package in packages:
+            package_norm = cls._auto_case_norm(package)
+            if not package_norm:
+                continue
+            package_tokens = cls._auto_case_tokens(package)
+            if package_norm == norm:
+                score = max(score, 140)
+            elif package_norm in norm or norm in package_norm:
+                score = max(score, 100)
+            elif package_tokens:
+                overlap = len(package_tokens & tokens)
+                if overlap:
+                    score = max(score, min(90, 15 + overlap * 9))
+        case_id = cls._auto_case_norm(case.get("id"))
+        if case_id and (case_id in tokens or case_id in norm):
+            score += 30
+        description_tokens = cls._auto_case_tokens(
+            " ".join([str(case.get("description") or ""), str(case.get("expected_text") or "")]))
+        overlap = len(description_tokens & tokens)
+        if overlap:
+            score += min(24, overlap * 4)
+        return score
+
+    def _auto_case_plan(self, spec: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, Any]:
+        """把资料中的案例元数据和上传文件做确定性匹配。一个案例可绑定多个文件。"""
+        cases = [case for case in (spec.get("cases") or []) if isinstance(case, dict)]
+        roots = [root for root in (spec.get("root_causes") or []) if isinstance(root, dict)]
+        root_ids = {str(root.get("id") or "") for root in roots}
+        first_root = str(roots[0].get("id") or "") if roots else ""
+        warnings: list[str] = []
+        groups: list[dict[str, Any]] = []
+        if not cases:
+            # 没有文字案例时，按上传目录分组；同一目录下的多个文件视为同一案例。
+            by_folder: dict[str, list[dict[str, Any]]] = {}
+            for file in files:
+                parts = [part for part in str(file.get("name") or "").replace("\\", "/").split("/")
+                         if part and part not in (".", "..")]
+                key = parts[0] if len(parts) > 1 else ""
+                by_folder.setdefault(key, []).append(file)
+            for idx, (folder, group_files) in enumerate(by_folder.items(), 1):
+                if not first_root:
+                    warnings.append(f"{folder or '上传文件'}：当前技能没有可用的根因，无法自动建立正例")
+                    continue
+                groups.append({
+                    "case": {
+                        "id": f"case-{idx:02d}", "kind": "positive",
+                        "description": folder or "上传日志自动归组",
+                        "expected_root_cause": first_root,
+                    },
+                    "files": group_files,
+                    "reason": "按上传目录自动归组" if folder else "单组上传文件自动归组",
+                })
+            return {"groups": groups, "unmatched_cases": [], "unassigned": [],
+                    "warnings": warnings, "source_cases": 0}
+
+        candidates: list[tuple[int, int, int]] = []
+        for case_idx, case in enumerate(cases):
+            for file_idx, file in enumerate(files):
+                score = self._auto_case_score(case, file)
+                if score:
+                    candidates.append((score, case_idx, file_idx))
+        assigned: dict[int, int] = {}
+        for score, case_idx, file_idx in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if file_idx in assigned:
+                continue
+            case = cases[case_idx]
+            # 有明确包名时只接受强匹配；没有包名时允许按案例编号/描述匹配。
+            threshold = 60 if case.get("packages") else (20 if len(cases) > 1 else 1)
+            if score < threshold:
+                continue
+            assigned[file_idx] = case_idx
+        if len(cases) == 1:
+            # 只有一个文字案例时，剩余文件都归入该案例，满足“一故障多文件”。
+            for file_idx in range(len(files)):
+                assigned.setdefault(file_idx, 0)
+        for case_idx, case in enumerate(cases):
+            group_files = [files[file_idx] for file_idx, owner in assigned.items()
+                           if owner == case_idx]
+            groups.append({"case": case, "files": group_files,
+                           "reason": "按案例包名/编号/描述匹配"})
+        unmatched_cases = [case for case_idx, case in enumerate(cases)
+                           if not any(owner == case_idx for owner in assigned.values())]
+        unassigned = [files[file_idx] for file_idx in range(len(files)) if file_idx not in assigned]
+        # 多案例但没有包名时，无法可靠分配的文件不强行塞进某个案例。
+        if unmatched_cases and not any(case.get("packages") for case in cases):
+            warnings.append("有案例没有匹配到文件；请检查资料中的案例编号、日志包名或手动上传案例")
+        if unassigned:
+            warnings.append(f"{len(unassigned)} 个上传文件未匹配到任何案例，保留在日志目录")
+        return {"groups": groups, "unmatched_cases": unmatched_cases,
+                "unassigned": unassigned, "warnings": warnings,
+                "source_cases": len(cases)}
+
+    def _auto_case_id(self, draft_id: str, source_id: Any, used: set[str]) -> str:
+        raw = str(source_id or "").strip().lower()
+        candidate = ""
+        match = re.fullmatch(r"c(\d+)", raw)
+        if match:
+            candidate = f"case-{int(match.group(1)):02d}"
+        elif re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", raw):
+            candidate = raw
+        while (not candidate or candidate in used
+               or self.db.one("SELECT id FROM cases WHERE skill_name=? AND case_id=?",
+                              (self.get(draft_id)["name"], candidate))):
+            candidate = self.next_case_id(draft_id)
+        used.add(candidate)
+        return candidate
+
+    def auto_match_cases(self, draft_id: str, files: list[dict[str, Any]]) -> dict[str, Any]:
+        """在日志分析完成后，按资料案例自动建立案例目录并归档匹配文件。
+
+        只做确定性匹配：不读取附件内容当作指令，不猜测文本未声明的根因。
+        文件匹配失败时保留日志目录并返回警告，不阻断工坊主流程。
+        """
+        row = self.get(draft_id)
+        analysis = row.get("analysis") or {}
+        spec = analysis.get("intake") or {}
+        file_items: list[dict[str, Any]] = []
+        for item in files:
+            path = Path(str(item.get("stored_path") or ""))
+            if not path.is_file():
+                continue
+            relative = str(item.get("relative_path") or item.get("name") or path.name)
+            file_items.append({"path": path, "name": relative,
+                               "basename": safe_filename(relative)})
+        if not file_items:
+            return {"enabled": True, "source_cases": 0, "matched": [], "unmatched_cases": [],
+                    "unassigned_files": [], "warnings": ["没有可归档的上传文件"],
+                    "created": []}
+
+        plan = self._auto_case_plan(spec, file_items)
+        roots = [root for root in (spec.get("root_causes") or []) if isinstance(root, dict)]
+        root_ids = {str(root.get("id") or "") for root in roots}
+        first_root_id = str(roots[0].get("id") or "") if roots else ""
+        root_names = {self._auto_case_norm(root.get("name")): str(root.get("id") or "")
+                      for root in roots if root.get("name") and root.get("id")}
+        draft_dir = self.config.data_dir / "workshop" / draft_id
+        staging_root = draft_dir / "auto_case_stage"
+        if staging_root.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
+        staging_root.mkdir(parents=True, exist_ok=True)
+        used_ids: set[str] = set()
+        created: list[dict[str, Any]] = []
+        warnings = list(plan.get("warnings") or [])
+        for group in plan.get("groups") or []:
+            case = group.get("case") or {}
+            group_files = [item for item in group.get("files") or [] if item.get("path")]
+            if not group_files:
+                continue
+            source_id = case.get("id")
+            case_id = self._auto_case_id(draft_id, source_id, used_ids)
+            kind = "negative" if case.get("kind") == "negative" else "positive"
+            root = "NONE" if kind == "negative" else str(case.get("expected_root_cause") or "").strip()
+            if kind == "positive" and root and root not in root_ids:
+                # 模型可能返回根因名称而不是 R 编号；按名称再映射一次。
+                mapped = root_names.get(self._auto_case_norm(root), "")
+                if not mapped:
+                    warnings.append(
+                        f"{source_id or case_id}：期望根因 {root} 不在当前技能根因列表中，已跳过自动建例")
+                    continue
+                root = mapped
+            if kind == "positive" and not root:
+                root = first_root_id
+            if kind == "positive" and root not in root_ids:
+                warnings.append(f"{source_id or case_id}：缺少有效根因，已跳过自动建例")
+                continue
+            stage = staging_root / case_id
+            stage.mkdir(parents=True, exist_ok=True)
+            payload: list[dict[str, Any]] = []
+            try:
+                for file in group_files:
+                    dest = unique_path(stage, safe_filename(file.get("basename") or file.get("name")))
+                    shutil.copy2(file["path"], dest)
+                    payload.append({"stored_path": str(dest), "name": file.get("name") or dest.name})
+                description = str(case.get("description") or case.get("expected_text") or "").strip()
+                if source_id:
+                    description = (description + f"（自动匹配 {source_id}）").strip()
+                hit_rules = [str(x).strip() for x in (case.get("evidence") or [])
+                             if re.fullmatch(r"E\d+", str(x).strip())]
+                result = self.attach_case(draft_id, payload, {
+                    "case_id": case_id, "kind": kind, "root_cause": root,
+                    "hit_rules": hit_rules, "description": description or "自动匹配案例",
+                })
+                created.append({"case_id": case_id, "kind": kind, "root_cause": root,
+                                "source_id": str(source_id or ""),
+                                "files": [file.get("name") for file in group_files],
+                                "path": result.get("path")})
+                if result.get("warning"):
+                    warnings.append(str(result["warning"]))
+            except (OSError, ValueError, RuntimeError) as exc:
+                warnings.append(f"{source_id or case_id}：自动建例失败：{exc}")
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        try:
+            staging_root.rmdir()
+        except OSError:
+            pass
+        auto = {
+            "enabled": True,
+            "source_cases": int(plan.get("source_cases") or 0),
+            "matched": created,
+            "unmatched_cases": [
+                {"id": str(case.get("id") or ""),
+                 "description": str(case.get("description") or ""),
+                 "packages": [str(x) for x in (case.get("packages") or [])]}
+                for case in plan.get("unmatched_cases") or []],
+            "unassigned_files": [item.get("name") for item in plan.get("unassigned") or []],
+            "warnings": warnings,
+        }
+        fresh = self.get(draft_id)
+        analysis = fresh.get("analysis") or {}
+        analysis["auto_cases"] = auto
+        self.db.execute("UPDATE workshop_drafts SET analysis_json=?, updated_at=? WHERE id=?",
+                        (json.dumps(analysis, ensure_ascii=False, default=str), iso_now(), draft_id))
+        return auto
+
     def attach_case(self, draft_id: str, files: list[dict[str, Any]],
                     expected: dict[str, Any]) -> dict[str, Any]:
         row = self.get(draft_id)

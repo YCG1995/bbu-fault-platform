@@ -2,10 +2,10 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 99,
-    "action_instances": 257,
-    "buttons_all": 226,
-    "buttons_page": 211,
+    "distinct_actions": 101,
+    "action_instances": 261,
+    "buttons_all": 228,
+    "buttons_page": 213,
     "modal_calls": 29,
     "forms": 18
   },
@@ -116,6 +116,13 @@
     },
     {
       "action": "check",
+      "instances": 2,
+      "files": [
+        "web/assets/js/page_workshop.js"
+      ]
+    },
+    {
+      "action": "clear-files",
       "instances": 2,
       "files": [
         "web/assets/js/page_workshop.js"
@@ -395,6 +402,13 @@
       "instances": 3,
       "files": [
         "web/assets/js/app.js"
+      ]
+    },
+    {
+      "action": "pick-folder",
+      "instances": 2,
+      "files": [
+        "web/assets/js/page_workshop.js"
       ]
     },
     {

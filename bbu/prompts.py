@@ -129,9 +129,10 @@ WORKSHOP_EXTRACT_SYSTEM = """你是 BBU 故障技能需求分析专家。你的�
 5. 根因 condition 只能引用已经定义的 E 编号，使用 and/or/not/括号。多根因要有区分条件，不能全部写成同一个无条件关键词命中。
 6. 处理动作、风险、恢复验证只取自原文。根因不确定时 confidence=low，不要为了完整而编造。
 7. 案例只提取文本元数据；附件名不是日志内容，不能假装已读取附件。
-8. 信息缺失或语义冲突时写入 questions，一次最多 4 个最关键问题；能从原文判断的不要追问。
-9. title 必须是简洁、可识别的中文故障名称，不能是“未命名故障”“故障分析”；skill_name 必须是 `bbu-fault-` 开头的英文小写短标识，只含字母、数字和连字符，优先使用设备、部件和故障类型，如 `bbu-fault-clock-pll-unlock`。
-10. 只输出严格 JSON，不要 Markdown，不要解释。"""
+8. 原文案例中的案例编号、日志包/附件名、故障现象、期望结论必须保留到 cases；日志包名原样写入 packages（多个用数组），供系统自动匹配上传文件，不要改写附件名或根据附件内容猜测。
+9. 信息缺失或语义冲突时写入 questions，一次最多 4 个最关键问题；能从原文判断的不要追问。
+10. title 必须是简洁、可识别的中文故障名称，不能是“未命名故障”“故障分析”；skill_name 必须是 `bbu-fault-` 开头的英文小写短标识，只含字母、数字和连字符，优先使用设备、部件和故障类型，如 `bbu-fault-clock-pll-unlock`。
+11. 只输出严格 JSON，不要 Markdown，不要解释。"""
 
 
 def workshop_extract_user(source_text: str, deterministic: dict[str, Any],

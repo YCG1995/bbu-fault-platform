@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
-from .util import iso_now, new_id
+from .util import iso_now, new_id, safe_filename, unique_path
 
 
 class WorkshopJobService:
@@ -90,9 +90,12 @@ class WorkshopJobService:
             if not src.is_file():
                 raise ValueError("上传文件已失效，请重新上传")
             name = str(item.get("name") or src.name)
-            dest = root / Path(name).name
+            # 文件夹上传可能出现不同子目录下的同名文件；这里必须做唯一化，
+            # 否则后一个文件会覆盖前一个，后续 attach_logs 也会因路径重复而失败。
+            dest = unique_path(root, safe_filename(name))
             shutil.copy2(src, dest)
             staged.append({"stored_path": str(dest), "name": name,
+                           "relative_path": str(item.get("relative_path") or name),
                            "size": dest.stat().st_size})
         return staged
 
@@ -123,7 +126,8 @@ class WorkshopJobService:
                 elif kind == "logs":
                     result = self.workshop.attach_logs(
                         draft_id, args.get("files") or [], progress=self._callback(job_id, trace),
-                        model_override=model_override, trace=trace)
+                        model_override=model_override, trace=trace,
+                        auto_cases=bool(args.get("auto_cases")))
                 elif kind == "refine":
                     result = self.workshop.refine(
                         draft_id, str(args.get("text") or ""), progress=self._callback(job_id, trace),

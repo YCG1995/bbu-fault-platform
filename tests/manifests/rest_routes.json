@@ -2548,6 +2548,11 @@
       "binary": false,
       "params": [
         {
+          "in": "query",
+          "name": "defer",
+          "required": false
+        },
+        {
           "in": "body",
           "name": "model_id",
           "required": false
@@ -2659,6 +2664,11 @@
           "in": "path",
           "type": "string",
           "required": true
+        },
+        {
+          "in": "query",
+          "name": "auto_cases",
+          "required": false
         }
       ],
       "expected_errors": [

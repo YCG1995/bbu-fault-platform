@@ -64,7 +64,7 @@ export async function renderWorkshop() {
         <li><span>05</span><div><strong>发布技能</strong><p>通过质量门禁后进入技能库</p></div></li>
       </ol>
     </div>`;
-    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes) };
+    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes, { uploadForm }) };
     bindActions(view, handlers); bindTopbar(handlers);
     return view;
   }
@@ -92,7 +92,7 @@ export async function renderWorkshop() {
     });
   });
   if (!selectedId) {
-    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes) };
+    const handlers = { 'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes, { uploadForm }) };
     bindActions(view, handlers); bindTopbar(handlers); return view;
   }
 
@@ -206,7 +206,7 @@ export async function renderWorkshop() {
   }
 
   const handlers = {
-    'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes),
+    'new-draft': () => openCreateModal(() => renderWorkshop(), models, recipes, { uploadForm }),
     'view-job-trace': async (btn) => {
       try {
         const jobId = btn.dataset.job;
@@ -515,6 +515,16 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
   const samples = analysis.samples || [];
   const counts = quality.counts || {};
   const cases = Array.isArray(caseData) ? caseData : (caseData?.items || []);
+  const autoCases = analysis.auto_cases || null;
+  const autoMatched = Array.isArray(autoCases?.matched) ? autoCases.matched : [];
+  const autoUnmatched = Array.isArray(autoCases?.unmatched_cases) ? autoCases.unmatched_cases : [];
+  const autoUnassigned = Array.isArray(autoCases?.unassigned_files) ? autoCases.unassigned_files : [];
+  const autoWarnings = Array.isArray(autoCases?.warnings) ? autoCases.warnings : [];
+  const autoSummary = autoCases?.enabled ? `<div class="alert ${autoMatched.length ? 'ok' : 'warn'}" style="margin-top:10px">
+    ${icon(autoMatched.length ? 'check' : 'alert')}<div><strong>自动案例匹配：已建立 ${autoMatched.length} 个案例</strong>
+    ${autoUnmatched.length ? ` · ${autoUnmatched.length} 个资料案例未匹配到文件` : ''}
+    ${autoUnassigned.length ? ` · ${autoUnassigned.length} 个文件未归入案例` : ''}
+    <span class="tiny muted"> · 可在“案例验证”步骤查看文件对应关系</span></div></div>` : '';
   const isAdmin = state.user?.role === 'admin';
   const published = draft.status === 'published';
   const canPublish = build.ok && build.verified && quality.ok !== false && isAdmin && !published;
@@ -607,6 +617,7 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
       ${modelNoticeHtml(draft.model_status?.notice, { compact: true })}
       <div class="alert ${quality.ok === false ? 'warn' : 'info'}">${icon('info')}<div><strong>当前下一步：</strong>${esc(nextStep)}
         <span class="tiny muted"> · ${esc(aiStatusText())}${analysis.model ? ` · ${esc(analysis.model)}` : ''}</span></div></div>
+      ${autoSummary}
     </div>
   </div>`;
 
@@ -618,7 +629,7 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
     <div class="inline" style="margin-top:12px;flex-wrap:wrap">
       <button class="btn btn-primary" data-act="save-source" ${published ? 'disabled' : ''}>${icon('play')}保存资料并重新分析</button>
       <button class="btn" data-act="upload-logs" ${published ? 'disabled' : ''}>${icon('upload')}上传日志并分析</button>
-      <input type="file" id="log-input" accept=".zip,.tar,.tar.gz,.tgz,.7z,.gz,.bz2,.xz,.zst,.log,.txt" multiple hidden>
+      <input type="file" id="log-input" accept=".zip,.tar,.tar.gz,.tgz,.7z,.rar,.gz,.bz2,.xz,.zst,.log,.txt" multiple hidden>
     </div>
     ${extract.files ? `<div class="alert info" style="margin-top:12px">${icon('folder')}<div>最近一次分析已解压 ${extract.files} 个文件 · ${(extract.bytes || 0) / 1024 / 1024} MB；中间解压文件可在“系统信息 → 任务空间”单独释放。</div></div>` : ''}
     ${(analysis.notes || []).length ? `<div class="alert warn" style="margin-top:10px">${icon('alert')}<div>${analysis.notes.map((n) => esc(n)).join('<br>')}</div></div>` : ''}
@@ -717,6 +728,14 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
       <div class="inline" style="margin-top:14px">${prevButton(2)}${nextButton(4, '进入案例回归')}</div>`);
 
   const step4 = panel(4, `<div class="alert info">${icon('info')}<div>至少上传 1 个故障案例和 1 个正常案例；故障案例根因必填，正常案例根因固定为 NONE。可一次多选文件，或直接上传文件夹。</div></div>
+    ${autoCases?.enabled ? `<div class="alert ${autoMatched.length ? 'ok' : 'warn'}" style="margin-top:10px">${icon(autoMatched.length ? 'check' : 'alert')}<div>
+      <strong>自动案例匹配：已建立 ${autoMatched.length} 个案例</strong>
+      ${autoUnmatched.length ? ` · ${autoUnmatched.length} 个资料案例未匹配到文件` : ''}
+      ${autoUnassigned.length ? ` · ${autoUnassigned.length} 个文件未归入案例` : ''}
+      <div class="tiny muted" style="margin-top:4px">${autoMatched.slice(0, 6).map((item) =>
+        `${esc(item.case_id)} ← ${esc((item.files || []).join('、'))}`).join('<br>') || '资料中没有可自动落库的案例。'}</div>
+      ${autoWarnings.length ? `<div class="tiny" style="margin-top:4px;color:#92400e">${esc(autoWarnings.slice(0, 4).join('；'))}</div>` : ''}
+    </div></div>` : ''}
     <div class="grid grid-2" style="gap:18px;align-items:start">
       <div><h3 style="font-size:14px;margin:0 0 8px">已写入案例（${cases.length}）</h3>
         ${cases.length ? `<div class="stack" style="max-height:360px;overflow:auto">${cases.map((c) => `
@@ -739,7 +758,7 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
             <input class="input" name="hit_rules" list="workshop-rules" placeholder="E1,E2">
             <datalist id="workshop-rules">${ruleItems.map((r) => `<option value="${esc(r.id)}">${esc(r.description || '')}</option>`).join('')}</datalist></div>
           <div class="form-row"><label class="label">案例日志包 <span class="hint">可多选；多个文件会作为同一案例的输入</span></label>
-            <input class="input" type="file" id="case-file" accept=".zip,.tar,.tar.gz,.tgz,.7z,.gz,.bz2,.xz,.zst,.log,.txt" multiple required>
+            <input class="input" type="file" id="case-file" accept=".zip,.tar,.tar.gz,.tgz,.7z,.rar,.gz,.bz2,.xz,.zst,.log,.txt" multiple required>
             <div style="margin-top:6px"><button class="btn btn-sm" type="button" data-act="case-folder">${icon('folder')}上传文件夹</button>
             <input type="file" id="case-dir" webkitdirectory directory multiple hidden></div></div>
           <div class="form-row"><label class="label">说明</label><input class="input" name="description" placeholder="现场现象、期望结论"></div>
@@ -776,38 +795,129 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
 }
 
 
-function openCreateModal(onDone, models = [], recipes = []) {
+function openCreateModal(onDone, models = [], recipes = [], helpers = {}) {
   const m = modal({
     title: '粘贴资料生成技能', wide: true,
     body: `<form id="create-form">
-      <div class="alert info">${icon('info')}<div>直接粘贴整段故障资料。系统会自主识别故障名称、日志路径、关键字、阈值、根因、处理动作和案例；缺信息时再集中确认。</div></div>
+      <div class="alert info">${icon('info')}<div>直接粘贴整段故障资料，或同时选择日志/案例文件与文件夹。系统会自主识别故障名称、日志路径、关键字、阈值、根因、处理动作和案例，并把资料中的案例自动匹配到上传文件；一个案例可以包含多个文件。</div></div>
       <div class="form-row"><label class="label">故障资料</label>
-        <textarea class="textarea" name="source_text" rows="16" required placeholder="例如：&#10;故障名称：VSW 看门狗复位&#10;现场现象：……&#10;日志路径：……&#10;关键日志：……&#10;判断思路：……&#10;根因与处理：……&#10;案例：……"></textarea></div>
+        <textarea class="textarea" name="source_text" rows="13" placeholder="例如：&#10;故障名称：VSW 看门狗复位&#10;现场现象：……&#10;日志路径：……&#10;关键日志：……&#10;判断思路：……&#10;根因与处理：……&#10;案例：……"></textarea>
+        <div class="hint">可只选文件；只选文件时系统会从文件名/目录和日志摘要自动归组案例。</div></div>
+      <div class="form-row"><label class="label">日志 / 案例文件 <span class="hint">支持多选、文件夹和压缩包</span></label>
+        <input class="input" type="file" id="create-files" multiple
+          accept=".zip,.tar,.tar.gz,.tgz,.7z,.rar,.gz,.bz2,.xz,.zst,.log,.txt,.bak">
+        <div class="inline" style="margin-top:6px;flex-wrap:wrap">
+          <button class="btn btn-sm" type="button" data-act="pick-folder">${icon('folder')}选择文件夹</button>
+          <button class="btn btn-sm" type="button" data-act="clear-files">清空已选文件</button>
+          <span class="tiny muted">文件夹会保留相对路径，用于按目录自动归组案例</span>
+        </div>
+        <input type="file" id="create-folder" webkitdirectory directory multiple hidden>
+        <div id="create-file-list" class="tiny muted" style="margin-top:6px">尚未选择文件</div></div>
       <div class="form-row"><label class="label">本步骤模型（可选）</label>
         <select class="select" name="model_id"><option value="">自动选择默认模型</option>
           ${models.map((m) => `<option value="${m.id}">${esc(m.name || m.model || ('模型 ' + m.id))}</option>`).join('')}
-        </select></div>
+        </select>
+        <div class="hint">技能工坊自动选择按管理员模型优先级排序；个人模型仅在全局模型不可用时兜底。</div></div>
       <div class="alert info">${icon('cpu')}<div>技能名和中文标题由 AI 根据资料自动生成，无需手工填写；提交后转入后台解析，页面实时显示进度。</div></div>
     </form>`,
     footer: `<button class="btn" data-act="cancel">取消</button><button class="btn btn-primary" data-act="create">${icon('play')}识别并生成</button>`,
   });
+  const form = m.body.querySelector('#create-form');
+  const filesInput = m.body.querySelector('#create-files');
+  const folderInput = m.body.querySelector('#create-folder');
+  const listEl = m.body.querySelector('#create-file-list');
+  const picked = new Map();
+
+  const renderPicked = () => {
+    const items = [...picked.values()];
+    if (!items.length) { listEl.textContent = '尚未选择文件'; return; }
+    const total = items.reduce((sum, item) => sum + Number(item.file.size || 0), 0);
+    listEl.innerHTML = `<strong>已选 ${items.length} 个文件 · ${(total / 1024 / 1024).toFixed(1)} MB</strong>
+      <div style="max-height:110px;overflow:auto;margin-top:4px">${items.slice(0, 20).map((item) =>
+        `<div class="mono" style="word-break:break-all">${esc(item.relative)}</div>`).join('')}
+        ${items.length > 20 ? `<div>… 另有 ${items.length - 20} 个文件</div>` : ''}</div>`;
+  };
+  const addFiles = (files) => {
+    for (const file of files) {
+      const relative = file.webkitRelativePath || file.name || 'file';
+      const key = `${relative}|${file.size}|${file.lastModified}`;
+      picked.set(key, { file, relative });
+    }
+    renderPicked();
+  };
+  filesInput.addEventListener('change', () => {
+    addFiles([...filesInput.files]);
+    filesInput.value = '';
+  });
+  folderInput.addEventListener('change', () => {
+    addFiles([...folderInput.files]);
+    folderInput.value = '';
+  });
+
   m.mask.addEventListener('click', async (e) => {
-    if (e.target.closest('[data-act="cancel"]')) m.close();
+    if (e.target.closest('[data-act="cancel"]')) { m.close(); return; }
+    if (e.target.closest('[data-act="pick-folder"]')) { folderInput.click(); return; }
+    if (e.target.closest('[data-act="clear-files"]')) { picked.clear(); renderPicked(); return; }
     if (!e.target.closest('[data-act="create"]')) return;
-    const form = m.body.querySelector('#create-form');
     const sourceText = form.elements.source_text.value.trim();
-    if (sourceText.length < 20) { toast('请粘贴完整故障资料', 'warn'); return; }
-    const btn = e.target.closest('[data-act="create"]'); btn.disabled = true; setBusy(btn, true, '提交中…');
+    const selected = [...picked.values()];
+    if (sourceText.length < 20 && !selected.length) {
+      toast('请粘贴至少 20 字的故障资料，或选择日志/案例文件', 'warn');
+      return;
+    }
+    const btn = e.target.closest('[data-act="create"]');
+    btn.disabled = true;
+    let createdDraftId = '';
     try {
-      const res = await api('/api/workshop/drafts?async=1', { method: 'POST', body: {
-        source_text: sourceText, model_id: form.elements.model_id.value || null,
-        recipe_id: 'none',
-      } });
-      selectedId = res.draft.id;
-      workshopStepDraftId = res.draft.id;
+      const modelId = form.elements.model_id.value || null;
+      if (!selected.length) {
+        setBusy(btn, true, '提交中…');
+        const res = await api('/api/workshop/drafts?async=1', { method: 'POST', body: {
+          source_text: sourceText, model_id: modelId, recipe_id: 'none',
+        } });
+        if (!res.job) throw new Error('后端未返回工坊任务 ID');
+        selectedId = res.draft.id;
+        workshopStepDraftId = res.draft.id;
+        workshopStep = 2;
+        toast('已提交后台解析，正在自动识别并命名', 'ok');
+        m.close(); onDone && onDone();
+        return;
+      }
+      setBusy(btn, true, '创建草稿…');
+      const payload = sourceText.length >= 20 ? {
+        source_text: sourceText, model_id: modelId, recipe_id: 'none',
+      } : {
+        name: `bbu-fault-upload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        title: '待自动识别故障', fault_name: '待自动识别故障', description: '',
+        model_id: modelId,
+      };
+      const res = await api('/api/workshop/drafts?defer=1', { method: 'POST', body: payload });
+      createdDraftId = res.draft.id;
+      const fd = new FormData();
+      selected.forEach((item) => fd.append('files', item.file, item.file.name));
+      fd.append('file_paths', JSON.stringify(selected.map((item) => item.relative)));
+      if (modelId) fd.append('model_id', modelId);
+      fd.append('auto_cases', '1');
+      if (!helpers.uploadForm) throw new Error('上传组件未就绪，请刷新页面重试');
+      setBusy(btn, true, '上传文件…');
+      const job = await helpers.uploadForm(
+        `/api/workshop/drafts/${encodeURIComponent(createdDraftId)}/logs?auto_cases=1`,
+        fd, btn, '上传文件并自动匹配案例…',
+        (pct) => setBusy(btn, true, `上传 ${pct}%…`));
+      if (!job) throw new Error('后端未返回工坊任务 ID');
+      selectedId = createdDraftId;
+      workshopStepDraftId = createdDraftId;
       workshopStep = 2;
-      toast('已提交后台解析，正在自动识别并命名', 'ok');
+      toast('已上传文件，正在解析资料并自动匹配案例', 'ok');
       m.close(); onDone && onDone();
-    } catch (err) { toast(err.message, 'error'); setBusy(btn, false); }
+    } catch (err) {
+      toast(err.message, 'error');
+      setBusy(btn, false);
+      btn.disabled = false;
+      if (createdDraftId) {
+        try { await api(`/api/workshop/drafts/${encodeURIComponent(createdDraftId)}`, { method: 'DELETE' }); }
+        catch { /* 保留草稿，避免误删用户资料 */ }
+      }
+    }
   });
 }

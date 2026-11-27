@@ -2771,15 +2771,18 @@ def h_workshop_create(app: App, req):
         raise HTTPError(403, "当前配置只允许管理员创建技能草稿")
     data = req.json()
     async_mode = _async_requested(req)
+    defer_only = str(req.query.get("defer") or "").lower() in ("1", "true", "yes", "on")
     model_override = data.get("model_override") or data.get("model_id")
     try:
+        # 带文件的创建必须先建草稿、再上传文件，避免后台 analyze 在文件到达前
+        # 先按空日志跑完，导致自动案例匹配看不到上传包。
         draft = app.workshop.create_draft(
-            user["id"], data, deferred=async_mode,
+            user["id"], data, deferred=async_mode or defer_only,
             model_override=int(model_override) if model_override else None)
     except ValueError as exc:
         raise HTTPError(400, str(exc)) from exc
     job = None
-    if async_mode:
+    if async_mode and not defer_only:
         try:
             job = app.workshop_jobs.create(
                 user["id"], draft["id"], "analyze",
@@ -2788,8 +2791,9 @@ def h_workshop_create(app: App, req):
             raise _job_error(exc) from exc
     app.db.audit(user["id"], user["username"], "workshop.create", draft["id"],
                  {"name": draft["name"], "recipe_id": draft.get("recipe_id") or "",
-                  "async": async_mode}, req.ip)
-    return response_json({"draft": draft, "job": job}, status=202 if async_mode else 201)
+                  "async": async_mode, "defer": defer_only}, req.ip)
+    return response_json({"draft": draft, "job": job},
+                         status=202 if async_mode and not defer_only else 201)
 
 
 def h_workshop_detail(app: App, req, draft_id: str):
@@ -2837,22 +2841,36 @@ def h_workshop_logs(app: App, req, draft_id: str):
             model_override = int(fields["model_id"])
         except ValueError:
             model_override = None
-    payload = [{"stored_path": str(f.path), "name": f.filename} for f in files]
+    payload = []
+    try:
+        relative_paths = json.loads(fields.get("file_paths") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        relative_paths = []
+    for idx, f in enumerate(files):
+        relative = (str(relative_paths[idx]).strip()
+                    if idx < len(relative_paths) and str(relative_paths[idx]).strip()
+                    else f.filename)
+        payload.append({"stored_path": str(f.path), "name": relative,
+                        "relative_path": relative})
+    auto_cases = str(req.query.get("auto_cases") or fields.get("auto_cases") or "").lower() in (
+        "1", "true", "yes", "on")
     if _async_requested(req):
         try:
             job = app.workshop_jobs.create(
-                user["id"], draft_id, "logs", model_override=model_override, uploads=payload)
+                user["id"], draft_id, "logs", model_override=model_override,
+                uploads=payload, args={"auto_cases": auto_cases})
         except ValueError as exc:
             raise _job_error(exc) from exc
         app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
-                     {"files": len(files), "async": True}, req.ip)
+                     {"files": len(files), "async": True, "auto_cases": auto_cases}, req.ip)
         return response_json({"job": job}, status=202)
     trace = app.traces.start(
         kind="workshop", ref_id=draft_id, user_id=int(user["id"]),
-        meta={"trigger": "sync", "api": "logs", "files": len(files)})
+        meta={"trigger": "sync", "api": "logs", "files": len(files),
+              "auto_cases": auto_cases})
     try:
         draft = app.workshop.attach_logs(draft_id, payload, model_override=model_override,
-                                         trace=trace)
+                                         trace=trace, auto_cases=auto_cases)
         trace.finish("success")
     except ValueError as exc:
         trace.error(phase="workshop", code="workshop_logs_failed",
@@ -2865,7 +2883,7 @@ def h_workshop_logs(app: App, req, draft_id: str):
         trace.finish("failed", error_code="workshop_logs_failed", error_summary=str(exc))
         raise
     app.db.audit(user["id"], user["username"], "workshop.logs", draft_id,
-                 {"files": len(files)}, req.ip)
+                 {"files": len(files), "auto_cases": auto_cases}, req.ip)
     return response_json({"draft": draft})
 
 

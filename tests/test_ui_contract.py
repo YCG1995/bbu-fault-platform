@@ -35,6 +35,14 @@ def test_async_ui_base_and_new_panels_exist():
     assert "来源覆盖" in detail and "站点证据矩阵" in detail
 
 
+def test_workshop_create_supports_multi_file_and_folder_upload():
+    workshop = _text("web/assets/js/page_workshop.js")
+    assert 'id="create-files"' in workshop and 'multiple' in workshop
+    assert 'id="create-folder"' in workshop and "webkitdirectory" in workshop
+    assert "auto_cases" in workshop and "file_paths" in workshop
+    assert "auto_cases" in _text("bbu/api.py")
+
+
 def test_model_config_has_real_select_for_discovered_models():
     admin = _text("web/assets/js/page_admin.js")
     assert 'id="model-select"' in admin

@@ -233,12 +233,18 @@ def _parse_cases(text: str) -> list[dict[str, Any]]:
             if "应排除" in expected or "排除本故障" in expected:
                 negative = True
         phenomenon = re.search(r"故障现象[^\n]*[：:]\s*([^\n]+)", block)
-        packages = re.findall(r"([^\n（()]+\.(?:7z|zip|tar\.gz|tgz|tar|gz|log(?:\.\w+)?))", block, re.I)
+        package_line = re.search(r"日志包[^\n：:]*[：:]\s*([^\n]+)", block)
+        packages: list[str] = []
+        if package_line:
+            for raw in re.split(r"[；;、,，]", package_line.group(1)):
+                name = raw.strip().strip("。.；;，, ")
+                if name and not name.startswith("必填"):
+                    packages.append(_one_line(name))
         cases.append({"id": match.group(1).upper(), "kind": "negative" if negative else "positive",
                       "description": phenomenon.group(1).strip() if phenomenon else expected,
                       "expected_root_cause": "" if negative else expected,
                       "expected_text": expected, "evidence": [],
-                      "packages": [_one_line(x) for x in packages]})
+                      "packages": packages})
     return cases
 
 

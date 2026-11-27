@@ -743,12 +743,21 @@ class AIGateway:
         rest_unique = [m for m in rest if m not in exact]
         rest_personal = [m for m in rest_unique if m.get("personal")]
         rest_global = [m for m in rest_unique if not m.get("personal")]
-        # Personal models retain their existing priority: they stay first.
-        # Global candidates rotate within equal priority groups.
-        ordered = (personal
-                   + self._round_robin_priority(exact_global, f"{role}:exact")
-                   + rest_personal
-                   + self._round_robin_priority(rest_global, f"{role}:fallback"))
+        # 诊断/助手等通用链路保留“个人模型优先”语义：个人 Key 有独立额度，
+        # 不应被管理员默认模型抢占。技能工坊是例外：它的自动选择必须服从
+        # 管理员在“模型配置”里设置的 priority，否则个人模型会永远压住
+        # 刚调高优先级的全局模型，重跑工坊也不会切换到目标模型。个人模型
+        # 在工坊里仍保留为最后一个可回退候选，而不是被删除。
+        if role == "workshop":
+            ordered = (self._round_robin_priority(exact_global, f"{role}:exact")
+                       + self._round_robin_priority(rest_global, f"{role}:fallback")
+                       + personal
+                       + rest_personal)
+        else:
+            ordered = (personal
+                       + self._round_robin_priority(exact_global, f"{role}:exact")
+                       + rest_personal
+                       + self._round_robin_priority(rest_global, f"{role}:fallback"))
         return [m for m in ordered if not self._model_skipped(m)]
 
     def available(self, role: str = "default", user_id: int | None = None) -> bool:

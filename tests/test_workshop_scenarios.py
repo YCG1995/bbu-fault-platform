@@ -22,6 +22,7 @@ from bbu.config import Config  # noqa: E402
 from bbu.db import Database  # noqa: E402
 from bbu.skills import SkillRegistry  # noqa: E402
 from bbu.workshop import WorkshopService  # noqa: E402
+from bbu.workshop_jobs import WorkshopJobService  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "intake"
 
@@ -96,7 +97,103 @@ class WorkshopTenScenarios(unittest.TestCase):
         self.assertEqual(set(marked["changed"]), set(expected_rules))
         self.assertTrue(self.service.get(draft["id"])["check"]["ok"])
 
-    # 1. 看门狗寄存器配方 -------------------------------------------------
+    # 11. 自动案例识别与多文件匹配 ---------------------------------------
+    def test_11_auto_match_cases_from_fixture_packages(self) -> None:
+        draft = self.create(read_fixture("vsw-ssd.txt"))
+        names = [
+            "正常kernel_1-1-1-1-HWM_APP.EXE_6.tar",
+            "正常BoardInit.log.bak.1",
+            "735845200429_SSD IO ERROR[Com COM1] (2023-04-21_144732).7z",
+            "SATA COMRESET failed [Com COM12] (2023-06-29_190939).7z",
+            "寿命耗尽BoardInit.log.bak.7z",
+        ]
+        upload_dir = self.tmp / "auto-case-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        files = []
+        for name in names:
+            path = upload_dir / name
+            path.write_bytes(b"case-payload")
+            files.append({"stored_path": str(path), "name": name, "relative_path": name})
+        auto = self.service.auto_match_cases(draft["id"], files)
+        self.assertEqual(len(auto["matched"]), 4)
+        self.assertFalse(auto["unmatched_cases"])
+        self.assertFalse(auto["unassigned_files"])
+        cases = self.service.list_cases(draft["id"])
+        self.assertEqual(len(cases), 4)
+        normal = next(case for case in cases if case["case_id"] == "case-01")
+        self.assertEqual(normal["kind"], "negative")
+        self.assertEqual(normal["expected_root_cause"], "NONE")
+        self.assertEqual({item["name"] for item in normal["files"]}, set(names[:2]))
+        self.assertTrue(any(case["case_id"] == "case-02" for case in cases))
+
+
+    # 12. 日志上传到自动案例匹配的完整链路 -------------------------------
+    def test_12_attach_logs_auto_creates_cases_from_uploaded_packages(self) -> None:
+        text = generic_text(
+            "自动案例回归故障", "用于验证上传包自动建例", "设备反复重启",
+            "OssLog/app.log", "ERROR watchdog", "看门狗复位", "检查日志并复位", "设备恢复") + """
+案例编号：C1
+案例类型（勾选）：正常（应排除）
+日志包（必填，上传文件）：正常.zip
+故障现象（一句话）：正常
+期望结论（必填）：应排除本故障
+案例编号：C2
+案例类型（勾选）：故障正例
+日志包（必填，上传文件）：故障.zip
+故障现象（一句话）：设备反复重启
+期望结论（必填）：是本故障，根因是看门狗复位
+"""
+        draft = self.service.create_draft(1, {"source_text": text}, deferred=True)
+        upload_dir = self.tmp / "auto-log-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        normal = upload_dir / "正常.zip"
+        with zipfile.ZipFile(normal, "w") as zf:
+            zf.writestr("app.log", "watchdog normal\n")
+        bad = upload_dir / "故障.zip"
+        with zipfile.ZipFile(bad, "w") as zf:
+            zf.writestr("app.log", "ERROR watchdog reset\n")
+        result = self.service.attach_logs(draft["id"], [
+            {"stored_path": str(normal), "name": normal.name},
+            {"stored_path": str(bad), "name": bad.name},
+        ], auto_cases=True)
+        auto = result.get("auto_cases") or {}
+        self.assertEqual(len(auto.get("matched") or []), 2)
+        cases = self.service.list_cases(draft["id"])
+        self.assertEqual(len(cases), 2)
+        self.assertEqual({case["kind"] for case in cases}, {"positive", "negative"})
+        positive = next(case for case in cases if case["kind"] == "positive")
+        self.assertEqual([item["name"] for item in positive["files"]], ["故障.zip"])
+
+    # 13. 文件夹上传中的同名文件不能在任务暂存阶段互相覆盖 --------------
+    def test_13_upload_staging_keeps_same_basename_from_different_folders(self) -> None:
+        draft = self.service.create_draft(1, {"source_text": generic_text(
+            "同名文件上传", "验证目录上传", "设备重启", "OssLog/app.log",
+            "ERROR watchdog", "看门狗复位", "检查日志", "设备恢复")}, deferred=True)
+        parent = self.tmp / "same-name-folders"
+        (parent / "fault-a").mkdir(parents=True, exist_ok=True)
+        (parent / "fault-b").mkdir(parents=True, exist_ok=True)
+        first = parent / "fault-a" / "same.zip"
+        second = parent / "fault-b" / "same.zip"
+        first.write_bytes(b"fault-a")
+        second.write_bytes(b"fault-b")
+        jobs = WorkshopJobService(self.db, self.cfg, self.service, self.gateway)
+        try:
+            staged = jobs._stage_uploads(draft["id"], "WJtest", [
+                {"stored_path": str(first), "name": "fault-a/same.zip",
+                 "relative_path": "fault-a/same.zip"},
+                {"stored_path": str(second), "name": "fault-b/same.zip",
+                 "relative_path": "fault-b/same.zip"},
+            ])
+        finally:
+            jobs.shutdown()
+        self.assertEqual(len(staged), 2)
+        self.assertEqual(len({item["stored_path"] for item in staged}), 2)
+        self.assertEqual({item["relative_path"] for item in staged},
+                         {"fault-a/same.zip", "fault-b/same.zip"})
+        self.assertEqual({Path(item["stored_path"]).read_bytes() for item in staged},
+                         {b"fault-a", b"fault-b"})
+
+
     def test_01_watchdog_recipe_generates_rules_and_roots(self) -> None:
         draft = self.create(read_fixture("vsw-watchdog.txt"))
         intake = draft["analysis"]["intake"]

@@ -89,14 +89,14 @@ class PersonalModelTests(unittest.TestCase):
         self.gateway = AIGateway(self.db, self.cfg, secret_box=self.box)
         _MockHandler.seen.clear()
 
-    def _admin_model(self, provider="mock", name="管理员默认", roles=None):
+    def _admin_model(self, provider="mock", name="管理员默认", roles=None, priority=0):
         now = "2026-11-25T00:00:00Z"
         self.db.execute(
             "INSERT INTO model_configs(name,provider,base_url,api_key,model,roles,max_tokens,"
             "temperature,timeout_sec,enabled,priority,extra,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, provider, f"http://127.0.0.1:{self.port}/v1", self.box.encrypt("admin-key"),
-             "admin-model", json.dumps(roles or ["default"]), 4096, 0.2, 5, 1, 0, "{}", now, now))
+             "admin-model", json.dumps(roles or ["default"]), 4096, 0.2, 5, 1, priority, "{}", now, now))
 
     def _personal_model(self, uid, model="deepseek-v4-flash", key="personal-secret-key"):
         now = "2026-11-25T00:00:00Z"
@@ -146,6 +146,17 @@ class PersonalModelTests(unittest.TestCase):
             self.gateway.set_user(previous)
         self.assertEqual(chosen[0]["source"], "personal")
         self.assertEqual(self.gateway.choose("default")[0]["source"], "admin")
+
+    def test_workshop_uses_admin_priority_before_personal_model(self):
+        """技能工坊自动选择必须听管理员 priority，而不是被个人模型永久压住。"""
+        self._admin_model(name="工坊高优先", roles=["workshop"], priority=0)
+        self._admin_model(name="工坊低优先", roles=["workshop"], priority=5)
+        self._personal_model(self.uid)
+        chosen = self.gateway.choose("workshop", user_id=self.uid)
+        self.assertEqual(chosen[0]["source"], "admin")
+        self.assertEqual(chosen[0]["name"], "工坊高优先")
+        # 通用诊断链路仍保持个人优先，避免改变个人额度的既有语义。
+        self.assertEqual(self.gateway.choose("default", user_id=self.uid)[0]["source"], "personal")
 
     def test_no_personal_and_no_default_returns_friendly_key_notice(self):
         status = self.gateway.model_status(self.uid)
