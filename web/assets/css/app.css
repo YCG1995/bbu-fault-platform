@@ -1225,6 +1225,50 @@ a.kb-cite:hover { background: #dbeafe; }
   .kb-answer-text { font-size: 13px; }
 }
 
+/* 知识库双主标签、进度与导入 */
+.kb-main-tabs {
+  display:flex; gap:6px; padding:5px; margin-bottom:14px;
+  background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
+}
+.kb-main-tab {
+  flex:1 1 auto; text-align:center; padding:9px 14px; border-radius:7px;
+  color:var(--muted); text-decoration:none; font-size:13px; font-weight:600;
+}
+.kb-main-tab:hover { color:var(--ink-2); text-decoration:none; }
+.kb-main-tab.active { color:#fff; background:var(--brand); box-shadow:0 2px 7px rgba(13,148,136,.2); }
+.kb-progress { border-color:#b9e6dd; background:linear-gradient(180deg,#fff,#f5fffc); }
+.kb-progress-bar { height:8px; background:#dff5ef; border-radius:5px; overflow:hidden; }
+.kb-progress-bar > span { display:block; height:100%; width:0; border-radius:5px;
+  background:linear-gradient(90deg,#0d9488,#22c55e); transition:width .35s ease; }
+.kb-progress-steps { display:grid; gap:7px; margin:12px 0 8px; }
+.kb-progress-step { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12.5px; }
+.kb-progress-step strong { font-weight:500; }
+.kb-progress-step.active { color:var(--ink-2); }
+.kb-progress-step.active strong { font-weight:700; }
+.kb-progress-step.done { color:#047857; }
+.kb-progress-step.failed { color:#b91c1c; }
+.kb-progress-dot { width:9px; height:9px; border-radius:50%; background:#cbd5e1; flex:0 0 9px; }
+.kb-progress-step.active .kb-progress-dot { background:var(--brand); box-shadow:0 0 0 4px #ccfbf1; }
+.kb-progress-step.done .kb-progress-dot { background:#10b981; }
+.kb-progress-step.failed .kb-progress-dot { background:#ef4444; }
+.kb-progress-state { margin-left:auto; }
+.kb-progress-detail { margin-top:8px; color:var(--muted); font-size:12px; }
+.kb-progress-detail summary { cursor:pointer; }
+.kb-record-note { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px; }
+.kb-record-note svg { width:14px; height:14px; }
+.kb-import-steps { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+.kb-import-steps span { padding:5px 9px; border-radius:6px; background:#f1f5f9; color:var(--muted); font-size:11px; }
+.kb-job-status { min-height:12px; }
+.kb-job-progress { padding:9px 11px; border:1px solid var(--line); border-radius:9px; background:var(--panel-2); }
+.kb-job-progress-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:7px; }
+.kb-job-files { display:grid; gap:3px; margin-top:8px; }
+.kb-job-file { display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; }
+.danger-text { color:#b91c1c; }
+@media (max-width:640px) {
+  .kb-main-tab { padding:8px 9px; font-size:12px; }
+  .kb-progress-step { align-items:flex-start; }
+}
+
 /* 知识库管理分区 */
 .kb-tabbar { display:flex; gap:6px; overflow-x:auto; padding:4px 0 10px; border-bottom:1px solid var(--border); margin-bottom:14px; }
 .kb-tab { flex:0 0 auto; padding:7px 12px; border-radius:8px; font-size:13px; color:var(--muted); text-decoration:none; }

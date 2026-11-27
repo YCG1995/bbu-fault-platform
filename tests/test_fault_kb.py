@@ -284,6 +284,24 @@ class KBServiceTests(unittest.TestCase):
         self.assertEqual(len(ids), 3000)
         self.assertGreaterEqual(len(next(iter(ids))), 17)
 
+    def test_operations_record_queries_and_case_changes(self) -> None:
+        svc = self.service()
+        try:
+            svc.import_sample(self.admin)
+            svc.search("看门狗复位", self.engineer)
+            doc = svc.list_documents(size=1)["items"][0]
+            case = svc.get_document(doc["id"], reveal=True)["cases"][0]
+            svc.update_case(case["id"], {"solution": "补充现场验证步骤", "reason": "任务记录测试"},
+                            self.admin)
+            admin_ops = svc.list_operations(self.admin, limit=100)["items"]
+            self.assertTrue(any(x["kind"] == "query" for x in admin_ops))
+            self.assertTrue(any(x["kind"] == "revision" for x in admin_ops))
+            engineer_ops = svc.list_operations(self.engineer, limit=100)["items"]
+            self.assertTrue(engineer_ops)
+            self.assertTrue(all(x["kind"] == "query" for x in engineer_ops))
+        finally:
+            svc.shutdown()
+
     def test_answer_fallback_and_citation_sanitize(self) -> None:
         svc = self.service()
         try:

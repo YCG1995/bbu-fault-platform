@@ -13,13 +13,81 @@ const TASK_TABS = [
   ['needs_data', '待补充'], ['failed', '失败'], ['cancelled', '已取消'],
 ];
 
+function taskModeNav(kbMode) {
+  return `<div class="kb-main-tabs" role="tablist">
+    <a class="kb-main-tab ${kbMode ? '' : 'active'}" href="#/tasks" role="tab">诊断任务</a>
+    <a class="kb-main-tab ${kbMode ? 'active' : ''}" href="#/tasks?tab=kb" role="tab">知识库操作</a>
+  </div>`;
+}
+
+function operationKind(item) {
+  if (item.kind === 'query') return '<span class="badge info">检索</span>';
+  if (item.kind === 'revision') return '<span class="badge warn">修订</span>';
+  return '<span class="badge">变更</span>';
+}
+
+async function renderKbOperationRecords(view, admin) {
+  view.innerHTML = `${taskModeNav(true)}
+    <div class="card"><div class="card-body">${icon('refresh')} 加载中…</div></div>`;
+  let data;
+  try { data = await api('/api/kb/operations?limit=200'); }
+  catch (err) {
+    view.innerHTML = `${taskModeNav(true)}<div class="alert danger">${icon('alert')}<div>${esc(err.message)}</div></div>`;
+    return view;
+  }
+  const items = data.items || [];
+  const renderTable = (rows) => `<div class="table-wrap"><table class="data responsive"><thead><tr>
+    <th>时间</th><th>类型</th><th>动作</th><th>对象 / 问题</th><th>操作人</th><th>结果</th></tr></thead><tbody>
+    ${rows.map((x) => `<tr>
+      <td data-label="时间" class="tiny">${esc(x.created_at ? fmtShortDate(x.created_at) : '—')}</td>
+      <td data-label="类型">${operationKind(x)}</td>
+      <td data-label="动作" class="mono tiny">${esc(x.action || '—')}</td>
+      <td data-label="对象 / 问题"><strong>${esc(x.kind === 'query' ? (x.query || '（空查询）') : (x.target || '—'))}</strong>
+        ${x.kind === 'query' && x.target ? `<div class="tiny muted mono">${esc(x.target)}</div>` : ''}
+        ${x.message ? `<div class="tiny muted">${esc(x.message)}</div>` : ''}</td>
+      <td data-label="操作人">${esc(x.actor || '—')}</td>
+      <td data-label="结果" class="tiny">${x.kind === 'query'
+        ? `${esc(String((x.detail || {}).latency_ms || 0))} ms · ${Number((x.detail || {}).hits || 0)} 个引用${(x.detail || {}).zero_result ? ' · <span class="badge warn">零结果</span>' : ''}`
+        : esc(x.kind === 'revision' ? '已写入修订链' : '已完成')}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="empty small">暂无知识库操作记录</td></tr>'}
+  </tbody></table></div>`;
+  view.innerHTML = `${taskModeNav(true)}
+    <div class="card">
+      <div class="toolbar" style="padding:12px 14px">
+        <div class="search">${icon('search')}<input class="input" id="kb-op-search" placeholder="搜索问题 / 对象 / 操作人"></div>
+        <span class="small muted" id="kb-op-total">共 ${items.length} 条</span>
+        ${admin ? '<a class="btn btn-sm" href="#/kb/docs?tab=audit" style="margin-left:auto">完整审计 →</a>' : ''}
+        <button class="btn btn-sm" data-act="reload-kb-ops">${icon('refresh')}刷新</button>
+      </div>
+      <div class="card-body tight" id="kb-op-table">${renderTable(items)}</div>
+      <div class="tiny muted" style="padding:0 14px 12px">${admin ? '管理员可见全库检索日志、案例修订与审计；' : '仅显示你本人发起的知识库检索；'}检索结果会写入任务记录，变更有哈希链可追溯。</div>
+    </div>`;
+  const search = view.querySelector('#kb-op-search');
+  const applyFilter = () => {
+    const q = search.value.trim().toLowerCase();
+    const rows = q ? items.filter((x) => JSON.stringify(x).toLowerCase().includes(q)) : items;
+    view.querySelector('#kb-op-table').innerHTML = renderTable(rows);
+    view.querySelector('#kb-op-total').textContent = `共 ${rows.length} 条`;
+  };
+  search?.addEventListener('input', applyFilter);
+  bindActions(view, { 'reload-kb-ops': () => renderKbOperationRecords(view, admin) });
+  return view;
+}
+
 export async function renderTaskList() {
+  const kbMode = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') === 'kb';
+  if (kbMode) {
+    const view = mount('任务记录', '知识库检索与变更操作也会进入这里；管理员可见全库审计',
+      `<a class="btn" href="#/kb">${icon('search')}去故障问答</a>`);
+    return renderKbOperationRecords(view, state.user?.role === 'admin');
+  }
   const view = mount('任务记录', '所有诊断任务的执行状态与结论',
     `<a class="btn btn-primary" href="#/tasks/new">${icon('plus')}新建诊断</a>`);
   const tabs = state.user?.role === 'reviewer'
     ? [['', '全部'], ['pending', '待我复核'], ...TASK_TABS.slice(1)]
     : TASK_TABS;
   view.innerHTML = `
+    ${taskModeNav(false)}
     <div class="card">
       <div class="toolbar" style="padding:12px 14px">
         <div class="search">${icon('search')}<input class="input" id="task-search" placeholder="搜索任务 ID / 标题 / 故障描述" value="${esc(listState.q)}"></div>

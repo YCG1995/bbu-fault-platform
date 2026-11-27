@@ -2,8 +2,8 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 122,
-    "action_instances": 300,
+    "distinct_actions": 125,
+    "action_instances": 301,
     "buttons_all": 267,
     "buttons_page": 250,
     "modal_calls": 33,
@@ -107,6 +107,13 @@
         "web/assets/js/page_skills.js",
         "web/assets/js/page_task_detail.js",
         "web/assets/js/page_workshop.js"
+      ]
+    },
+    {
+      "action": "cancel-job",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_kb.js"
       ]
     },
     {
@@ -315,21 +322,21 @@
     },
     {
       "action": "draft-approve",
-      "instances": 2,
+      "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
       ]
     },
     {
       "action": "draft-reject",
-      "instances": 2,
+      "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
       ]
     },
     {
       "action": "draft-view",
-      "instances": 2,
+      "instances": 1,
       "files": [
         "web/assets/js/page_kb.js"
       ]
@@ -487,6 +494,13 @@
       ]
     },
     {
+      "action": "page-docs",
+      "instances": 2,
+      "files": [
+        "web/assets/js/page_kb.js"
+      ]
+    },
+    {
       "action": "password",
       "instances": 3,
       "files": [
@@ -607,6 +621,13 @@
       "instances": 2,
       "files": [
         "web/assets/js/page_admin.js"
+      ]
+    },
+    {
+      "action": "reload-kb-ops",
+      "instances": 1,
+      "files": [
+        "web/assets/js/page_tasks.js"
       ]
     },
     {

@@ -777,7 +777,7 @@ function route() {
   const path = currentPath();
   updateNav();
   if (path === '#/dashboard' || path === '#/') return renderDashboard();
-  if (path === '#/tasks') return renderTaskList();
+  if (path === '#/tasks' || path.startsWith('#/tasks?tab=kb')) return renderTaskList();
   if (path === '#/usage') return renderUsage();
   if (path === '#/tasks/new') return renderNewTask();
   if (path === '#/cases') return renderCases();

@@ -106,6 +106,7 @@ class KBService:
         self._lock = threading.RLock()
         self._index: KBIndex | None = None
         self._dirty = True
+        self._facets_cache: dict[str, Any] | None = None
         self._generation = 1
         self._stop = threading.Event()
         self._rebuild_thread: threading.Thread | None = None
@@ -153,6 +154,7 @@ class KBService:
     def _schedule_rebuild(self) -> None:
         with self._lock:
             self._dirty = True
+            self._facets_cache = None
             self._generation += 1
             if self._rebuild_thread and self._rebuild_thread.is_alive():
                 return
@@ -262,13 +264,19 @@ class KBService:
 
     # ------------------------------------------------------------ 状态与统计
     def status(self, user: dict[str, Any] | None = None) -> dict[str, Any]:
-        active_docs = int(self.db.one(
-            "SELECT COUNT(*) AS n FROM kb_documents WHERE status='active' AND deleted_at IS NULL"
-        )["n"])
-        active_cases = int(self.db.one(
-            "SELECT COUNT(*) AS n FROM kb_cases WHERE status='active'")["n"])
-        drafts = int(self.db.one(
-            "SELECT COUNT(*) AS n FROM kb_drafts WHERE status='reviewing'")["n"])
+        counts = self.db.one(
+            "SELECT "
+            "(SELECT COUNT(*) FROM kb_documents WHERE status='active' AND deleted_at IS NULL) AS docs,"
+            "(SELECT COUNT(*) FROM kb_cases WHERE status='active') AS cases,"
+            "(SELECT COUNT(*) FROM kb_drafts WHERE status='reviewing') AS drafts,"
+            "(SELECT COUNT(*) FROM kb_reviews WHERE status IN "
+            "  ('queued','running','manual','failed')) AS review_pending,"
+            "(SELECT COUNT(*) FROM kb_case_revisions) AS revisions"
+        ) or {}
+        active_docs = int(counts.get("docs") or 0)
+        active_cases = int(counts.get("cases") or 0)
+        drafts = int(counts.get("drafts") or 0)
+        review_pending = int(counts.get("review_pending") or 0)
         enabled = bool(self.config.get("kb_enabled", True))
         index = self._index.public_stats() if self._index else {}
         meta = self.db.one("SELECT * FROM kb_index_meta WHERE id=1") or {}
@@ -288,11 +296,8 @@ class KBService:
             },
             "supported_formats": ["csv", "txt", "md", "html", "docx", "xlsx", "pdf",
                                   "png", "jpg", "webp"],
-            "review_pending": int(self.db.one(
-                "SELECT COUNT(*) AS n FROM kb_reviews WHERE status IN "
-                "('queued','running','manual','failed')")["n"]),
-            "revisions": int(self.db.one(
-                "SELECT COUNT(*) AS n FROM kb_case_revisions")["n"]),
+            "review_pending": review_pending,
+            "revisions": int(counts.get("revisions") or 0),
             "top_k": int(self.config.get("kb_top_k", 6)),
             "config": {
                 "auto_approve_admin": bool(self.config.get("kb_auto_approve_admin", True)),
@@ -302,13 +307,16 @@ class KBService:
                 "review_enabled": bool(self.config.get("kb_review_enabled", True)),
                 "review_auto_on_import": bool(self.config.get("kb_review_auto_on_import", True)),
                 "review_auto_publish": bool(self.config.get("kb_review_auto_publish", False)),
-                "review_pending": int(self.db.one(
-                    "SELECT COUNT(*) AS n FROM kb_reviews WHERE status IN "
-                    "('queued','running','manual','failed')")["n"]),
+                "review_pending": review_pending,
             },
         }
 
     def facets(self) -> dict[str, Any]:
+        with self._lock:
+            cached = self._facets_cache
+            generation = self._generation
+            if cached is not None:
+                return cached
         docs = self.db.all(
             "SELECT boards_json, domains_json FROM kb_documents "
             "WHERE status='active' AND deleted_at IS NULL")
@@ -319,41 +327,71 @@ class KBService:
                 boards[str(value)] = boards.get(str(value), 0) + 1
             for value in _json_list(doc.get("domains_json")):
                 domains[str(value)] = domains.get(str(value), 0) + 1
-        return {
+        result = {
             "boards": [{"value": k, "count": v} for k, v in sorted(boards.items())],
             "domains": [{"value": k, "count": v} for k, v in sorted(domains.items())],
         }
+        with self._lock:
+            # 查询期间发生导入/编辑时 generation 会递增；不要把旧结果缓存
+            # 回来，否则下一次进入问答页会看到过期板卡/领域。
+            if generation == self._generation:
+                self._facets_cache = result
+        return result
 
     # ------------------------------------------------------------ 文档
     def list_documents(self, *, q: str = "", board: str = "", domain: str = "",
                        status: str = "active", page: int = 1, size: int = 20,
                        reveal: bool = False) -> dict[str, Any]:
-        rows = self.db.all(
-            "SELECT d.*, (SELECT COUNT(*) FROM kb_cases c WHERE c.doc_id=d.id "
-            "AND c.status='active') AS case_count FROM kb_documents d "
-            "WHERE d.deleted_at IS NULL ORDER BY d.created_at DESC")
-        qn = normalize_key(q)
+        # 列表只取轻量列，过滤/分页在 SQL 与内存轻量行上完成，且只对当前页
+        # 读取全文并构造公开对象。旧实现对全部文档构造 _doc_public（含 excerpt
+        # 和原文）并逐行做相关子查询，2,000+ 文档时首屏会达到数秒。
+        where = ["d.deleted_at IS NULL"]
+        args: list[Any] = []
+        if status and status != "all":
+            where.append("d.status=?")
+            args.append(status)
+        if q.strip():
+            pattern = f"%{q.strip()}%"
+            where.append("(d.title LIKE ? OR d.masked_text LIKE ?)")
+            args.extend([pattern, pattern])
+        base_rows = self.db.all(
+            "SELECT d.id,d.title,d.status,d.boards_json,d.domains_json,d.created_at "
+            "FROM kb_documents d WHERE " + " AND ".join(where) +
+            " ORDER BY d.created_at DESC", tuple(args))
         boardn = normalize_key(board)
         domainn = normalize_key(domain)
         filtered: list[dict[str, Any]] = []
-        for row in rows:
-            if status and status != "all" and row.get("status") != status:
+        for row in base_rows:
+            if boardn and not any(
+                    normalize_key(x) == boardn for x in _json_list(row.get("boards_json"))):
                 continue
-            boards = _json_list(row.get("boards_json"))
-            domains = _json_list(row.get("domains_json"))
-            if boardn and not any(normalize_key(x) == boardn for x in boards):
+            if domainn and not any(
+                    normalize_key(x) == domainn for x in _json_list(row.get("domains_json"))):
                 continue
-            if domainn and not any(normalize_key(x) == domainn for x in domains):
-                continue
-            if qn and qn not in normalize_key(
-                    f"{row.get('title','')} {row.get('masked_text','')}"):
-                continue
-            filtered.append(self._doc_public(row, reveal=reveal))
+            filtered.append(row)
         page = max(1, int(page or 1))
         size = max(1, min(100, int(size or 20)))
         total = len(filtered)
-        return {"items": filtered[(page - 1) * size: page * size], "total": total,
-                "page": page, "size": size}
+        page_ids = [row["id"] for row in filtered[(page - 1) * size: page * size]]
+        if not page_ids:
+            return {"items": [], "total": total, "page": page, "size": size}
+        full_rows = self.db.all(
+            "SELECT * FROM kb_documents WHERE id IN (" + ",".join("?" * len(page_ids)) + ")",
+            tuple(page_ids))
+        count_rows = self.db.all(
+            "SELECT doc_id, COUNT(*) AS n FROM kb_cases "
+            "WHERE status='active' AND doc_id IN (" + ",".join("?" * len(page_ids)) + ") "
+            "GROUP BY doc_id", tuple(page_ids))
+        counts = {r["doc_id"]: int(r["n"] or 0) for r in count_rows}
+        by_id = {r["id"]: r for r in full_rows}
+        items = []
+        for doc_id in page_ids:
+            row = by_id.get(doc_id)
+            if not row:
+                continue
+            row["case_count"] = counts.get(doc_id, 0)
+            items.append(self._doc_public(row, reveal=False))
+        return {"items": items, "total": total, "page": page, "size": size}
 
     def get_document(self, doc_id: str, *, reveal: bool = False) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM kb_documents WHERE id=? AND deleted_at IS NULL",
@@ -1274,6 +1312,62 @@ class KBService:
                          "detail": _json_obj(item.get("detail_json")),
                          "message": ""})
             items.append(item)
+        items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return {"items": items[:limit], "total": len(items)}
+
+    def list_operations(self, user: dict[str, Any], limit: int = 50) -> dict[str, Any]:
+        """统一的任务记录：检索日志 + 管理员可见的修订/审计。"""
+        limit = max(1, min(200, int(limit or 50)))
+        admin = user.get("role") == "admin"
+        sql = ("SELECT q.id,q.query,q.created_at,q.latency_ms,q.zero_result,q.model,"
+               "q.top_ids_json,u.username,u.display_name FROM kb_query_logs q "
+               "LEFT JOIN users u ON u.id=q.user_id")
+        args: list[Any] = []
+        if not admin:
+            sql += " WHERE q.user_id=?"
+            args.append(int(user.get("id") or 0))
+        sql += " ORDER BY q.created_at DESC LIMIT ?"
+        args.append(limit)
+        items: list[dict[str, Any]] = []
+        for row in self.db.all(sql, tuple(args)):
+            top_ids = _json_list(row.get("top_ids_json"))
+            items.append({
+                "kind": "query", "action": "kb.search", "target": row.get("id"),
+                "object_type": "query", "actor": row.get("display_name") or row.get("username") or "",
+                "message": "", "query": row.get("query") or "",
+                "created_at": row.get("created_at") or "",
+                "detail": {"latency_ms": int(row.get("latency_ms") or 0),
+                           "zero_result": bool(row.get("zero_result")),
+                           "hits": len(top_ids), "model": row.get("model") or ""},
+            })
+        if admin:
+            # 导入会为每个案例写一条 case.import 修订；这些记录在导入任务里
+            # 已经成批可见，不再淹没任务记录里的人肉检索/修改。完整记录仍在
+            # “变更与审计”页保留。
+            rev_rows = self.db.all(
+                "SELECT * FROM kb_case_revisions WHERE action <> 'import' "
+                "ORDER BY created_at DESC LIMIT ?", (limit,))
+            for row in rev_rows:
+                item = dict(row)
+                items.append({
+                    "kind": "revision", "action": f"case.{item.get('action') or ''}",
+                    "target": item.get("case_id"), "object_type": "case",
+                    "actor": item.get("actor_name") or "", "message": item.get("reason") or "",
+                    "created_at": item.get("created_at") or "",
+                    "detail": _json_list(item.get("diff_json")),
+                })
+            audit_rows = self.db.all(
+                "SELECT * FROM audit_logs WHERE action LIKE 'kb.%' "
+                "ORDER BY ts DESC LIMIT ?", (limit,))
+            for row in audit_rows:
+                item = dict(row)
+                items.append({
+                    "kind": "audit", "action": item.get("action") or "",
+                    "target": item.get("target") or "", "object_type": "kb",
+                    "actor": item.get("username") or "", "message": "",
+                    "created_at": item.get("ts") or "",
+                    "detail": _json_obj(item.get("detail_json")),
+                })
         items.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
         return {"items": items[:limit], "total": len(items)}
 

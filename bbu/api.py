@@ -445,6 +445,7 @@ class App:
         r.add("POST", r"/api/assistant/actions/(?P<action_id>[A-Za-z0-9_-]+)/cancel",
               h_assistant_cancel)
         r.add("GET", r"/api/kb/status", h_kb_status)
+        r.add("GET", r"/api/kb/operations", h_kb_operations)
         r.add("GET", r"/api/kb/facets", h_kb_facets)
         r.add("GET", r"/api/kb/docs", h_kb_docs)
         r.add("POST", r"/api/kb/docs", h_kb_doc_create)
@@ -4373,6 +4374,15 @@ def _kb_rate(app: App, user: dict[str, Any]) -> None:
 def h_kb_status(app: App, req):
     user = _auth(app, req, csrf=False)
     return response_json({"status": app.kb.status(user)})
+
+
+def h_kb_operations(app: App, req):
+    user = _auth(app, req, csrf=False)
+    try:
+        return response_json(app.kb.list_operations(
+            user, limit=_kb_int(req.query.get("limit"), 50)))
+    except Exception as exc:  # noqa: BLE001
+        _kb_raise(exc)
 
 
 def h_kb_facets(app: App, req):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""故障知识库 UI 冒烟：问答、引用、文档库、导入与移动端布局。
+"""故障知识库 UI 冒烟：双主标签、检索进度、文档库、独立导入、总览、任务记录与移动端布局。
 
 运行：python3 tests/ui_kb_smoke.py
 """
@@ -102,6 +102,12 @@ def main() -> int:
             page.click('[data-act="ask"]')
             page.wait_for_selector(".kb-answer", timeout=20000)
             body = page.locator("#view").inner_text()
+            if "故障问答" not in body or "知识库管理" not in body:
+                errors.append("问答页缺少双主标签")
+            if page.locator(".kb-main-tab").count() < 2:
+                errors.append("问答页主标签数量不足")
+            if page.locator(".kb-record-note").count() == 0:
+                errors.append("问答结果缺少任务记录入口")
             for token in ("知识库回答", "可能根因", "引用案例", "K1"):
                 if token not in body:
                     errors.append(f"问答页缺少：{token}")
@@ -110,11 +116,22 @@ def main() -> int:
             page.screenshot(path=str(out / "kb-ask.png"), full_page=True)
 
             page.goto(f"http://{host}:{port}/#/kb/docs", wait_until="domcontentloaded")
-            page.wait_for_selector("#kb-import-form", timeout=15000)
+            page.wait_for_selector(".kb-main-tab.active", timeout=15000)
+            page.wait_for_selector("table.data", timeout=15000)
+            if page.locator("#kb-import-form").count() != 0:
+                errors.append("文档库不应该再包含导入表单")
             doc_body = page.locator("#view").inner_text()
-            for token in ("文档库", "导入文档", "文档"):
+            for token in ("文档库", "文档", "知识库管理"):
                 if token not in doc_body:
                     errors.append(f"文档页缺少：{token}")
+            page.screenshot(path=str(out / "kb-docs.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/kb/docs?tab=import", wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-import-form", timeout=15000)
+            import_body = page.locator("#view").inner_text()
+            for token in ("导入文档", "选择文件", "最近导入任务"):
+                if token not in import_body:
+                    errors.append(f"导入页缺少：{token}")
             # 通过页面真实上传一份 CSV，验证 FormData 和多文件入口。
             csv_path = work / "ui-import.csv"
             csv_path.write_text('问题,答案\n"UI 导入案例","【原因分析】页面导入测试'
@@ -133,7 +150,7 @@ def main() -> int:
                     break
             if "已完成" not in job_text and "部分完成" not in job_text:
                 errors.append(f"页面导入未完成：{job_text}")
-            page.screenshot(path=str(out / "kb-docs.png"), full_page=True)
+            page.screenshot(path=str(out / "kb-import.png"), full_page=True)
 
             page.goto(f"http://{host}:{port}/#/kb/docs/{doc_id}", wait_until="domcontentloaded")
             page.wait_for_selector("#kb-doc-edit", timeout=15000)
@@ -179,6 +196,24 @@ def main() -> int:
                         errors.append("统计 7 天范围没有生效")
                     page.screenshot(path=str(out / "kb-admin-stats-7.png"), full_page=True)
 
+            # 总览必须提供知识库入口，任务记录必须能看见检索操作。
+            page.goto(f"http://{host}:{port}/#/dashboard", wait_until="domcontentloaded")
+            page.wait_for_selector(".kb-dashboard-card", timeout=15000)
+            dash = page.locator("#view").inner_text()
+            for token in ("故障知识库", "生效文档", "操作记录"):
+                if token not in dash:
+                    errors.append(f"总览页缺少：{token}")
+            page.screenshot(path=str(out / "dashboard-kb.png"), full_page=True)
+
+            page.goto(f"http://{host}:{port}/#/tasks?tab=kb", wait_until="domcontentloaded")
+            page.wait_for_selector("#kb-op-table", timeout=15000)
+            page.wait_for_timeout(300)
+            ops_body = page.locator("#view").inner_text()
+            for token in ("知识库操作", "看门狗复位", "检索"):
+                if token not in ops_body:
+                    errors.append(f"知识库操作记录缺少：{token}")
+            page.screenshot(path=str(out / "tasks-kb.png"), full_page=True)
+
             page.set_viewport_size({"width": 390, "height": 844})
             page.goto(f"http://{host}:{port}/#/kb", wait_until="domcontentloaded")
             try:
@@ -212,7 +247,7 @@ def main() -> int:
         for item in errors:
             print(" -", item)
         return 1
-    print("[PASS] 知识库问答/引用/文档/页面导入/详情/修订/管理分区/移动端")
+    print("[PASS] 知识库问答/进度/双主标签/文档分页/独立导入/详情/修订/管理分区/总览/任务记录/移动端")
     print(f"[INFO] 截图: {out}")
     return 0
 

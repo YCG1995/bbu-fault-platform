@@ -200,6 +200,7 @@ EXPECTED_ROUTES = {
     "POST /api/assistant/actions/{id}/confirm",
     "POST /api/assistant/actions/{id}/cancel",
     "GET /api/kb/status",
+    "GET /api/kb/operations",
     "GET /api/kb/facets",
     "GET /api/kb/docs",
     "POST /api/kb/docs",
@@ -1564,6 +1565,9 @@ def main() -> int:
         _, kb_status = admin_client.json("GET", "/api/kb/status")
         assert kb_status["status"]["enabled"] is True
         hit("GET /api/kb/status")
+        _, kb_ops = admin_client.json("GET", "/api/kb/operations")
+        assert isinstance(kb_ops.get("items"), list)
+        hit("GET /api/kb/operations")
         _, kb_facets = admin_client.json("GET", "/api/kb/facets")
         assert "boards" in kb_facets and "domains" in kb_facets
         hit("GET /api/kb/facets")
