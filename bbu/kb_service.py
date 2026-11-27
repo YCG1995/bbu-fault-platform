@@ -83,6 +83,12 @@ USER_TEMPLATE = """用户问题：
 
 请基于上述案例回答，并给出 [K#] 引用。"""
 MAX_EVIDENCE_CASE_CHARS = 900
+MAX_CROSS_LIBRARIES = 5
+BACKUP_VERSION = 3
+MAX_BACKUP_JOBS = 5000
+MAX_BACKUP_FILES = 20000
+MAX_BACKUP_FILE_BYTES = 512 * 1024 * 1024
+MAX_BACKUP_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _kb_id(prefix: str) -> str:
@@ -344,10 +350,10 @@ class KBService:
             raise KBError("知识库不存在", 404, "not_found")
         return dict(row)
 
-    def create_library(self, user: dict[str, Any], *, name: str, kind: str = "fault",
-                       description: str = "", visibility: str = "all") -> dict[str, Any]:
-        if user.get("role") != "admin":
-            raise KBError("仅管理员可创建知识库", 403, "forbidden")
+    def _create_library_conn(self, conn, user: dict[str, Any], *, name: str,
+                             kind: str = "fault", description: str = "",
+                             visibility: str = "all") -> int:
+        """在调用方事务内创建知识库，供恢复流程与单事务提交共用。"""
         name = str(name or "").strip()
         if not name or len(name) > 80:
             raise KBError("知识库名称需为 1–80 个字符")
@@ -355,19 +361,28 @@ class KBService:
         visibility = visibility if visibility in {"all", "admin"} else "all"
         base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "kb"
         slug = base
-        if self.db.one("SELECT id FROM kb_libraries WHERE slug=?", (slug,)):
+        if conn.execute("SELECT id FROM kb_libraries WHERE slug=?", (slug,)).fetchone():
             slug = f"{base}-{_kb_id('L').lower()[-6:]}"
         now = iso_now()
+        cur = conn.execute(
+            "INSERT INTO kb_libraries(name,slug,kind,description,visibility,status,is_default,"
+            "created_by,created_at,updated_at) VALUES(?,?,?,?,?,'active',0,?,?,?)",
+            (name, slug, kind, description[:500], visibility, user.get("id"), now, now))
+        return int(cur.lastrowid)
+
+    def create_library(self, user: dict[str, Any], *, name: str, kind: str = "fault",
+                       description: str = "", visibility: str = "all") -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可创建知识库", 403, "forbidden")
         with self.db.tx() as conn:
-            cur = conn.execute(
-                "INSERT INTO kb_libraries(name,slug,kind,description,visibility,status,is_default,"
-                "created_by,created_at,updated_at) VALUES(?,?,?,?,?,'active',0,?,?,?)",
-                (name, slug, kind, description[:500], visibility, user.get("id"), now, now))
-            kb_id = int(cur.lastrowid)
+            kb_id = self._create_library_conn(
+                conn, user, name=name, kind=kind, description=description,
+                visibility=visibility)
         self._mark_dirty()
         return {"ok": True, "library": self.get_library(kb_id)}
 
-    def backup_library(self, kb_id: int, user: dict[str, Any]) -> tuple[str, bytes]:
+    def backup_library(self, kb_id: int, user: dict[str, Any], *,
+                       include_files: bool = True) -> tuple[str, bytes]:
         if user.get("role") != "admin":
             raise KBError("仅管理员可备份知识库", 403, "forbidden")
         lib = self.get_library(kb_id, include_archived=True)
@@ -408,6 +423,50 @@ class KBService:
                 "SELECT v.* FROM kb_doc_versions v JOIN kb_documents d ON d.id=v.doc_id "
                 "WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY v.doc_id,v.version",
                 (int(kb_id),))]
+            jobs = [dict(r) for r in self.db.all(
+                "SELECT * FROM kb_import_jobs WHERE kb_id=? ORDER BY created_at,id",
+                (int(kb_id),))]
+            files = [dict(r) for r in self.db.all(
+                "SELECT f.* FROM kb_import_files f JOIN kb_import_jobs j ON j.id=f.job_id "
+                "WHERE j.kb_id=? ORDER BY f.job_id,f.id", (int(kb_id),))]
+            if len(jobs) > MAX_BACKUP_JOBS or len(files) > MAX_BACKUP_FILES:
+                raise KBError("知识库附件或导入任务超过备份上限", 413, "too_large")
+            file_blobs: dict[str, bytes] = {}
+            file_manifest: list[dict[str, Any]] = []
+            missing_files = 0
+            for row in files:
+                item = dict(row)
+                item["backup_path"] = ""
+                item["present"] = False
+                sha = str(row.get("sha256") or "")
+                source = Path(str(row.get("stored_path") or ""))
+                present = False
+                if include_files and sha and source.is_file():
+                    try:
+                        root = self.files_dir.resolve()
+                        resolved = source.resolve()
+                        if os.path.commonpath([str(root), str(resolved)]) != str(root):
+                            raise ValueError
+                        body = resolved.read_bytes()
+                        if hashlib.sha256(body).hexdigest() != sha:
+                            raise KBError("附件校验失败，拒绝生成不一致的备份", 409,
+                                          "bad_attachment")
+                        name = f"files/{sha}"
+                        file_blobs.setdefault(name, body)
+                        item["backup_path"] = name
+                        item["present"] = True
+                        present = True
+                    except ValueError:
+                        pass
+                if not present:
+                    missing_files += 1
+                item["stored_path"] = ""
+                file_manifest.append(item)
+            file_hashes = {
+                name: hashlib.sha256(body).hexdigest() for name, body in file_blobs.items()
+            }
+            files_checksum = hashlib.sha256(json.dumps(
+                file_hashes, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
             payloads = {
                 "documents.jsonl": "\n".join(json.dumps(x, ensure_ascii=False) for x in docs).encode("utf-8"),
                 "cases.jsonl": "\n".join(json.dumps(x, ensure_ascii=False) for x in cases).encode("utf-8"),
@@ -417,23 +476,36 @@ class KBService:
                 "terms.jsonl": "\n".join(json.dumps(x, ensure_ascii=False) for x in terms).encode("utf-8"),
                 "doc_versions.jsonl": "\n".join(
                     json.dumps(x, ensure_ascii=False) for x in doc_versions).encode("utf-8"),
+                "import_jobs.jsonl": "\n".join(
+                    json.dumps(x, ensure_ascii=False) for x in jobs).encode("utf-8"),
+                "import_files.jsonl": "\n".join(
+                    json.dumps(x, ensure_ascii=False) for x in file_manifest).encode("utf-8"),
             }
-            file_sha256 = {name: hashlib.sha256(body).hexdigest() for name, body in payloads.items()}
-            checksum = hashlib.sha256(json.dumps(file_sha256, sort_keys=True,
-                                                separators=(",", ":")).encode("utf-8")).hexdigest()
+            payload_hashes = {
+                name: hashlib.sha256(body).hexdigest() for name, body in payloads.items()
+            }
+            checksum = hashlib.sha256(json.dumps(
+                payload_hashes, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8")).hexdigest()
             manifest = {
-                "format": "bbu-kb-backup", "version": 2, "schema": 26,
+                "format": "bbu-kb-backup", "version": BACKUP_VERSION, "schema": 26,
                 "kb_id": int(kb_id), "name": lib.get("name") or "",
                 "kind": lib.get("kind") or "fault", "exported_at": iso_now(),
                 "documents": len(docs), "cases": len(cases), "drafts": len(drafts),
                 "reviews": len(reviews), "revisions": len(revisions), "terms": len(terms),
-                "doc_versions": len(doc_versions),
-                "file_sha256": file_sha256, "checksum": checksum,
+                "doc_versions": len(doc_versions), "import_jobs": len(jobs),
+                "import_files": len(files), "files": len(file_blobs),
+                "file_bytes": sum(len(x) for x in file_blobs.values()),
+                "missing_files": missing_files,
+                "file_sha256": payload_hashes, "files_checksum": files_checksum,
+                "checksum": checksum,
             }
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
                 for name, body in payloads.items():
+                    zf.writestr(name, body)
+                for name, body in file_blobs.items():
                     zf.writestr(name, body)
             safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", str(lib.get("name") or f"kb-{kb_id}"))
             filename = f"{safe}-{iso_now()[:16].replace(':', '')}.kbbackup.zip"
@@ -441,7 +513,8 @@ class KBService:
                 trace.append("backup_result", phase="backup", status="success",
                              counts={k: manifest[k] for k in
                                      ("documents", "cases", "drafts", "reviews", "revisions",
-                                      "terms", "doc_versions")},
+                                      "terms", "doc_versions", "import_jobs", "import_files",
+                                      "files")},
                              bytes=len(buf.getvalue()), checksum=checksum)
                 trace.finish("success")
             return filename, buf.getvalue()
@@ -455,12 +528,14 @@ class KBService:
             raise
 
     @staticmethod
-    def _restore_payload_counts(manifest: dict[str, Any], payloads: dict[str, bytes]) -> None:
+    def _restore_payload_counts(manifest: dict[str, Any], payloads: dict[str, bytes],
+                                file_payloads: dict[str, bytes] | None = None) -> None:
         expected = {
             "documents": "documents.jsonl", "cases": "cases.jsonl",
             "drafts": "drafts.jsonl", "reviews": "reviews.jsonl",
             "revisions": "revisions.jsonl", "terms": "terms.jsonl",
-            "doc_versions": "doc_versions.jsonl",
+            "doc_versions": "doc_versions.jsonl", "import_jobs": "import_jobs.jsonl",
+            "import_files": "import_files.jsonl",
         }
         for key, name in expected.items():
             if key not in manifest:
@@ -480,22 +555,105 @@ class KBService:
                 actual, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
             if expected_checksum != checksum:
                 raise KBError("备份包 checksum 不一致", 400, "bad_backup")
+        file_payloads = file_payloads or {}
+        files_checksum = str(manifest.get("files_checksum") or "")
+        if files_checksum:
+            actual_files = {name: hashlib.sha256(body).hexdigest()
+                            for name, body in file_payloads.items()}
+            expected_files = hashlib.sha256(json.dumps(
+                actual_files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            if expected_files != files_checksum:
+                raise KBError("备份包附件校验失败", 400, "bad_backup")
+        if "files" in manifest and int(manifest.get("files") or 0) != len(file_payloads):
+            raise KBError("备份包附件计数不一致", 400, "bad_backup")
 
-    def restore_library(self, user: dict[str, Any], data: bytes, *,
-                        name: str = "", target_kb_id: int | None = None) -> dict[str, Any]:
-        if user.get("role") != "admin":
-            raise KBError("仅管理员可恢复知识库", 403, "forbidden")
+    @staticmethod
+    def _read_backup_archive(data: bytes) -> tuple[dict[str, Any], dict[str, bytes],
+                                                     dict[str, bytes]]:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                if "manifest.json" not in names:
+                    raise KBError("备份包缺少 manifest.json", 400, "bad_backup")
                 manifest = _json_obj(zf.read("manifest.json").decode("utf-8"))
                 if manifest.get("format") != "bbu-kb-backup":
                     raise KBError("不是知识库备份包", 400, "bad_backup")
-                names = ("documents.jsonl", "cases.jsonl", "drafts.jsonl",
-                         "reviews.jsonl", "revisions.jsonl", "terms.jsonl",
-                         "doc_versions.jsonl")
-                payloads = {name: zf.read(name) for name in names if name in zf.namelist()}
-        except (KeyError, ValueError, zipfile.BadZipFile) as exc:
+                version = int(manifest.get("version") or 1)
+                if version > BACKUP_VERSION:
+                    raise KBError("备份包版本高于当前平台，请先升级", 409, "backup_too_new")
+                payload_names = (
+                    "documents.jsonl", "cases.jsonl", "drafts.jsonl", "reviews.jsonl",
+                    "revisions.jsonl", "terms.jsonl", "doc_versions.jsonl",
+                )
+                if version >= 3:
+                    payload_names += ("import_jobs.jsonl", "import_files.jsonl")
+                payloads = {name: zf.read(name) for name in payload_names if name in names}
+                file_payloads: dict[str, bytes] = {}
+                total = 0
+                for info in zf.infolist():
+                    name = info.filename
+                    if info.is_dir() or name == "manifest.json":
+                        continue
+                    if name in payload_names:
+                        continue
+                    if not name.startswith("files/"):
+                        raise KBError(f"备份包包含未知文件：{name}", 400, "bad_backup")
+                    sha = name[len("files/"):]
+                    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                        raise KBError("备份包附件路径非法", 400, "bad_backup")
+                    if info.file_size > MAX_BACKUP_FILE_BYTES:
+                        raise KBError("备份包单个附件超过限制", 413, "too_large")
+                    total += int(info.file_size or 0)
+                    if total > MAX_BACKUP_TOTAL_BYTES:
+                        raise KBError("备份包附件总量超过限制", 413, "too_large")
+                    body = zf.read(name)
+                    if hashlib.sha256(body).hexdigest() != sha:
+                        raise KBError("备份包附件校验失败", 400, "bad_backup")
+                    file_payloads[name] = body
+                return manifest, payloads, file_payloads
+        except (zipfile.BadZipFile, KeyError, ValueError) as exc:
             raise KBError(f"备份包损坏：{exc}", 400, "bad_backup")
+
+    def _stage_backup_files(self, file_payloads: dict[str, bytes]) -> tuple[
+            dict[str, Path], list[Path]]:
+        targets: dict[str, Path] = {}
+        created: list[Path] = []
+        try:
+            for name, body in sorted(file_payloads.items()):
+                sha = name.split("/", 1)[1]
+                target = self.files_dir / sha[:2] / sha[2:4] / f"{sha[:12]}-{sha[:8]}"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    if sha256_file(target) != sha:
+                        raise KBError("目标附件已损坏", 409, "bad_attachment")
+                else:
+                    tmp = target.with_name(f"{target.name}.tmp-{_kb_id('F')}")
+                    try:
+                        tmp.write_bytes(body)
+                        os.replace(tmp, target)
+                    finally:
+                        if tmp.exists():
+                            try:
+                                tmp.unlink()
+                            except OSError:
+                                pass
+                    created.append(target)
+                targets[name] = target
+        except Exception:
+            for path in created:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
+        return targets, created
+
+    def restore_library(self, user: dict[str, Any], data: bytes, *,
+                        name: str = "", target_kb_id: int | None = None,
+                        dedupe: bool = True) -> dict[str, Any]:
+        if user.get("role") != "admin":
+            raise KBError("仅管理员可恢复知识库", 403, "forbidden")
+        manifest, payloads, file_payloads = self._read_backup_archive(data)
         def rows(name: str) -> list[dict[str, Any]]:
             try:
                 return [json.loads(line) for line in payloads.get(name, b"").decode(
@@ -509,102 +667,120 @@ class KBService:
         revisions = rows("revisions.jsonl")
         terms = rows("terms.jsonl")
         doc_versions = rows("doc_versions.jsonl")
+        jobs = rows("import_jobs.jsonl")
+        files = rows("import_files.jsonl")
         if (len(docs) > 50000 or len(cases) > 100000 or len(revisions) > 300000
-                or len(doc_versions) > 200000):
+                or len(doc_versions) > 200000 or len(jobs) > MAX_BACKUP_JOBS
+                or len(files) > MAX_BACKUP_FILES):
             raise KBError("备份包超过恢复上限", 413, "too_large")
-        self._restore_payload_counts(manifest, payloads)
+        self._restore_payload_counts(manifest, payloads, file_payloads)
         merged = bool(target_kb_id)
         if merged:
             existing = self.get_library(int(target_kb_id), include_archived=False)
             target = int(existing["id"])
             library_name = str(existing.get("name") or "")
         else:
-            library = self.create_library(
-                user, name=name or f"{manifest.get('name') or '恢复的知识库'}（恢复）",
-                kind=str(manifest.get("kind") or "fault"), description="从备份恢复")
-            target = int(library["library"]["id"])
-            library_name = str(name or manifest.get("name") or "")
-        trace = None
-        if self.traces is not None:
-            try:
-                trace = self.traces.start(
-                    kind="kb", ref_id=str(target), user_id=int(user.get("id") or 0),
-                    meta={"action": "library_restore", "kb_id": target,
-                          "library_name": library_name, "merged": merged})
-                trace.append("restore", phase="restore", status="running", kb_id=target,
-                             source_kb_id=int(manifest.get("kb_id") or 0))
-            except Exception:
-                trace = None
+            target = 0
+            library_name = str(name or manifest.get("name") or "恢复的知识库")
+        created_files: list[Path] = []
         try:
-            case_by_doc: dict[str, list[dict[str, Any]]] = {}
-            for case in cases:
-                case_by_doc.setdefault(str(case.get("doc_id") or ""), []).append(case)
-            rev_by_case: dict[str, list[dict[str, Any]]] = {}
-            for rev in revisions:
-                rev_by_case.setdefault(str(rev.get("case_id") or ""), []).append(rev)
-            versions_by_doc: dict[str, list[dict[str, Any]]] = {}
-            for version in doc_versions:
-                versions_by_doc.setdefault(str(version.get("doc_id") or ""), []).append(version)
-            doc_map: dict[str, str] = {}
-            case_map: dict[str, str] = {}
-            restored_docs = 0
-            for doc in docs:
-                payload_cases = sorted(case_by_doc.get(str(doc.get("id")), []),
-                                       key=lambda x: (int(x.get("ordinal") or 0), str(x.get("id") or "")))
-                payload = {
-                    "document": {
-                        "title": doc.get("title") or "", "title_clean": doc.get("title_clean") or "",
-                        "doc_type": doc.get("doc_type") or "fault",
-                        "source_type": doc.get("source_type") or "restore",
-                        "source_name": doc.get("source_name") or "备份恢复",
-                        "source_sha256": doc.get("source_sha256") or "",
-                        "raw_text": doc.get("raw_text") or "", "masked_text": doc.get("masked_text") or "",
-                        "pii_masked": bool(doc.get("pii_masked", 1)),
-                        "boards": _json_list(doc.get("boards_json")),
-                        "domains": _json_list(doc.get("domains_json")),
-                        "versions": _json_list(doc.get("versions_json")),
-                        "tags": _json_list(doc.get("tags_json")),
-                        "quality": float(doc.get("quality") or 0),
-                        "confidence": float(doc.get("confidence") or 0.9),
-                        "status": doc.get("status") or "active",
-                        "created_at": doc.get("created_at") or "",
-                    },
-                    "cases": [],
-                }
-                for case in payload_cases:
-                    item = dict(case)
-                    # cases.jsonl 保存的是 DB 行；恢复前还原成写库使用的结构化字段，
-                    # 否则案例级板卡/领域/版本标签会被文档级标签覆盖。
-                    item["sections"] = _json_list(case.get("sections_json"))
-                    item["boards"] = _json_list(case.get("boards_json"))
-                    item["domains"] = _json_list(case.get("domains_json"))
-                    item["versions"] = _json_list(case.get("versions_json"))
-                    payload["cases"].append(item)
-                new_doc_id = self._insert_document(
-                    payload, int(user["id"]), kb_id=target, action="restore",
-                    actor_type="human", reason="从备份恢复", record_revision=False,
-                    allow_empty_cases=True, case_id_map=case_map,
-                    skip_initial_version=bool(versions_by_doc.get(str(doc.get("id")))))
-                doc_map[str(doc.get("id"))] = new_doc_id
-                restored_docs += 1
-            # 案例命中/引用/审核分数等运行统计不在修订链里，单独回填。
-            for case in cases:
-                target_case = case_map.get(str(case.get("id") or ""))
-                if not target_case:
-                    continue
-                self.db.execute(
-                    "UPDATE kb_cases SET review_status=?,review_score=?,hit_count=?,"
-                    "citation_count=?,last_hit_at=?,helpful_count=?,unhelpful_count=?,"
-                    "updated_by=?,created_at=?,updated_at=? WHERE id=?",
-                    (case.get("review_status") or "unreviewed",
-                     float(case.get("review_score") or 0), int(case.get("hit_count") or 0),
-                     int(case.get("citation_count") or 0), case.get("last_hit_at"),
-                     int(case.get("helpful_count") or 0), int(case.get("unhelpful_count") or 0),
-                     case.get("updated_by"), case.get("created_at") or iso_now(),
-                     case.get("updated_at") or iso_now(), target_case))
-            # 修订链按原始快照重建，保留 revision 编号、actor/reason/时间。
-            restored_revisions = 0
+            file_targets, created_files = self._stage_backup_files(file_payloads)
             with self.db.tx() as conn:
+                if not merged:
+                    target = self._create_library_conn(
+                        conn, user, name=library_name,
+                        kind=str(manifest.get("kind") or "fault"), description="从备份恢复")
+                existing_hashes: set[str] = set()
+                if merged:
+                    for row in conn.execute(
+                            "SELECT source_sha256,content_sha256 FROM kb_documents "
+                            "WHERE kb_id=? AND deleted_at IS NULL", (target,)).fetchall():
+                        for value in (row["source_sha256"], row["content_sha256"]):
+                            if value:
+                                existing_hashes.add(str(value))
+                case_by_doc: dict[str, list[dict[str, Any]]] = {}
+                for case in cases:
+                    case_by_doc.setdefault(str(case.get("doc_id") or ""), []).append(case)
+                rev_by_case: dict[str, list[dict[str, Any]]] = {}
+                for rev in revisions:
+                    rev_by_case.setdefault(str(rev.get("case_id") or ""), []).append(rev)
+                versions_by_doc: dict[str, list[dict[str, Any]]] = {}
+                for version in doc_versions:
+                    versions_by_doc.setdefault(str(version.get("doc_id") or ""), []).append(version)
+                doc_map: dict[str, str] = {}
+                case_map: dict[str, str] = {}
+                restored_docs = 0
+                skipped_docs = 0
+                skipped_cases = 0
+                seen_hashes = set(existing_hashes)
+                for doc in docs:
+                    source_sha = str(doc.get("source_sha256") or "")
+                    content_sha = str(doc.get("content_sha256") or "")
+                    if not content_sha:
+                        content_sha = hashlib.sha256(
+                            (str(doc.get("title") or "") + "\n"
+                             + str(doc.get("raw_text") or "")).encode("utf-8")).hexdigest()
+                    if dedupe and (source_sha in seen_hashes or content_sha in seen_hashes):
+                        skipped_docs += 1
+                        skipped_cases += len(case_by_doc.get(str(doc.get("id") or ""), []))
+                        continue
+                    payload_cases = sorted(case_by_doc.get(str(doc.get("id")), []),
+                                           key=lambda x: (int(x.get("ordinal") or 0), str(x.get("id") or "")))
+                    payload = {
+                        "document": {
+                            "title": doc.get("title") or "", "title_clean": doc.get("title_clean") or "",
+                            "doc_type": doc.get("doc_type") or "fault",
+                            "source_type": doc.get("source_type") or "restore",
+                            "source_name": doc.get("source_name") or "备份恢复",
+                            "source_sha256": source_sha,
+                            "raw_text": doc.get("raw_text") or "",
+                            "masked_text": doc.get("masked_text") or "",
+                            "pii_masked": bool(doc.get("pii_masked", 1)),
+                            "boards": _json_list(doc.get("boards_json")),
+                            "domains": _json_list(doc.get("domains_json")),
+                            "versions": _json_list(doc.get("versions_json")),
+                            "tags": _json_list(doc.get("tags_json")),
+                            "attachments": _json_list(doc.get("attachments_json")),
+                            "quality": float(doc.get("quality") or 0),
+                            "confidence": float(doc.get("confidence") or 0.9),
+                            "status": doc.get("status") or "active",
+                            "created_at": doc.get("created_at") or "",
+                        },
+                        "cases": [],
+                    }
+                    for case in payload_cases:
+                        item = dict(case)
+                        item["sections"] = _json_list(case.get("sections_json"))
+                        item["boards"] = _json_list(case.get("boards_json"))
+                        item["domains"] = _json_list(case.get("domains_json"))
+                        item["versions"] = _json_list(case.get("versions_json"))
+                        payload["cases"].append(item)
+                    new_doc_id = self._insert_document(
+                        payload, int(user["id"]), conn=conn, kb_id=target, action="restore",
+                        actor_type="human", reason="从备份恢复", record_revision=False,
+                        allow_empty_cases=True, case_id_map=case_map,
+                        skip_initial_version=bool(versions_by_doc.get(str(doc.get("id")))))
+                    doc_map[str(doc.get("id"))] = new_doc_id
+                    restored_docs += 1
+                    if source_sha:
+                        seen_hashes.add(source_sha)
+                    if content_sha:
+                        seen_hashes.add(content_sha)
+                for case in cases:
+                    target_case = case_map.get(str(case.get("id") or ""))
+                    if not target_case:
+                        continue
+                    conn.execute(
+                        "UPDATE kb_cases SET review_status=?,review_score=?,hit_count=?,"
+                        "citation_count=?,last_hit_at=?,helpful_count=?,unhelpful_count=?,"
+                        "updated_by=?,created_at=?,updated_at=? WHERE id=?",
+                        (case.get("review_status") or "unreviewed",
+                         float(case.get("review_score") or 0), int(case.get("hit_count") or 0),
+                         int(case.get("citation_count") or 0), case.get("last_hit_at"),
+                         int(case.get("helpful_count") or 0), int(case.get("unhelpful_count") or 0),
+                         case.get("updated_by"), case.get("created_at") or iso_now(),
+                         case.get("updated_at") or iso_now(), target_case))
+                restored_revisions = 0
                 for source_case_id, new_case_id in case_map.items():
                     rev_rows = sorted(rev_by_case.get(source_case_id, []),
                                       key=lambda x: int(x.get("revision") or 0))
@@ -632,107 +808,195 @@ class KBService:
                             prev_hash=prev_hash)
                         prev_hash = result["entry_hash"]
                         restored_revisions += 1
-            # 文档版本历史按原始 payload 恢复；案例 ID 映射到新库，避免旧 ID 引用。
-            restored_versions = 0
-            for version in doc_versions:
-                source_doc = str(version.get("doc_id") or "")
-                new_doc = doc_map.get(source_doc)
-                if not new_doc:
-                    continue
-                payload_obj = _json_obj(version.get("payload_json") or "{}")
-                for case in payload_obj.get("cases") or []:
-                    if isinstance(case, dict):
-                        mapped = case_map.get(str(case.get("id") or ""))
+                restored_versions = 0
+                for version in doc_versions:
+                    source_doc = str(version.get("doc_id") or "")
+                    new_doc = doc_map.get(source_doc)
+                    if not new_doc:
+                        continue
+                    payload_obj = _json_obj(version.get("payload_json") or "{}")
+                    for case in payload_obj.get("cases") or []:
+                        if isinstance(case, dict):
+                            mapped = case_map.get(str(case.get("id") or ""))
+                            if mapped:
+                                case["id"] = mapped
+                    conn.execute(
+                        "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,"
+                        "created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                        (_kb_id("V"), new_doc, int(version.get("version") or 1),
+                         json.dumps(payload_obj, ensure_ascii=False),
+                         version.get("sha256") or "", version.get("created_by"),
+                         version.get("created_at") or iso_now()))
+                    restored_versions += 1
+                draft_map: dict[str, str] = {}
+                skipped_drafts = 0
+                for draft in drafts:
+                    source_doc = str(draft.get("doc_id") or "")
+                    if source_doc and source_doc not in doc_map:
+                        skipped_drafts += 1
+                        continue
+                    new_id_ = _kb_id("DR")
+                    draft_map[str(draft.get("id"))] = new_id_
+                    conn.execute(
+                        "INSERT INTO kb_drafts(id,kb_id,job_id,user_id,title,payload_json,confidence,"
+                        "warnings_json,status,reviewed_by,reviewed_at,doc_id,source_sha256,"
+                        "content_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (new_id_, target, "", int(draft.get("user_id") or 0),
+                         draft.get("title") or "", draft.get("payload_json") or "{}",
+                         float(draft.get("confidence") or 0),
+                         draft.get("warnings_json") or "[]", draft.get("status") or "reviewing",
+                         draft.get("reviewed_by"), draft.get("reviewed_at"),
+                         doc_map.get(source_doc, ""), draft.get("source_sha256") or "",
+                         draft.get("content_sha256") or "", draft.get("created_at") or iso_now()))
+                review_map: dict[str, str] = {}
+                skipped_reviews = 0
+                for review in reviews:
+                    ttype = str(review.get("target_type") or "")
+                    target_map = {"doc": doc_map, "case": case_map, "draft": draft_map}.get(ttype, {})
+                    new_target = target_map.get(str(review.get("target_id") or ""))
+                    if not new_target:
+                        skipped_reviews += 1
+                        continue
+                    new_review_id = _kb_id("RV")
+                    review_map[str(review.get("id"))] = new_review_id
+                    conn.execute(
+                        "INSERT INTO kb_reviews(id,kb_id,target_type,target_id,stage,model,"
+                        "prompt_version,content_hash,decision,model_decision,model_score,score,"
+                        "dimensions_json,issues_json,suggested_patch_json,confidence,status,"
+                        "human_decision,human_note,reviewed_by,reviewed_at,applied_patch_json,"
+                        "latency_ms,tokens_in,tokens_out,error,created_at,finished_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (new_review_id, target, ttype, new_target, review.get("stage") or "import",
+                         review.get("model") or "", review.get("prompt_version") or "",
+                         review.get("content_hash") or "", review.get("decision") or "",
+                         review.get("model_decision") or "", float(review.get("model_score") or 0),
+                         float(review.get("score") or 0), review.get("dimensions_json") or "[]",
+                         review.get("issues_json") or "[]", review.get("suggested_patch_json") or "{}",
+                         float(review.get("confidence") or 0), review.get("status") or "queued",
+                         review.get("human_decision") or "", review.get("human_note") or "",
+                         review.get("reviewed_by"), review.get("reviewed_at"),
+                         review.get("applied_patch_json") or "{}", int(review.get("latency_ms") or 0),
+                         int(review.get("tokens_in") or 0), int(review.get("tokens_out") or 0),
+                         review.get("error") or "", review.get("created_at") or iso_now(),
+                         review.get("finished_at")))
+                for case in cases:
+                    source_case = str(case.get("id") or "")
+                    target_case = case_map.get(source_case)
+                    if target_case and case.get("last_review_id"):
+                        mapped = review_map.get(str(case.get("last_review_id")))
                         if mapped:
-                            case["id"] = mapped
-                self.db.execute(
-                    "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,"
-                    "created_by,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (_kb_id("V"), new_doc, int(version.get("version") or 1),
-                     json.dumps(payload_obj, ensure_ascii=False),
-                     version.get("sha256") or "", version.get("created_by"),
-                     version.get("created_at") or iso_now()))
-                restored_versions += 1
-            # 草稿和审核记录在新库中重建；目标 ID 映射到新文档/案例/草稿。
-            draft_map: dict[str, str] = {}
-            for draft in drafts:
-                new_id_ = _kb_id("DR")
-                draft_map[str(draft.get("id"))] = new_id_
-                self.db.execute(
-                    "INSERT INTO kb_drafts(id,kb_id,job_id,user_id,title,payload_json,confidence,"
-                    "warnings_json,status,reviewed_by,reviewed_at,doc_id,source_sha256,"
-                    "content_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (new_id_, target, "", int(draft.get("user_id") or 0),
-                     draft.get("title") or "", draft.get("payload_json") or "{}",
-                     float(draft.get("confidence") or 0),
-                     draft.get("warnings_json") or "[]", draft.get("status") or "reviewing",
-                     draft.get("reviewed_by"), draft.get("reviewed_at"),
-                     doc_map.get(str(draft.get("doc_id") or ""), ""),
-                     draft.get("source_sha256") or "", draft.get("content_sha256") or "",
-                     draft.get("created_at") or iso_now()))
-            review_map: dict[str, str] = {}
-            for review in reviews:
-                ttype = str(review.get("target_type") or "")
-                target_map = {"doc": doc_map, "case": case_map, "draft": draft_map}.get(ttype, {})
-                new_target = target_map.get(str(review.get("target_id") or ""))
-                if not new_target:
-                    continue
-                new_review_id = _kb_id("RV")
-                review_map[str(review.get("id"))] = new_review_id
-                self.db.execute(
-                    "INSERT INTO kb_reviews(id,kb_id,target_type,target_id,stage,model,"
-                    "prompt_version,content_hash,decision,model_decision,model_score,score,"
-                    "dimensions_json,issues_json,suggested_patch_json,confidence,status,"
-                    "human_decision,human_note,reviewed_by,reviewed_at,applied_patch_json,"
-                    "latency_ms,tokens_in,tokens_out,error,created_at,finished_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (new_review_id, target, ttype, new_target, review.get("stage") or "import",
-                     review.get("model") or "", review.get("prompt_version") or "",
-                     review.get("content_hash") or "", review.get("decision") or "",
-                     review.get("model_decision") or "", float(review.get("model_score") or 0),
-                     float(review.get("score") or 0), review.get("dimensions_json") or "[]",
-                     review.get("issues_json") or "[]", review.get("suggested_patch_json") or "{}",
-                     float(review.get("confidence") or 0), review.get("status") or "queued",
-                     review.get("human_decision") or "", review.get("human_note") or "",
-                     review.get("reviewed_by"), review.get("reviewed_at"),
-                     review.get("applied_patch_json") or "{}", int(review.get("latency_ms") or 0),
-                     int(review.get("tokens_in") or 0), int(review.get("tokens_out") or 0),
-                     review.get("error") or "", review.get("created_at") or iso_now(),
-                     review.get("finished_at")))
-            for case in cases:
-                source_case = str(case.get("id") or "")
-                target_case = case_map.get(source_case)
-                if target_case and case.get("last_review_id"):
-                    mapped = review_map.get(str(case.get("last_review_id")))
-                    if mapped:
-                        self.db.execute("UPDATE kb_cases SET last_review_id=? WHERE id=?",
-                                        (mapped, target_case))
-            restored_terms = 0
-            for term in terms:
-                self.db.execute(
-                    "INSERT INTO kb_terms(kb_id,kind,term,aliases_json,weight,enabled,created_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (target, term.get("kind") or "synonym", term.get("term") or "",
-                     term.get("aliases_json") or "[]", float(term.get("weight") or 1),
-                     1 if term.get("enabled", 1) else 0,
-                     term.get("created_at") or iso_now()))
-                restored_terms += 1
+                            conn.execute("UPDATE kb_cases SET last_review_id=? WHERE id=?",
+                                         (mapped, target_case))
+                restored_terms = 0
+                skipped_terms = 0
+                existing_terms = set()
+                for term in conn.execute(
+                        "SELECT kind,term FROM kb_terms WHERE kb_id=?", (target,)).fetchall():
+                    existing_terms.add((str(term["kind"]), str(term["term"])))
+                for term in terms:
+                    kind = str(term.get("kind") or "synonym")
+                    value = str(term.get("term") or "")
+                    if (kind, value) in existing_terms:
+                        skipped_terms += 1
+                        continue
+                    existing_terms.add((kind, value))
+                    conn.execute(
+                        "INSERT INTO kb_terms(kb_id,kind,term,aliases_json,weight,enabled,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (target, kind, value,
+                         term.get("aliases_json") or "[]", float(term.get("weight") or 1),
+                         1 if term.get("enabled", 1) else 0,
+                         term.get("created_at") or iso_now()))
+                    restored_terms += 1
+                job_map: dict[str, str] = {}
+                restored_jobs = 0
+                for job in jobs:
+                    old_id = str(job.get("id") or "")
+                    new_id = _kb_id("J")
+                    job_map[old_id] = new_id
+                    status = str(job.get("status") or "completed")
+                    if status not in {"completed", "partial", "failed", "cancelled",
+                                      "rolled_back"}:
+                        status = "completed"
+                    conn.execute(
+                        "INSERT INTO kb_import_jobs(id,kb_id,user_id,status,mode,options_json,"
+                        "total_files,done_files,failed_files,rollback_supported,stats_json,error,"
+                        "created_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (new_id, target, int(job.get("user_id") or 0), status,
+                         str(job.get("mode") or "review"), job.get("options_json") or "{}",
+                         int(job.get("total_files") or 0), int(job.get("done_files") or 0),
+                         int(job.get("failed_files") or 0),
+                         1 if job.get("rollback_supported", 1) else 0,
+                         job.get("stats_json") or "{}", job.get("error") or "",
+                         job.get("created_at") or iso_now(), job.get("finished_at")))
+                    restored_jobs += 1
+                restored_files = 0
+                missing_files = 0
+                for file_row in files:
+                    old_job = str(file_row.get("job_id") or "")
+                    new_job = job_map.get(old_job)
+                    if not new_job:
+                        continue
+                    backup_path = str(file_row.get("backup_path") or "")
+                    target_path = file_targets.get(backup_path)
+                    present = bool(file_row.get("present", bool(target_path)))
+                    if not present or target_path is None:
+                        missing_files += 1
+                        target_path = None
+                    doc_id = doc_map.get(str(file_row.get("doc_id") or ""), "")
+                    draft_id = draft_map.get(str(file_row.get("draft_id") or ""), "")
+                    doc_ids = [doc_map[x] for x in _json_list(file_row.get("doc_ids_json"))
+                               if x in doc_map]
+                    draft_ids = [draft_map[x] for x in _json_list(file_row.get("draft_ids_json"))
+                                 if x in draft_map]
+                    status = str(file_row.get("status") or "done")
+                    error = str(file_row.get("error") or "")
+                    if target_path is None and status != "failed":
+                        status = "failed"
+                        error = error or "备份中的附件缺失"
+                    conn.execute(
+                        "INSERT INTO kb_import_files(id,job_id,name,rel_path,size,sha256,mime,"
+                        "status,error,doc_id,draft_id,doc_ids_json,draft_ids_json,confidence,"
+                        "stored_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (_kb_id("F"), new_job, file_row.get("name") or "",
+                         file_row.get("rel_path") or "", int(file_row.get("size") or 0),
+                         file_row.get("sha256") or "", file_row.get("mime") or "", status,
+                         error[:300], doc_id, draft_id,
+                         json.dumps(doc_ids, ensure_ascii=False),
+                         json.dumps(draft_ids, ensure_ascii=False),
+                         float(file_row.get("confidence") or 0),
+                         str(target_path) if target_path else ""))
+                    restored_files += 1
             self._mark_dirty()
-            result = {"ok": True, "kb_id": target, "merged": merged,
-                      "documents": restored_docs,
-                      "cases": len(case_map), "drafts": len(draft_map),
-                      "reviews": len(review_map), "revisions": restored_revisions,
-                      "terms": restored_terms, "doc_versions": restored_versions}
-            if trace is not None:
-                trace.append("restore_result", phase="restore", status="success", **result)
-                trace.finish("success")
-            return result
-        except Exception as exc:
-            if trace is not None:
+            result = {
+                "ok": True, "kb_id": target, "merged": merged, "dedupe": bool(dedupe),
+                "documents": restored_docs, "cases": len(case_map),
+                "drafts": len(draft_map), "reviews": len(review_map),
+                "revisions": restored_revisions, "terms": restored_terms,
+                "doc_versions": restored_versions, "import_jobs": restored_jobs,
+                "import_files": restored_files, "files": len(file_targets),
+                "skipped_duplicates": skipped_docs, "skipped_cases": skipped_cases,
+                "skipped_drafts": skipped_drafts, "skipped_reviews": skipped_reviews,
+                "skipped_terms": skipped_terms, "missing_files": missing_files,
+            }
+            if self.traces is not None:
                 try:
-                    trace.finish("error", error_code="restore_failed",
-                                 error_summary=str(exc)[:500])
+                    trace = self.traces.start(
+                        kind="kb", ref_id=str(target), user_id=int(user.get("id") or 0),
+                        meta={"action": "library_restore", "kb_id": target,
+                              "library_name": library_name, "merged": merged})
+                    trace.append("restore", phase="restore", status="running", kb_id=target,
+                                 source_kb_id=int(manifest.get("kb_id") or 0))
+                    trace.append("restore_result", phase="restore", status="success", **result)
+                    trace.finish("success")
                 except Exception:
+                    pass
+            return result
+        except Exception:
+            for path in created_files:
+                try:
+                    path.unlink()
+                except OSError:
                     pass
             raise
 
@@ -951,13 +1215,16 @@ class KBService:
             result["raw_text"] = row.get("raw_text") or ""
         return result
 
-    def get_case(self, case_id: str) -> dict[str, Any]:
+    def get_case(self, case_id: str, user: dict[str, Any] | None = None) -> dict[str, Any]:
         row = self.db.one(
             "SELECT c.*, d.title AS doc_title, d.source_name, d.status AS doc_status "
             "FROM kb_cases c JOIN kb_documents d ON d.id=c.doc_id WHERE c.id=?",
             (case_id,))
         if not row:
             raise KBError("案例不存在", 404, "not_found")
+        if user is not None and user.get("role") != "admin":
+            if int(row.get("kb_id") or 0) not in set(self._visible_library_ids(user)):
+                raise KBError("案例不存在", 404, "not_found")
         return {"case": self._case_public(dict(row)),
                 "doc": {"id": row["doc_id"], "title": row.get("doc_title") or "",
                         "source_name": row.get("source_name") or ""}}
@@ -1674,7 +1941,12 @@ class KBService:
                kb_ids: list[int] | None = None) -> dict[str, Any]:
         if not bool(self.config.get("kb_enabled", True)):
             raise KBError("故障知识库已关闭", 503, "disabled")
-        ids = [int(x) for x in (kb_ids or [kb_id]) if int(x or 0) > 0]
+        raw_ids = [int(x) for x in (kb_ids or [kb_id]) if int(x or 0) > 0]
+        if len(set(raw_ids)) > MAX_CROSS_LIBRARIES:
+            raise KBError(
+                f"一次最多跨 {MAX_CROSS_LIBRARIES} 个知识库检索", 400,
+                "too_many_libraries")
+        ids = list(dict.fromkeys(raw_ids))
         if not ids:
             ids = [1]
         allowed = set(self._visible_library_ids(user))
@@ -2655,7 +2927,28 @@ class KBService:
                          reason: str = "导入建库", record_revision: bool = True,
                          allow_empty_cases: bool = False,
                          case_id_map: dict[str, str] | None = None,
-                         skip_initial_version: bool = False) -> str:
+                         skip_initial_version: bool = False,
+                         conn=None) -> str:
+        if conn is not None:
+            return self._insert_document_conn(
+                conn, payload, user_id, kb_id=kb_id, action=action, actor_type=actor_type,
+                reason=reason, record_revision=record_revision,
+                allow_empty_cases=allow_empty_cases, case_id_map=case_id_map,
+                skip_initial_version=skip_initial_version)
+        with self.db.tx() as own:
+            return self._insert_document_conn(
+                own, payload, user_id, kb_id=kb_id, action=action, actor_type=actor_type,
+                reason=reason, record_revision=record_revision,
+                allow_empty_cases=allow_empty_cases, case_id_map=case_id_map,
+                skip_initial_version=skip_initial_version)
+
+    def _insert_document_conn(self, conn, payload: dict[str, Any], user_id: int, *,
+                              kb_id: int = 1, action: str = "import",
+                              actor_type: str = "import", reason: str = "导入建库",
+                              record_revision: bool = True,
+                              allow_empty_cases: bool = False,
+                              case_id_map: dict[str, str] | None = None,
+                              skip_initial_version: bool = False) -> str:
         doc = dict(payload.get("document") or {})
         cases = list(payload.get("cases") or [])
         if not doc or (not cases and not allow_empty_cases):
@@ -2668,41 +2961,42 @@ class KBService:
         boards = _json_list(doc.get("boards"))
         domains = _json_list(doc.get("domains"))
         versions = _json_list(doc.get("versions"))
+        attachments = _json_list(doc.get("attachments") or doc.get("attachments_json"))
         quality = max([float(c.get("quality") or 0) for c in cases] or [0])
         version_cases: list[dict[str, Any]] = []
-        with self.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO kb_documents(id,kb_id,title,title_clean,doc_type,source_type,"
+            "source_name,source_sha256,content_sha256,status,quality,confidence,pii_masked,boards_json,"
+            "domains_json,versions_json,tags_json,raw_text,masked_text,attachments_json,"
+            "created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (doc_id, int(kb_id), str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
+             str(doc.get("doc_type") or "fault"), str(doc.get("source_type") or "paste"),
+             str(doc.get("source_name") or ""), str(doc.get("source_sha256") or ""),
+             content_hash,
+             str(doc.get("status") or "active"), quality, float(doc.get("confidence") or 0.9),
+             1 if doc.get("pii_masked", True) else 0,
+             json.dumps(boards, ensure_ascii=False),
+             json.dumps(domains, ensure_ascii=False),
+             json.dumps(versions, ensure_ascii=False),
+             json.dumps(_json_list(doc.get("tags")), ensure_ascii=False), raw, masked,
+             json.dumps(attachments, ensure_ascii=False),
+             user_id, now, now))
+        for ordinal, case in enumerate(cases, start=1):
+            _, version_case = self._insert_case_row(
+                conn, doc_id, case, doc, ordinal, now, user_id, kb_id=kb_id,
+                action=action, actor_type=actor_type, reason=reason,
+                record_revision=record_revision)
+            if case_id_map is not None and case.get("id"):
+                case_id_map[str(case["id"])] = str(version_case["id"])
+            version_cases.append(version_case)
+        if not skip_initial_version:
+            version_payload = {"document": doc, "cases": version_cases}
             conn.execute(
-                "INSERT INTO kb_documents(id,kb_id,title,title_clean,doc_type,source_type,"
-                "source_name,source_sha256,content_sha256,status,quality,confidence,pii_masked,boards_json,"
-                "domains_json,versions_json,tags_json,raw_text,masked_text,attachments_json,"
-                "created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (doc_id, int(kb_id), str(doc.get("title") or ""), str(doc.get("title_clean") or ""),
-                 str(doc.get("doc_type") or "fault"), str(doc.get("source_type") or "paste"),
-                 str(doc.get("source_name") or ""), str(doc.get("source_sha256") or ""),
-                 content_hash,
-                 str(doc.get("status") or "active"), quality, float(doc.get("confidence") or 0.9),
-                 1 if doc.get("pii_masked", True) else 0,
-                 json.dumps(boards, ensure_ascii=False),
-                 json.dumps(domains, ensure_ascii=False),
-                 json.dumps(versions, ensure_ascii=False),
-                 json.dumps(_json_list(doc.get("tags")), ensure_ascii=False), raw, masked, "[]",
-                 user_id, now, now))
-            for ordinal, case in enumerate(cases, start=1):
-                _, version_case = self._insert_case_row(
-                    conn, doc_id, case, doc, ordinal, now, user_id, kb_id=kb_id,
-                    action=action, actor_type=actor_type, reason=reason,
-                    record_revision=record_revision)
-                if case_id_map is not None and case.get("id"):
-                    case_id_map[str(case["id"])] = str(version_case["id"])
-                version_cases.append(version_case)
-            if not skip_initial_version:
-                version_payload = {"document": doc, "cases": version_cases}
-                conn.execute(
-                    "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
-                    "created_at) VALUES(?,?,?,?,?,?,?)",
-                    (_kb_id("V"), doc_id, 1,
-                     json.dumps(version_payload, ensure_ascii=False),
-                     hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
+                "INSERT INTO kb_doc_versions(id,doc_id,version,payload_json,sha256,created_by,"
+                "created_at) VALUES(?,?,?,?,?,?,?)",
+                (_kb_id("V"), doc_id, 1,
+                 json.dumps(version_payload, ensure_ascii=False),
+                 hashlib.sha256(raw.encode("utf-8")).hexdigest(), user_id, now))
         return doc_id
 
     def _replace_document(self, doc_id: str, payload: dict[str, Any], user_id: int, *,

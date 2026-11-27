@@ -80,7 +80,7 @@ from .netguard import OutboundPolicyError, endpoint_target
 from .notifications import create_notification, notification_public
 from .httpd import HTTPError, Router, response_file, response_json
 from .learning import LearningService
-from .kb_service import KBService
+from .kb_service import KBService, MAX_BACKUP_TOTAL_BYTES
 from .pipeline import TaskPipeline
 from .review import ReviewService
 from .agent import BoundedAgent
@@ -498,6 +498,8 @@ class App:
         r.add("GET", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)", h_kb_review)
         r.add("POST", r"/api/kb/reviews", h_kb_review_create)
         r.add("POST", r"/api/kb/reviews/run", h_kb_reviews_run)
+        r.add("POST", r"/api/kb/reviews/batch-decision", h_kb_reviews_batch_decision)
+        r.add("POST", r"/api/kb/reviews/batch-retry", h_kb_reviews_batch_retry)
         r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/decision", h_kb_review_decision)
         r.add("POST", r"/api/kb/reviews/(?P<review_id>[A-Za-z0-9_-]+)/retry", h_kb_review_retry)
         r.add("GET", r"/api/mcp/info", h_mcp_info)
@@ -4600,17 +4602,21 @@ def h_kb_library_backup(app: App, req, kb_id: str):
 
 def h_kb_library_restore(app: App, req):
     user = _admin(app, req)
-    fields, uploads = req.parse_multipart(200 * 1024 * 1024, max_file_bytes=100 * 1024 * 1024)
+    limit = MAX_BACKUP_TOTAL_BYTES + 64 * 1024 * 1024
+    fields, uploads = req.parse_multipart(limit, max_file_bytes=limit)
     if not uploads:
         raise HTTPError(400, "请选择备份包")
     upload = uploads[0]
     path = Path(getattr(upload, "path", ""))
     if not path.is_file():
         raise HTTPError(400, "备份包不可读")
+    if path.stat().st_size > limit:
+        raise HTTPError(413, "备份包超过恢复上限")
     try:
         result = app.kb.restore_library(
             user, path.read_bytes(), name=str(fields.get("name") or ""),
-            target_kb_id=_kb_int(fields.get("target_kb_id"), 0) or None)
+            target_kb_id=_kb_int(fields.get("target_kb_id"), 0) or None,
+            dedupe=str(fields.get("dedupe") or "1") not in {"0", "false", "off"})
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
     app.db.audit(user["id"], user["username"], "kb.library_restore",
@@ -4706,7 +4712,7 @@ def h_kb_case_detail(app: App, req, case_id: str):
     row = app.db.one("SELECT kb_id FROM kb_cases WHERE id=?", (case_id,)) or {}
     _kb_require_visible(app, user, row.get("kb_id"))
     try:
-        return response_json(app.kb.get_case(case_id))
+        return response_json(app.kb.get_case(case_id, user))
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
 
@@ -4886,6 +4892,77 @@ def h_kb_reviews_run(app: App, req):
             user, limit=_kb_int(data.get("limit"), 20), kb_id=_kb_id_param(req)))
     except Exception as exc:  # noqa: BLE001
         _kb_raise(exc)
+
+
+def _kb_batch_ids(raw: Any) -> list[str]:
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise HTTPError(400, "ids 必须是数组")
+    ids = []
+    for item in raw:
+        value = str(item or "").strip()
+        if value and value not in ids:
+            ids.append(value)
+    if not ids:
+        raise HTTPError(400, "至少选择一个审核")
+    if len(ids) > 50:
+        raise HTTPError(400, "单批最多处理 50 条审核")
+    return ids
+
+
+def h_kb_reviews_batch_decision(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    ids = _kb_batch_ids(data.get("ids") or data.get("review_ids"))
+    decision = str(data.get("decision") or "").strip()
+    if decision not in {"approve", "reject", "adopt_patch"}:
+        raise HTTPError(400, "终审结论必须是 approve/reject/adopt_patch")
+    note = str(data.get("note") or "")
+    apply_patch = bool(data.get("apply_patch"))
+    results = []
+    done = failed = 0
+    for review_id in ids:
+        try:
+            review = app.kb.decide_review(
+                review_id, user, decision=decision, note=note, apply_patch=apply_patch)
+            results.append({"id": review_id, "ok": True, "review": review})
+            done += 1
+        except Exception as exc:  # noqa: BLE001
+            results.append({"id": review_id, "ok": False, "status": int(
+                getattr(exc, "status", 400)), "error": str(exc)})
+            failed += 1
+    app.db.audit(user["id"], user["username"], "kb.review_batch_decision", ",".join(ids[:50]),
+                 {"decision": decision, "done": done, "failed": failed}, req.ip)
+    return response_json({"ok": failed == 0, "processed": len(ids), "done": done,
+                          "failed": failed, "results": results})
+
+
+def h_kb_reviews_batch_retry(app: App, req):
+    user = _admin(app, req)
+    data = req.json()
+    ids = _kb_batch_ids(data.get("ids") or data.get("review_ids"))
+    results = []
+    done = failed = 0
+    for review_id in ids:
+        try:
+            review = app.kb.run_review(review_id, user)
+            if str(review.get("status") or "") == "failed":
+                results.append({"id": review_id, "ok": False, "status": 502,
+                                "error": str(review.get("error") or "审核失败"),
+                                "review": review})
+                failed += 1
+            else:
+                results.append({"id": review_id, "ok": True, "review": review})
+                done += 1
+        except Exception as exc:  # noqa: BLE001
+            results.append({"id": review_id, "ok": False, "status": int(
+                getattr(exc, "status", 400)), "error": str(exc)})
+            failed += 1
+    app.db.audit(user["id"], user["username"], "kb.review_batch_retry", ",".join(ids[:50]),
+                 {"done": done, "failed": failed}, req.ip)
+    return response_json({"ok": failed == 0, "processed": len(ids), "done": done,
+                          "failed": failed, "results": results})
 
 
 def h_kb_review_decision(app: App, req, review_id: str):

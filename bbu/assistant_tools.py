@@ -598,7 +598,7 @@ class ToolRegistry:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", case_id):
             raise ToolError("案例 ID 格式非法")
         try:
-            data = self.fault_kb.get_case(case_id)
+            data = self.fault_kb.get_case(case_id, ctx.user)
         except Exception as exc:
             raise ToolError(str(exc), getattr(exc, "status", 404))
         return {"case": data["case"], "doc": data["doc"],

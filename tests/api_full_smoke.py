@@ -248,6 +248,8 @@ EXPECTED_ROUTES = {
     "GET /api/kb/reviews/{review_id}",
     "POST /api/kb/reviews",
     "POST /api/kb/reviews/run",
+    "POST /api/kb/reviews/batch-decision",
+    "POST /api/kb/reviews/batch-retry",
     "POST /api/kb/reviews/{review_id}/decision",
     "POST /api/kb/reviews/{review_id}/retry",
     "GET /api/kb/search",
@@ -1678,11 +1680,23 @@ def main() -> int:
         hit("GET /api/kb/reviews")
         admin_client.json("GET", f"/api/kb/reviews/{review_id}")
         hit("GET /api/kb/reviews/{review_id}")
+        _, batch_retry = admin_client.json("POST", "/api/kb/reviews/batch-retry",
+                                         {"ids": [review_id]})
+        assert batch_retry["processed"] == 1
+        hit("POST /api/kb/reviews/batch-retry")
         admin_client.json("POST", f"/api/kb/reviews/{review_id}/retry", {})
         hit("POST /api/kb/reviews/{review_id}/retry")
         admin_client.json("POST", f"/api/kb/reviews/{review_id}/decision",
                           {"decision": "reject", "note": "api-smoke 终审"})
         hit("POST /api/kb/reviews/{review_id}/decision")
+        _, review2 = admin_client.json("POST", "/api/kb/reviews", {
+            "target_type": "case", "target_id": case_created_id, "stage": "manual", "run": False,
+        }, expected=201)
+        _, batch_decision = admin_client.json("POST", "/api/kb/reviews/batch-decision",
+                                              {"ids": [review2["review"]["id"]],
+                                               "decision": "reject", "note": "api-smoke 批量"})
+        assert batch_decision["processed"] == 1
+        hit("POST /api/kb/reviews/batch-decision")
         admin_client.json("POST", "/api/kb/reviews/run", {"limit": 5})
         hit("POST /api/kb/reviews/run")
         admin_client.json("POST", f"/api/kb/cases/{case_created_id}/status",

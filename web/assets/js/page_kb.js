@@ -701,40 +701,40 @@ function bindKbTabActions(view) {
     'review-bulk-reject': async (el) => {
       const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
       if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      if (ids.length > 50) { toast('单批最多处理 50 条审核', 'error'); return; }
       const note = prompt('批量驳回原因（可留空）');
       if (note === null) return;
       setBusy(el, true, '批量驳回中…');
-      let ok = 0; let failed = 0;
-      for (const id of ids) {
-        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`, { method: 'POST', body: { decision: 'reject', note } }); ok += 1; }
-        catch { failed += 1; }
-      }
-      toast(`已驳回 ${ok} 条${failed ? `，${failed} 条失败` : ''}`, failed ? 'error' : 'ok');
+      try {
+        const res = await api('/api/kb/reviews/batch-decision', { method: 'POST', body: { ids, decision: 'reject', note } });
+        toast(`已驳回 ${res.done} 条${res.failed ? `，${res.failed} 条失败` : ''}`, res.failed ? 'error' : 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      setBusy(el, false);
       renderKbDocs();
     },
     'review-bulk-retry': async (el) => {
       const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
       if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      if (ids.length > 50) { toast('单批最多处理 50 条审核', 'error'); return; }
       setBusy(el, true, '批量重试中…');
-      let ok = 0; let failed = 0;
-      for (const id of ids) {
-        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} }); ok += 1; }
-        catch { failed += 1; }
-      }
-      toast(`已重试 ${ok} 条${failed ? `，${failed} 条失败` : ''}`, failed ? 'error' : 'ok');
+      try {
+        const res = await api('/api/kb/reviews/batch-retry', { method: 'POST', body: { ids } });
+        toast(`已重试 ${res.done} 条${res.failed ? `，${res.failed} 条失败` : ''}`, res.failed ? 'error' : 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      setBusy(el, false);
       renderKbDocs();
     },
     'review-bulk-approve': async (el) => {
       const ids = [...view.querySelectorAll('.kb-review-check:checked:not(:disabled)')].map((x) => x.value);
       if (!ids.length) { toast('请先勾选审核记录', 'error'); return; }
+      if (ids.length > 50) { toast('单批最多处理 50 条审核', 'error'); return; }
       if (!(await confirmDialog(`批量通过 ${ids.length} 条审核？存在 blocker 的记录会被拒绝。`))) return;
       setBusy(el, true, '批量通过中…');
-      let ok = 0; let failed = 0;
-      for (const id of ids) {
-        try { await api(`/api/kb/reviews/${encodeURIComponent(id)}/decision`, { method: 'POST', body: { decision: 'approve', note: '批量通过' } }); ok += 1; }
-        catch { failed += 1; }
-      }
-      toast(`已通过 ${ok} 条${failed ? `，${failed} 条被拦截或失败` : ''}`, failed ? 'error' : 'ok');
+      try {
+        const res = await api('/api/kb/reviews/batch-decision', { method: 'POST', body: { ids, decision: 'approve', note: '批量通过' } });
+        toast(`已通过 ${res.done} 条${res.failed ? `，${res.failed} 条被拦截或失败` : ''}`, res.failed ? 'error' : 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      setBusy(el, false);
       renderKbDocs();
     },
     'draft-reject': async (el) => {
@@ -1101,7 +1101,7 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
     return;
   }
   if (tab === 'terms') {
-    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>术语与词典</h2><span class="sub">当前从已入库标签抽取；同义词/停用词编辑将在 1.31.0 开放</span></div>
+    view.innerHTML = `${header}<div class="card"><div class="card-head"><h2>术语与词典</h2><span class="sub">当前从已入库标签抽取；同义词/停用词编辑将在后续版本开放</span></div>
       <div class="card-body"><div class="kb-subhead">板卡</div><div class="kb-matrix">${(facets.boards || []).map((x) => `<span class="badge info">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div>
       <div class="kb-subhead">领域</div><div class="kb-matrix">${(facets.domains || []).map((x) => `<span class="badge">${esc(x.value)} · ${x.count}</span>`).join('') || '<span class="muted tiny">暂无</span>'}</div></div></div>`;
     return;
@@ -1113,7 +1113,7 @@ async function renderKbTab(tab, view, status, facets, kbId = 1) {
         <div class="card stat"><div><div class="stat-val">3.5 ms</div><div class="stat-label">平均检索</div><div class="stat-note">P95 3.7 ms</div></div></div>
         <div class="card stat"><div><div class="stat-val">2/2</div><div class="stat-label">库外拒答</div><div class="stat-note">不生成推测根因</div></div></div>
         <div class="card stat"><div><div class="stat-val">${stats.coverage.duplicate_candidates.length}</div><div class="stat-label">近重复候选</div><div class="stat-note">标题归一化后重复</div></div></div>
-      </div><div class="alert info" style="margin-top:12px">${icon('info')}<div>评测台、Recall/MRR 页面和专家金标准导入在 1.31.0 开放；当前报告见 docs/故障知识库评测报告-1.30.0.md。</div></div></div></div>`;
+      </div><div class="alert info" style="margin-top:12px">${icon('info')}<div>评测台、Recall/MRR 页面和专家金标准导入在后续版本开放；当前报告见 docs/故障知识库评测报告-1.30.0.md。</div></div></div></div>`;
     return;
   }
   if (tab === 'settings') {

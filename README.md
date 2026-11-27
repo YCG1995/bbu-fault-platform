@@ -22,6 +22,19 @@
 - **统一工作目录与精简迁移**：管理员可在网页把运行数据根切换到独立磁盘；导出 ChaCha20-Poly1305 加密迁移包（不含原始上传、案例输入和解压目录），在新实例覆盖恢复。Linux 由 root/systemd 助手自动停服切换，Windows 重启前激活。
 - **离线部署**：提供 `deploy/install_offline.sh`、systemd 单元、离线 release 打包与备份脚本；服务器无需 pip/npm。
 
+## 1.32.0 知识库灾备 v3 与恢复一致性
+
+1.32.0 是第一波收口：备份 v3 把原始上传附件、导入任务和文件行一起打包；恢复改为单事务，失败不留下半个新库；合并恢复默认按来源/内容 SHA 跳过重复；跨库检索在服务端强制最多 5 库；批量审核改为服务端一次请求；助手读取案例时按当前用户校验知识库可见性。schema 保持 26，REST 220→222。
+
+- **备份 v3**：`manifest.version=3`，新增 `import_jobs.jsonl`、`import_files.jsonl`、`files/<sha256>`、附件计数与 `files_checksum`；v2 包仍可恢复。
+- **恢复一致性**：新库/文档/案例/修订/版本/草稿/审核/术语/导入任务/附件行同一事务提交；中途失败整体回滚。
+- **合并去重**：默认 `skip`，返回 `skipped_duplicates` / `skipped_cases`，不覆盖已有修订链；可用 `dedupe=0` 强制导入。
+- **服务端边界**：`MAX_CROSS_LIBRARIES=5`；新增 `POST /api/kb/reviews/batch-decision`、`POST /api/kb/reviews/batch-retry`，单批最多 50。
+- **助手可见性**：`get_case(case_id, user)`，非管理员不能读取仅管理员库案例。
+- 验证：**400 passed**、REST **222/222**、真实浏览器知识库 UI smoke 通过。
+
+详见 `docs/版本说明-1.32.0.md`。
+
 ## 1.31.0 知识库多库、审核治理与可回退导入
 
 本版把知识库升级为多知识库、可审核治理、可回退、可追踪的 1.31.0 基线；schema 25→26，REST 211→220，仍为单个 Linux 离线包。
