@@ -301,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
             "Referrer-Policy": "no-referrer",
             "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; "
                                        "style-src 'self' 'unsafe-inline'; script-src 'self'; "
-                                       "connect-src 'self'; frame-src 'self'; object-src 'none'",
+                                       "connect-src 'self' https: http:; frame-src 'self'; object-src 'none'",
         }
 
     def _respond(self, status: int, headers: dict[str, str], body: bytes,

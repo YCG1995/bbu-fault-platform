@@ -96,6 +96,7 @@ function renderHeader(task) {
       </div>
       ${task.error ? `<div class="alert danger" style="margin-top:14px">${icon('alert')}<div><strong>执行失败：</strong>${esc(task.error)}</div></div>` : ''}
       ${task.raw_inputs_available === false ? `<div class="alert warn" style="margin-top:14px">${icon('alert')}<div><strong>原始输入未随迁移包导出：</strong>历史结论、证据和报告可查看，但重跑、案例回流和评测依赖原始日志，已停用；如需重新分析请上传日志新建任务。</div></div>` : ''}
+      ${task.model_status?.browser?.configured ? `<div class="alert info" style="margin-top:14px">${icon('cpu')}<div><strong>浏览器代理模型已启用：</strong>本次 AI 环节可能由你的浏览器执行，请保持本页打开；无在线页面时会自动回退服务端模型。</div></div>` : ''}
       ${modelNoticeHtml(task.model_status?.notice, { compact: true })}
       <div class="progress-track"><div class="progress-fill" style="width:${Math.max(2, Number(task.progress || 0))}%"></div></div>
       <div class="between" style="margin-top:7px">

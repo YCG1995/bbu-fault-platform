@@ -606,6 +606,7 @@ function renderDetail(draft, caseData = {}, models = [], recipes = []) {
       <div class="tabs workshop-tabs" role="tablist">
         ${stepButton(1, '资料输入')}${stepButton(2, '故障解析')}${stepButton(3, '规则确认')}${stepButton(4, '案例验证')}${stepButton(5, '构建发布')}
       </div>
+      ${(models || []).some((m) => m.transport === 'browser') ? `<div class="alert info" style="margin-bottom:10px">${icon('cpu')}<div>本次 AI 环节可能由你的浏览器执行，请保持本页打开；浏览器不在线时会自动回退服务端模型。</div></div>` : ''}
       <div id="job-status" class="alert info" ${activeJob ? '' : 'hidden'}>${activeJob ? `${icon('activity')}<div>${esc(activeJob.message || '后台任务执行中')} · ${Number(activeJob.progress || 0)}%</div>` : ''}</div>
       ${(draft.jobs || []).length ? `<details style="margin-bottom:10px"><summary class="small muted">后台任务详情（${draft.jobs.length}）</summary>
         <div class="table-wrap"><table class="data"><thead><tr><th>类型</th><th>状态</th><th>阶段</th><th>进度</th><th>更新时间</th><th>错误</th>${isAdmin ? '<th>过程</th>' : ''}</tr></thead><tbody>

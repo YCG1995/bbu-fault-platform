@@ -25,6 +25,13 @@ from typing import Any, Callable
 
 from .db import Database
 from .model_capabilities import ModelCapabilityStore, endpoint_key
+from .relay import (
+    RelayAbsentError,
+    RelayExecError,
+    RelayError,
+    RelaySpec,
+    build_auth,
+)
 from .netguard import (
     OutboundContentTypeError,
     OutboundPolicy,
@@ -46,13 +53,15 @@ class AIError(RuntimeError):
 
     def __init__(self, message: str, *, http_status: int = 0,
                  response_body: str = "", retryable: bool = True,
-                 circuit_break: bool = True, retry_after: float = 0.0) -> None:
+                 circuit_break: bool = True, retry_after: float = 0.0,
+                 kind: str = "") -> None:
         super().__init__(message)
         self.http_status = int(http_status or 0)
         self.response_body = str(response_body or "")
         self.retryable = bool(retryable)
         self.circuit_break = bool(circuit_break)
         self.retry_after = max(0.0, float(retry_after or 0))
+        self.kind = str(kind or "")
 
 
 def parse_retry_after(value: Any) -> float:
@@ -521,10 +530,12 @@ class EndpointLimiter:
 class AIGateway:
     def __init__(self, db: Database, config: Any,
                  on_event: Callable[[str, str, dict], None] | None = None,
-                 secret_box: Any | None = None) -> None:
+                 secret_box: Any | None = None,
+                 relay: Any | None = None) -> None:
         self.db = db
         self.config = config
         self.on_event = on_event
+        self.relay = relay
         self.on_usage: Callable[[dict[str, Any]], None] | None = None
         self.breaker = CircuitBreaker()
         self.schema_breaker = CircuitBreaker(
@@ -618,6 +629,7 @@ class AIGateway:
             "error": str(item.get("error") or ""),
             "endpoint_host": host,
             "endpoint_path": path[:300],
+            "transport": str(model.get("transport") or "server"),
         }
         try:
             self.on_usage(event)
@@ -638,6 +650,9 @@ class AIGateway:
                 row["extra"] = json.loads(row.get("extra") or "{}")
             except json.JSONDecodeError:
                 row["extra"] = {}
+            row["transport"] = str((row.get("extra") or {}).get("transport") or "server")
+            if row["transport"] not in ("server", "browser"):
+                row["transport"] = "server"
             if self.secret_box and row.get("api_key"):
                 try:
                     row["api_key"] = self.secret_box.decrypt(row["api_key"])
@@ -652,6 +667,9 @@ class AIGateway:
             row["private_allowlist"] = (
                 self.config.get("model_private_allowlist", "")
                 if self.config is not None else "")
+            row["_relay_max_bytes"] = (
+                int(self.config.get("relay_max_response_bytes", 1048576))
+                if self.config is not None else 1048576)
         return rows
 
     def _personal_model(self, user_id: int | None = None) -> dict[str, Any] | None:
@@ -669,6 +687,7 @@ class AIGateway:
             "name": f"个人 MaaS（{row.get('username') or uid}）",
             "roles": ["default", "planner", "router", "arbiter", "writer", "workshop", "assistant"],
             "extra": {},
+            "transport": "server",
             "source": "personal",
             "personal": True,
             "allow_private": (
@@ -688,7 +707,29 @@ class AIGateway:
 
     def _models(self, user_id: int | None = None) -> list[dict[str, Any]]:
         personal = self._personal_model(user_id)
-        return ([personal] if personal else []) + self._global_models()
+        rows = ([personal] if personal else []) + self._global_models()
+        uid = self._uid(user_id)
+        return [m for m in rows if self._usable_here(m, uid)]
+
+    def _usable_here(self, model: dict[str, Any], user_id: int | None = None) -> bool:
+        """浏览器模型只在有在线窗口且角色被允许时参与调度。
+
+        离线窗口不是端点故障，所以这里直接剔除，不写失败计数，也不让
+        任务把 10 秒浪费在必然失败的等待上。
+        """
+        if str(model.get("transport") or "server") != "browser":
+            return True
+        if self.relay is None:
+            return False
+        enabled = getattr(self.relay, "enabled", False)
+        if not enabled:
+            return False
+        try:
+            if not self.relay.online(self._uid(user_id)):
+                return False
+            return bool(self.relay.role_allowed(model, self._uid(user_id)))
+        except Exception:
+            return False
 
     @staticmethod
     def _model_breaker_key(model: dict[str, Any]) -> str:
@@ -708,16 +749,19 @@ class AIGateway:
         """
         if len(rows) <= 1:
             return list(rows)
-        grouped: dict[int, list[dict[str, Any]]] = {}
+        grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
         for model in rows:
             try:
                 priority = int(model.get("priority") or 0)
             except (TypeError, ValueError):
                 priority = 0
-            grouped.setdefault(priority, []).append(model)
+            # 同 priority 内服务端模型先于浏览器模型，避免用户无感地把
+            # 任务压到自己的标签页上。浏览器模型之间仍按同档轮转。
+            transport_rank = 1 if str(model.get("transport") or "server") == "browser" else 0
+            grouped.setdefault((priority, transport_rank), []).append(model)
         ordered: list[dict[str, Any]] = []
-        for priority in sorted(grouped):
-            items = grouped[priority]
+        for priority_key in sorted(grouped):
+            items = grouped[priority_key]
             if len(items) == 1:
                 ordered.extend(items)
                 continue
@@ -793,7 +837,10 @@ class AIGateway:
         global_rows = [m for m in globals_
                        if not m.get("roles") or "default" in m.get("roles")]
         global_ok = [m for m in global_rows
-                     if not m.get("key_error") and not self._model_skipped(m)]
+                     if not m.get("key_error") and not self._model_skipped(m)
+                     and self._usable_here(m, uid)]
+        browser_rows = [m for m in global_rows if m.get("transport") == "browser"]
+        browser_online = bool(self.relay and self.relay.online(uid)) if self.relay else False
         usable = personal_ok or bool(global_ok)
         url = str(self.config.get("personal_api_key_url") or "")
         notice = None
@@ -825,7 +872,14 @@ class AIGateway:
                 "available": bool(global_ok),
                 "count": len(global_rows),
                 "models": [{"name": m.get("name"), "model": m.get("model"),
-                            "provider": m.get("provider")} for m in global_rows[:5]],
+                            "provider": m.get("provider"),
+                            "transport": m.get("transport") or "server"}
+                           for m in global_rows[:5]],
+            },
+            "browser": {
+                "configured": bool(browser_rows),
+                "online": browser_online,
+                "count": len(browser_rows),
             },
             "usable": usable,
             "source": "personal" if personal_ok else ("admin" if global_ok else ""),
@@ -891,6 +945,11 @@ class AIGateway:
                 "max_output": int(extra.get("max_output") or model.get("max_tokens") or 4096),
                 "max_output_declared": bool(extra.get("max_output")),
                 "degraded": False, "probe_error": ""}
+        if str(extra.get("transport") or model.get("transport") or "server") == "browser":
+            # 浏览器代理模型不能由服务端直连探测；能力按网关默认值处理，
+            # 真正的 400/response_format 降级仍在浏览器回传后按原逻辑触发。
+            base.update({"json_mode": True, "degraded": False, "probe_error": ""})
+            return base
         if provider == "anthropic":
             return base
         if provider != "openai":
@@ -1292,11 +1351,13 @@ class AIGateway:
         started = time.time()
         stream_used = False
         if provider == "openai":
-            text, usage, stream_used = _call_openai(model, system, user, json_schema,
-                                                    max_tokens, temperature, stream)
+            text, usage, stream_used = _call_openai(
+                model, system, user, json_schema, max_tokens, temperature, stream,
+                relay=self.relay, user_id=self._uid(), purpose=purpose)
         elif provider == "anthropic":
-            text, usage = _call_anthropic(model, system, user, json_schema,
-                                          max_tokens, temperature)
+            text, usage = _call_anthropic(
+                model, system, user, json_schema, max_tokens, temperature,
+                relay=self.relay, user_id=self._uid(), purpose=purpose)
         elif provider == "mock":
             text, usage = _call_mock(model, system, user, json_schema, purpose)
         else:
@@ -1314,6 +1375,9 @@ class AIGateway:
 
     # ---------- 连通性测试 ----------
     def test_model(self, model: dict[str, Any]) -> dict[str, Any]:
+        if str(model.get("transport") or (model.get("extra") or {}).get("transport")) == "browser":
+            return {"ok": False, "kind": "relay_test_required",
+                    "error": "浏览器代理模型请使用模型列表中的“浏览器内自检”"}
         try:
             result = self._call(model, "你是连通性测试助手。", "只回复 OK 两个字母。",
                                 None, 32, 0.0, "test")
@@ -1332,6 +1396,172 @@ def _headers_extra(model: dict[str, Any]) -> dict[str, str]:
     extra = model.get("extra") or {}
     headers = extra.get("headers") if isinstance(extra.get("headers"), dict) else {}
     return {str(k): str(v) for k, v in headers.items()}
+
+
+def model_transport(model: dict[str, Any]) -> str:
+    value = model.get("transport")
+    if value is None:
+        value = (model.get("extra") or {}).get("transport")
+    return str(value or "server")
+
+
+def browser_relay_config(model: dict[str, Any]) -> dict[str, Any]:
+    extra = model.get("extra") or {}
+    cfg = extra.get("browser_relay") if isinstance(extra.get("browser_relay"), dict) else {}
+    return dict(cfg or {})
+
+
+def browser_relay_timeouts(model: dict[str, Any]) -> tuple[int, int]:
+    """返回 (认领超时, 执行超时)，按计划约束夹到 5–60 / 30–120。"""
+    cfg = browser_relay_config(model)
+    try:
+        claim = int(cfg.get("claim_timeout_sec") or 10)
+    except (TypeError, ValueError):
+        claim = 10
+    try:
+        exec_ = int(cfg.get("exec_timeout_sec") or 90)
+    except (TypeError, ValueError):
+        exec_ = 90
+    return max(5, min(60, claim)), max(30, min(120, exec_))
+
+
+def build_browser_relay_spec(model: dict[str, Any], url: str, payload: dict[str, Any],
+                             headers: dict[str, str], *,
+                             max_bytes: int = 1048576,
+                             timeout_sec: int | None = None) -> RelaySpec:
+    """构造浏览器只执行、不拼装的请求；Key 永远只放在 auth.value。"""
+    clean_headers, auth = build_auth(headers)
+    _, exec_timeout = browser_relay_timeouts(model)
+    return RelaySpec(
+        url=str(url), method="POST", headers=clean_headers,
+        body=json.dumps(payload, ensure_ascii=False),
+        auth=auth, timeout_sec=int(timeout_sec or exec_timeout),
+        max_bytes=max(1024, int(max_bytes or 1048576)))
+
+
+def _post_relay_json(relay: Any, user_id: int, model: dict[str, Any], url: str,
+                     payload: dict[str, Any], headers: dict[str, str],
+                     purpose: str) -> tuple[dict[str, Any], int]:
+    """把服务端已经构造好的 JSON 请求交给浏览器执行并解析原始响应。"""
+    if relay is None:
+        raise AIError("浏览器代理未初始化", kind="relay_absent", retryable=False,
+                      circuit_break=False)
+    spec = build_browser_relay_spec(
+        model, url, payload, headers,
+        max_bytes=int(model.get("_relay_max_bytes") or 1048576))
+    claim_timeout, exec_timeout = browser_relay_timeouts(model)
+    try:
+        result = relay.submit(user_id, model, spec, purpose=purpose,
+                              claim_timeout=claim_timeout, exec_timeout=exec_timeout)
+    except RelayAbsentError as exc:
+        raise AIError(str(exc), kind="relay_absent", retryable=False,
+                      circuit_break=False) from exc
+    except RelayExecError as exc:
+        raise AIError(str(exc), kind="relay_exec_failed",
+                      http_status=int(getattr(exc, "http_status", 0) or 0),
+                      retryable=False, circuit_break=False) from exc
+    except RelayError as exc:
+        raise AIError(str(exc), kind=getattr(exc, "kind", "relay_absent"),
+                      http_status=int(getattr(exc, "http_status", 0) or 0),
+                      retryable=False, circuit_break=False) from exc
+    status = int(result.status or 0)
+    raw_text = str(result.text or "")
+    if status >= 400 or not (200 <= status < 300):
+        raise AIError(f"HTTP {status}: {raw_text[:500]}", http_status=status,
+                      response_body=raw_text[:4000],
+                      retryable=status >= 500 or status == 429)
+    try:
+        return json.loads(raw_text), status
+    except json.JSONDecodeError as exc:
+        raise AIError(f"响应不是合法 JSON: {exc}", response_body=raw_text[:2000],
+                      retryable=False) from exc
+
+
+def _openai_models_url(base: str) -> str:
+    base = (base or "https://api.openai.com/v1").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base[:-len("/chat/completions")] + "/models"
+    if base.endswith("/models"):
+        return base
+    return base + "/models"
+
+
+def browser_models_spec(model: dict[str, Any]) -> RelaySpec:
+    """浏览器执行“获取模型”的 GET 请求，服务端只解析结果。"""
+    provider = str(model.get("provider") or "openai")
+    if provider == "anthropic":
+        base = str(model.get("base_url") or "https://api.anthropic.com").rstrip("/")
+        if base.endswith("/messages"):
+            base = base[:-len("/messages")]
+        url = base + ("/models" if base.endswith("/v1") else "/v1/models")
+        headers = {"x-api-key": str(model.get("api_key") or ""),
+                   "anthropic-version": str((model.get("extra") or {}).get("anthropic_version")
+                                            or "2023-06-01")}
+    else:
+        url = _openai_models_url(str(model.get("base_url") or ""))
+        headers = {"Authorization": f"Bearer {model.get('api_key') or ''}"}
+    headers.update(_headers_extra(model))
+    clean, auth = build_auth(headers)
+    return RelaySpec(url=url, method="GET", headers=clean, body="", auth=auth,
+                     timeout_sec=browser_relay_timeouts(model)[1],
+                     max_bytes=int(model.get("_relay_max_bytes") or 1048576))
+
+
+def browser_test_spec(model: dict[str, Any]) -> RelaySpec:
+    """管理员“浏览器内自检”的最小推理请求。"""
+    provider = str(model.get("provider") or "openai")
+    if provider == "anthropic":
+        url = _anthropic_url(model["base_url"])
+        payload = {"model": model["model"], "max_tokens": 32, "temperature": 0,
+                   "messages": [{"role": "user", "content": "只回复 OK 两个字母。"}]}
+        headers = {"x-api-key": str(model.get("api_key") or ""),
+                   "anthropic-version": str((model.get("extra") or {}).get("anthropic_version")
+                                            or "2023-06-01")}
+    else:
+        url = _openai_url(model["base_url"])
+        payload = {"model": model["model"], "max_tokens": 32, "temperature": 0,
+                   "stream": False,
+                   "messages": [{"role": "user", "content": "只回复 OK 两个字母。"}]}
+        headers = {"Authorization": f"Bearer {model.get('api_key') or ''}"}
+    headers.update(_headers_extra(model))
+    return build_browser_relay_spec(
+        model, url, payload, headers,
+        max_bytes=int(model.get("_relay_max_bytes") or 1048576))
+
+
+def parse_model_names(data: Any, provider: str = "openai") -> list[str]:
+    items = data.get("data") if isinstance(data, dict) else data
+    if isinstance(data, dict) and not isinstance(items, list):
+        items = data.get("models")
+    if not isinstance(items, list):
+        raise ValueError("模型列表响应缺少 data 数组")
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            name = item.get("id") or item.get("name") or item.get("model")
+        else:
+            name = ""
+        if name and str(name) not in names:
+            names.append(str(name))
+    return names
+
+
+def parse_test_reply(data: Any, provider: str = "openai") -> str:
+    if provider == "anthropic":
+        blocks = data.get("content") if isinstance(data, dict) else []
+        text = "".join(b.get("text", "") for b in blocks
+                       if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        choices = data.get("choices") if isinstance(data, dict) else []
+        text = ""
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            text = message.get("content") if isinstance(message, dict) else ""
+            if not text:
+                text = choices[0].get("text") or ""
+    return str(text or "").strip()[:200]
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
@@ -1599,8 +1829,14 @@ def _post_openai_stream(url: str, payload: dict[str, Any], headers: dict[str, st
 
 def _call_openai(model: dict[str, Any], system: str, user: str,
                  json_schema: dict[str, Any] | None, max_tokens: int | None,
-                 temperature: float | None, stream: bool = False
+                 temperature: float | None, stream: bool = False, *,
+                 relay: Any | None = None, user_id: int = 0,
+                 purpose: str = ""
                  ) -> tuple[str, Usage, bool]:
+    browser = model_transport(model) == "browser"
+    if browser:
+        # 浏览器每次只 fetch 一次，不能把流式响应交给服务端边读边解析。
+        stream = False
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -1620,6 +1856,14 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
     headers = {"Authorization": f"Bearer {model['api_key']}"}
     headers.update(_headers_extra(model))
     url = _openai_url(model["base_url"])
+
+    def post(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if browser:
+            return _post_relay_json(relay, user_id, model, url, body, headers, purpose)
+        return _post_json(
+            url, body, headers, model["timeout_sec"],
+            allow_private=bool(model.get("allow_private", False)),
+            private_allowlist=model.get("private_allowlist") or ())
 
     if stream:
         try:
@@ -1651,27 +1895,18 @@ def _call_openai(model: dict[str, Any], system: str, user: str,
             payload["stream"] = False
 
     try:
-        data, _ = _post_json(
-            url, payload, headers, model["timeout_sec"],
-            allow_private=bool(model.get("allow_private", False)),
-            private_allowlist=model.get("private_allowlist") or ())
+        data, _ = post(payload)
     except AIError as exc:
         # 部分兼容网关不支持原生 json_schema，降级为 json_object 后重试一次。
         if json_schema and "response_format" in str(exc).lower():
             payload["response_format"] = {"type": "json_object"}
             try:
-                data, _ = _post_json(
-            url, payload, headers, model["timeout_sec"],
-            allow_private=bool(model.get("allow_private", False)),
-            private_allowlist=model.get("private_allowlist") or ())
+                data, _ = post(payload)
             except AIError as exc2:
                 if "response_format" not in str(exc2).lower():
                     raise
                 payload.pop("response_format", None)
-                data, _ = _post_json(
-            url, payload, headers, model["timeout_sec"],
-            allow_private=bool(model.get("allow_private", False)),
-            private_allowlist=model.get("private_allowlist") or ())
+                data, _ = post(payload)
         else:
             raise
     text, usage = _parse_openai_payload(data)
@@ -1689,7 +1924,10 @@ def _anthropic_url(base: str) -> str:
 
 def _call_anthropic(model: dict[str, Any], system: str, user: str,
                     json_schema: dict[str, Any] | None, max_tokens: int | None,
-                    temperature: float | None) -> tuple[str, Usage]:
+                    temperature: float | None, *,
+                    relay: Any | None = None, user_id: int = 0,
+                    purpose: str = "") -> tuple[str, Usage]:
+    browser = model_transport(model) == "browser"
     if json_schema:
         user = user + "\n\n只输出严格符合要求的 JSON，不要任何解释或 Markdown 代码块标记。"
     payload: dict[str, Any] = {
@@ -1705,10 +1943,14 @@ def _call_anthropic(model: dict[str, Any], system: str, user: str,
         "anthropic-version": str((model.get("extra") or {}).get("anthropic_version") or "2023-06-01"),
     }
     headers.update(_headers_extra(model))
-    data, _ = _post_json(
-        _anthropic_url(model["base_url"]), payload, headers, model["timeout_sec"],
-        allow_private=bool(model.get("allow_private", False)),
-        private_allowlist=model.get("private_allowlist") or ())
+    url = _anthropic_url(model["base_url"])
+    if browser:
+        data, _ = _post_relay_json(relay, user_id, model, url, payload, headers, purpose)
+    else:
+        data, _ = _post_json(
+            url, payload, headers, model["timeout_sec"],
+            allow_private=bool(model.get("allow_private", False)),
+            private_allowlist=model.get("private_allowlist") or ())
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
     if not text:

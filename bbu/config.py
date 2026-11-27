@@ -123,6 +123,14 @@ DEFAULTS: dict[str, Any] = {
     "trace_retention_days": 90,
     "trace_max_event_mb": 4,
     "trace_max_run_mb": 64,
+    "relay_enabled": True,
+    "relay_lease_ttl_sec": 120,
+    "relay_status_poll_sec": 5,
+    "relay_max_windows_per_user": 2,
+    "relay_max_response_bytes": 1048576,
+    "relay_allow_insecure_http": False,
+    "relay_claim_timeout_sec": 10,
+    "relay_exec_timeout_sec": 90,
 }
 
 # 环境变量覆盖（部署时不必改 config.json）
@@ -248,6 +256,22 @@ RUNTIME_SETTINGS: dict[str, dict[str, Any]] = {
     "trace_retention_days": {"label": "轨迹保留天数", "group": "执行轨迹", "min": 1, "max": 3650},
     "trace_max_event_mb": {"label": "单事件体积上限（MB）", "group": "执行轨迹", "min": 1, "max": 64},
     "trace_max_run_mb": {"label": "单轨迹体积上限（MB）", "group": "执行轨迹", "min": 1, "max": 512},
+    "relay_enabled": {"label": "启用浏览器代理模型", "group": "浏览器代理",
+                      "restart_required": False},
+    "relay_lease_ttl_sec": {"label": "浏览器窗口租约 TTL（秒）", "group": "浏览器代理",
+                            "min": 10, "max": 3600},
+    "relay_status_poll_sec": {"label": "浏览器心跳间隔（秒）", "group": "浏览器代理",
+                              "min": 1, "max": 60},
+    "relay_max_windows_per_user": {"label": "单用户浏览器窗口上限", "group": "浏览器代理",
+                                    "min": 1, "max": 16},
+    "relay_max_response_bytes": {"label": "浏览器回传体上限（字节）", "group": "浏览器代理",
+                                 "min": 1024, "max": 16777216},
+    "relay_allow_insecure_http": {"label": "允许浏览器访问内网 HTTP 模型",
+                                  "group": "浏览器代理", "restart_required": False},
+    "relay_claim_timeout_sec": {"label": "浏览器认领超时（秒）", "group": "浏览器代理",
+                                "min": 5, "max": 60},
+    "relay_exec_timeout_sec": {"label": "浏览器执行超时（秒）", "group": "浏览器代理",
+                               "min": 30, "max": 120},
 }
 RUNTIME_ENV_LABELS: dict[str, str] = {
     "max_workers": "BBU_MAX_WORKERS",

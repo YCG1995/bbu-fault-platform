@@ -27,6 +27,14 @@ function scopeBadge(scope) {
   const personal = String(scope) === 'personal';
   return `<span class="badge ${personal ? 'info' : 'muted'}">${personal ? '个人' : '共享'}</span>`;
 }
+function transportBadge(item) {
+  const list = Array.isArray(item?.transports) ? item.transports : ['server'];
+  const browser = list.includes('browser');
+  const server = list.includes('server');
+  if (browser && server) return '<span class="badge warn">混合执行</span>';
+  if (browser) return '<span class="badge info">浏览器执行</span>';
+  return '<span class="badge muted">服务端执行</span>';
+}
 function modelLabel(item) {
   return `${item.model_name || item.model_id || '未命名'}${item.scope === 'personal' ? '（个人）' : ''}`;
 }
@@ -249,13 +257,13 @@ function render(data, taskPage) {
   const usersCount = data.directory?.length || totals.users || 0;
   const cards = `
     <div class="grid grid-4 usage-kpis">
-      <div class="card stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${num(totals.calls)}</div><div class="stat-label">模型调用</div><div class="stat-note">失败 ${num(totals.failed_calls)} 次</div></div></div>
+      <div class="card stat"><div class="stat-icon info">${icon('activity')}</div><div><div class="stat-val">${num(totals.calls)}</div><div class="stat-label">模型调用</div><div class="stat-note">失败 ${num(totals.failed_calls)} 次 · 浏览器 ${num(totals.browser_calls)} 次</div></div></div>
       <div class="card stat"><div class="stat-icon">${icon('zap')}</div><div><div class="stat-val" title="${num(totals.total_tokens)}">${num(totals.total_tokens)}</div><div class="stat-label">Token 消耗</div><div class="stat-note">输入 ${num(totals.input_tokens)} / 输出 ${num(totals.output_tokens)}</div></div></div>
       <div class="card stat"><div class="stat-icon ok">${icon('list')}</div><div><div class="stat-val">${num(totals.tasks)}</div><div class="stat-label">覆盖任务</div><div class="stat-note">${usageDays} 天窗口</div></div></div>
       <div class="card stat"><div class="stat-icon warn">${state.user?.role === 'admin' ? icon('users') : icon('layers')}</div><div><div class="stat-val">${num(state.user?.role === 'admin' ? usersCount : totals.skills)}</div><div class="stat-label">${state.user?.role === 'admin' ? '活跃用户' : '执行技能'}</div><div class="stat-note">${state.user?.role === 'admin' ? '有模型调用的账号' : '有执行的技能数'}</div></div></div>
     </div>`;
   const modelRows = (data.models || []).map((m) => `<tr>
-      <td><strong>${esc(m.model_name || m.model_id || '—')}</strong> ${scopeBadge(m.scope)}<div class="sub">ID ${esc(m.model_id || '—')}</div></td>
+      <td><strong>${esc(m.model_name || m.model_id || '—')}</strong> ${scopeBadge(m.scope)} ${transportBadge(m)}<div class="sub">ID ${esc(m.model_id || '—')}${m.browser_calls ? ` · 浏览器 ${num(m.browser_calls)} 次` : ''}</div></td>
       <td class="num">${num(m.calls)}<div class="sub">失败 ${num(m.failed_calls)}</div></td>
       <td class="num">${num(m.input_tokens)}</td>
       <td class="num">${num(m.output_tokens)}</td>
@@ -368,7 +376,8 @@ function render(data, taskPage) {
       <td class="num">${num(t.input_tokens)}</td>
       <td class="num">${num(t.output_tokens)}</td>
       <td class="num"><strong>${num(t.total_tokens)}</strong></td>
-      <td>${(t.models || []).map((m) => `<span class="usage-model-chip">${esc(m)}</span>`).join('') || '—'}</td>
+      <td>${t.browser_calls ? `<span class="badge info">浏览器 ${num(t.browser_calls)} 次</span>` : '<span class="badge muted">服务端</span>'}
+        <div class="sub">${(t.models || []).map((m) => `<span class="usage-model-chip">${esc(m)}</span>`).join('') || '—'}</div></td>
       <td>${esc((t.created_at || '').slice(0, 10) || '—')}</td>
     </tr>`).join('') || `<tr><td colspan="9" class="usage-empty">当前范围没有诊断任务</td></tr>`;
   const totalPages = Math.max(1, Math.ceil(Number(taskPage.total || 0) / Number(taskPage.page_size || 20)));

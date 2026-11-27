@@ -165,6 +165,26 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["total"], 0)
 
+    def test_browser_transport_is_aggregated_in_overview_and_tasks(self):
+        from bbu.util import iso_now
+        self.app.db.execute(
+            "INSERT INTO tasks(id,user_id,title,description,status,mode,input_json,"
+            "stats_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("T-BROWSER", self.engineer_id, "浏览器任务", "", "done", "fast", "[]",
+             "{}", iso_now()))
+        event = _event(self.engineer_id, "T-BROWSER", "9", "浏览器模型", "admin", 6)
+        event["transport"] = "browser"
+        self.app.usage.record(event)
+        data = self.app.usage.overview(days=30, user_id=self.engineer_id)
+        self.assertEqual(data["totals"]["browser_calls"], 1)
+        model = next(m for m in data["models"] if m["model_id"] == "9")
+        self.assertEqual(model["transports"], ["browser"])
+        self.assertEqual(model["browser_calls"], 1)
+        page = self.app.usage.task_rows(days=30, user_id=self.engineer_id)
+        item = next(i for i in page["items"] if i["task_id"] == "T-BROWSER")
+        self.assertEqual(item["transports"], ["browser"])
+        self.assertEqual(item["browser_calls"], 1)
+
     def test_ai_gateway_emits_usage_once_per_attempt(self):
         self.app.db.execute(
             "INSERT INTO model_configs(name,provider,base_url,api_key,model,roles,max_tokens,"

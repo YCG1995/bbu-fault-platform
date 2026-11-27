@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .util import utc_now
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -596,6 +596,7 @@ CREATE TABLE IF NOT EXISTS llm_usage_events (
   estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'server',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_day ON llm_usage_events(created_at, user_id);
@@ -831,6 +832,9 @@ class Database:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_drafts_source_task "
                 "ON workshop_drafts(source_task_id) WHERE source_task_id IS NOT NULL")
+            usage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_usage_events)")}
+            if "transport" not in usage_cols:
+                conn.execute("ALTER TABLE llm_usage_events ADD COLUMN transport TEXT NOT NULL DEFAULT 'server'")
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),))

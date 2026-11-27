@@ -13,6 +13,7 @@ import { renderCases, renderCaseDetail } from './page_cases.js';
 import { renderUsage } from './page_usage.js';
 import { openPersonalModelModal } from './personal_model.js';
 import { mountAssistant, unmountAssistant } from './assistant.js';
+import { startRelay, stopRelay } from './relay.js';
 
 const NAV = [
   { href: '#/dashboard', label: '总览', icon: 'dashboard' },
@@ -139,6 +140,7 @@ function renderShell() {
     <div class="user-meta"><strong>${esc(display)}</strong><span>${roleLabel(state.user?.role)}</span></div>
     <button class="btn btn-ghost btn-sm" data-act="search" title="全局搜索">${icon('search')}</button>
     <button class="btn btn-ghost btn-sm" data-act="notifications" title="站内通知" id="notif-btn" style="position:relative">${icon('bell')}<span id="notif-badge" class="badge danger" hidden style="position:absolute;top:-2px;right:-2px;padding:1px 5px;font-size:10px"></span></button>
+    <button class="badge muted relay-pill" id="relay-pill" data-act="relay-check" title="浏览器代理状态"><i class="dot"></i>浏览器代理 未连接</button>
     <button class="btn btn-ghost btn-sm" data-act="profile" title="个人中心">${icon('users')}</button>
     <button class="btn btn-ghost btn-sm" data-act="password" title="修改密码">${icon('lock')}</button>
     <button class="btn btn-ghost btn-sm" data-act="logout" title="退出登录">${icon('logout')}</button>`;
@@ -150,6 +152,7 @@ function renderShell() {
   bindTopbar();
   updateNav();
   mountAssistant();
+  startRelay();
 }
 
 function bindTopbar() {
@@ -161,6 +164,7 @@ function bindTopbar() {
     if (!btn) return;
     if (btn.dataset.act === 'search') openSearch();
     if (btn.dataset.act === 'notifications') openNotifications();
+    if (btn.dataset.act === 'relay-check') window.open('/relay-check.html', '_blank', 'noopener');
     if (btn.dataset.act === 'profile') openProfile();
     if (btn.dataset.act === 'password') openChangePassword(false);
     if (btn.dataset.act === 'logout') {
@@ -168,6 +172,7 @@ function bindTopbar() {
       state.user = null;
       state.sessionExpires = null;
       unmountAssistant();
+      stopRelay();
       stopSessionTimer();
       toast('已退出登录', 'ok');
       renderLogin();

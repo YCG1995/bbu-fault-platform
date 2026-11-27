@@ -2,12 +2,12 @@
   "schema": 1,
   "generated_by": "tools/gen_manifests.py",
   "counts": {
-    "distinct_actions": 101,
-    "action_instances": 261,
-    "buttons_all": 228,
-    "buttons_page": 213,
+    "distinct_actions": 102,
+    "action_instances": 262,
+    "buttons_all": 231,
+    "buttons_page": 214,
     "modal_calls": 29,
-    "forms": 18
+    "forms": 19
   },
   "actions": [
     {
@@ -492,6 +492,13 @@
       ]
     },
     {
+      "action": "relay-check",
+      "instances": 1,
+      "files": [
+        "web/assets/js/app.js"
+      ]
+    },
+    {
       "action": "reload",
       "instances": 1,
       "files": [
@@ -758,6 +765,7 @@
     "reauth-form",
     "recovery-form",
     "register-form",
+    "relay-check-form",
     "reset-form",
     "review-form",
     "setup-form",

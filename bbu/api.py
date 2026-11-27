@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -27,13 +27,41 @@ from urllib.parse import quote, urlparse
 import yaml
 
 from . import __version__, updater
-from .accounts import (activate_invite, create_invite, list_invites as list_invites_service,
+from .accounts import (ROLES, activate_invite, create_invite,
+                       list_invites as list_invites_service,
                        normalize_status, public_user, register_user, revoke_invite)
 from .assistant import AssistantError, AssistantService
 from .backups import BackupManager
-from .ai import AIGateway, list_models, AIError
+from .ai import (
+    AIGateway,
+    AIError,
+    _anthropic_url,
+    _openai_url,
+    browser_relay_timeouts,
+    browser_models_spec,
+    browser_test_spec,
+    build_browser_relay_spec,
+    list_models,
+    parse_model_names,
+    parse_test_reply,
+)
 from .config import Config
 from .db import Database
+from .relay import (
+    RelayAbsentError,
+    RelayCallConsumedError,
+    RelayCallExpiredError,
+    RelayCrossUserError,
+    RelayDisabledError,
+    RelayError,
+    RelayHub,
+    RelayNotFoundError,
+    RelayOversizeError,
+    RelaySpec,
+    RelayWindowEvictedError,
+    validate_browser_url,
+)
+
 from .evaluation import EvaluationService, RealCaseStore
 from .evidence_store import EvidenceStore
 from .migration import (
@@ -294,7 +322,11 @@ class App:
                                       manifest_mode=str(config.get("skill_manifest_mode", "shadow")))
         self.tools = ToolPolicy(self.db, config)
         self.runner = SkillRunner(config, db=self.db, policy=self.tools)
-        self.gateway = AIGateway(self.db, config, secret_box=self.secret_box)
+        self.relay = RelayHub(self.db, config)
+        self.relay_tests: dict[str, dict[str, Any]] = {}
+        self.relay_tests_lock = threading.Lock()
+        self.gateway = AIGateway(self.db, config, secret_box=self.secret_box,
+                                 relay=self.relay)
         self.usage = UsageStore(self.db, config)
         self.gateway.on_usage = self._record_llm_usage
         self.traces = TraceStore(self.db, config)
@@ -341,6 +373,10 @@ class App:
         self.learning.shutdown()
         self.workshop_jobs.shutdown()
         self.storage.shutdown()
+        try:
+            self.relay.shutdown()
+        except Exception:
+            pass
 
     def _record_llm_usage(self, event: dict[str, Any]) -> None:
         try:
@@ -510,6 +546,13 @@ class App:
         r.add("POST", r"/api/models/test", h_model_test_draft)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/test", h_model_test)
         r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/capabilities", h_model_capabilities)
+        r.add("POST", r"/api/models/(?P<model_id>[0-9]+)/relay-test", h_model_relay_test)
+        r.add("GET", r"/api/models/(?P<model_id>[0-9]+)/relay-test/(?P<test_id>[A-Za-z0-9_-]+)",
+              h_model_relay_test_get)
+        r.add("GET", r"/api/relay/status", h_relay_status)
+        r.add("GET", r"/api/relay/calls", h_relay_calls)
+        r.add("POST", r"/api/relay/calls/(?P<call_id>[A-Za-z0-9_-]+)/result", h_relay_result)
+        r.add("POST", r"/api/relay/release", h_relay_release)
 
         r.add("GET", r"/api/users", h_users)
         r.add("GET", r"/api/users/invites", h_invites)
@@ -604,8 +647,11 @@ def h_login(app: App, req):
 
 def h_logout(app: App, req):
     token = _cookie(req, SESSION_COOKIE)
+    session = get_session(app.db, token) if token else None
     if token:
         delete_session(app.db, token)
+    if session and hasattr(app, "relay"):
+        app.relay.cancel_user(session["user_id"])
     return response_json({"ok": True},
                          headers={"Set-Cookie": _set_cookie(
                              "", 0, app.config.cookie_secure)})
@@ -3110,7 +3156,7 @@ def _model_row(app: App, model_id: int) -> dict[str, Any]:
     return row
 
 
-def _model_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
+def _model_public(app: App, row: dict[str, Any], *, reveal: bool = True) -> dict[str, Any]:
     try:
         plain = app.secret_box.decrypt(row.get("api_key") or "")
         key_view = SecretBox.mask(plain)
@@ -3118,16 +3164,34 @@ def _model_public(app: App, row: dict[str, Any]) -> dict[str, Any]:
     except ValueError:
         key_view = "（解密失败）"
         has_key = True
-    return {
+    extra = _loads(row["extra"], {})
+    transport = str(extra.get("transport") or "server")
+    base_url = str(row["base_url"] or "")
+    parsed = urlparse(base_url)
+    public = {
         "id": row["id"], "name": row["name"], "provider": row["provider"],
-        "base_url": row["base_url"], "model": row["model"],
-        "api_key_masked": key_view, "has_key": has_key,
+        "base_url": base_url if reveal else "",
+        "base_url_host": parsed.hostname or "",
+        "model": row["model"],
+        "api_key_masked": key_view if reveal else "",
+        "has_key": has_key if reveal else False,
         "roles": _loads(row["roles"], []), "max_tokens": row["max_tokens"],
         "temperature": row["temperature"], "timeout_sec": row["timeout_sec"],
         "enabled": bool(row["enabled"]), "priority": row["priority"],
-        "extra": _loads(row["extra"], {}),
+        "extra": extra if reveal else {"transport": transport},
+        "transport": transport,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+    if reveal:
+        relay_cfg = extra.get("browser_relay") if isinstance(extra.get("browser_relay"), dict) else {}
+        public["browser_relay"] = {
+            "max_concurrent": int(relay_cfg.get("max_concurrent") or 2),
+            "claim_timeout_sec": int(relay_cfg.get("claim_timeout_sec") or 10),
+            "exec_timeout_sec": int(relay_cfg.get("exec_timeout_sec") or 90),
+            "allow_roles": relay_cfg.get("allow_roles") or [],
+        }
+        public["auto_reply"] = extra.get("auto_reply")
+    return public
 
 
 def _validate_model(app: App, data: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3170,6 +3234,50 @@ def _validate_model(app: App, data: dict[str, Any], existing: dict[str, Any] | N
             raise HTTPError(400, f"extra 不是合法 JSON: {exc}") from exc
     if not isinstance(extra, dict):
         raise HTTPError(400, "extra 必须是 JSON 对象")
+    transport = str(extra.get("transport") or "server").strip().lower()
+    if transport not in ("server", "browser"):
+        raise HTTPError(400, "extra.transport 必须是 server 或 browser")
+    if transport == "browser":
+        if provider not in ("openai", "anthropic"):
+            raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+        if not validate_browser_url(base_url,
+                                    allow_http=bool(app.config.get("relay_allow_insecure_http", False))):
+            raise HTTPError(400, ("浏览器代理 Base URL 必须是 HTTP(S) 且不能指向本机/"
+                                  "链路本地地址；内网 HTTP 需先在运行时配置开启"))
+        relay_cfg = extra.get("browser_relay")
+        if relay_cfg is None:
+            relay_cfg = {}
+        if not isinstance(relay_cfg, dict):
+            raise HTTPError(400, "extra.browser_relay 必须是 JSON 对象")
+        try:
+            max_concurrent = int(relay_cfg.get("max_concurrent", 2))
+            claim_timeout = int(relay_cfg.get("claim_timeout_sec", 10))
+            exec_timeout = int(relay_cfg.get("exec_timeout_sec", 90))
+        except (TypeError, ValueError) as exc:
+            raise HTTPError(400, f"browser_relay 数值字段非法: {exc}") from exc
+        if not (1 <= max_concurrent <= 4):
+            raise HTTPError(400, "browser_relay.max_concurrent 必须在 1–4")
+        if not (5 <= claim_timeout <= 60):
+            raise HTTPError(400, "browser_relay.claim_timeout_sec 必须在 5–60")
+        if not (30 <= exec_timeout <= 120):
+            raise HTTPError(400, "browser_relay.exec_timeout_sec 必须在 30–120")
+        allow_roles = relay_cfg.get("allow_roles") or []
+        if isinstance(allow_roles, str):
+            allow_roles = [x.strip() for x in allow_roles.split(",") if x.strip()]
+        if not isinstance(allow_roles, list):
+            raise HTTPError(400, "browser_relay.allow_roles 必须是字符串数组")
+        allow_roles = [str(x).strip() for x in allow_roles if str(x).strip()]
+        bad_roles = [x for x in allow_roles if x not in ROLES]
+        if bad_roles:
+            raise HTTPError(400, f"browser_relay.allow_roles 含未知角色: {', '.join(bad_roles)}")
+        relay_cfg = {
+            "max_concurrent": max_concurrent,
+            "claim_timeout_sec": claim_timeout,
+            "exec_timeout_sec": exec_timeout,
+            "allow_roles": allow_roles,
+        }
+        extra["browser_relay"] = relay_cfg
+    extra["transport"] = transport
     api_key = data.get("api_key")
     if api_key is None or api_key == "":
         api_key = (existing or {}).get("api_key", "")
@@ -3192,7 +3300,8 @@ def h_models(app: App, req):
     if user["role"] == "reviewer":
         raise HTTPError(403, "专家账号不能查看或管理模型配置")
     rows = app.db.all("SELECT * FROM model_configs ORDER BY priority, id")
-    return response_json({"items": [_model_public(app, r) for r in rows],
+    reveal = user["role"] == "admin"
+    return response_json({"items": [_model_public(app, r, reveal=reveal) for r in rows],
                           "roles": list(MODEL_ROLES)})
 
 
@@ -3263,6 +3372,223 @@ def h_model_test(app: App, req, model_id: str):
     return response_json(result)
 
 
+# ---------------------------- 浏览器代理中继 ----------------------------
+
+
+def _relay_http_error(exc: RelayError) -> HTTPError:
+    status = exc.http_status if 400 <= int(exc.http_status or 0) < 600 else 409
+    return HTTPError(status, str(exc)[:600], {"code": exc.code})
+
+
+def _relay_model(app: App, row: dict[str, Any]) -> dict[str, Any]:
+    model = dict(row)
+    model["roles"] = _loads(row.get("roles"), [])
+    model["extra"] = _loads(row.get("extra"), {})
+    model["transport"] = str(model["extra"].get("transport") or "server")
+    model["_relay_max_bytes"] = int(app.config.get("relay_max_response_bytes", 1048576))
+    model["allow_private"] = bool(app.config.get("model_discovery_allow_private", True))
+    model["private_allowlist"] = app.config.get("model_private_allowlist", "")
+    try:
+        model["api_key"] = app.secret_box.decrypt(row.get("api_key") or "")
+    except ValueError as exc:
+        raise HTTPError(400, f"API Key 解密失败: {exc}") from exc
+    return model
+
+
+def _relay_public_call(call: Any) -> dict[str, Any]:
+    remaining = max(0.0, float(getattr(call, "deadline", 0) or 0) - time.monotonic())
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+    payload = call.spec.public(expires_at=expires)
+    payload.update({
+        "call_id": call.call_id,
+        "model_id": call.model_id,
+        "model_name": call.model_name,
+        "purpose": call.purpose,
+        "body": call.spec.body,
+        "expires_at": expires,
+    })
+    return payload
+
+
+def h_relay_status(app: App, req):
+    user = _auth(app, req, csrf=False)
+    window_id = str(req.query.get("window_id") or "").strip()
+    if not app.relay.enabled:
+        return response_json({
+            "enabled": False, "window": None,
+            "poll_sec": int(app.config.get("relay_status_poll_sec", 5) or 5),
+            "pending": 0, "models": [], "allow_http": False,
+            "max_response_bytes": int(app.config.get("relay_max_response_bytes", 1048576)),
+        }, headers={"Pragma": "no-cache"})
+    try:
+        payload = app.relay.status_payload(user["id"], window_id)
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    return response_json(payload, headers={"Pragma": "no-cache"})
+
+
+def h_relay_calls(app: App, req):
+    user = _auth(app, req, csrf=False)
+    window_id = str(req.query.get("window_id") or "").strip()
+    call_id = str(req.query.get("call_id") or "").strip() or None
+    try:
+        wait = float(req.query.get("wait") or 10)
+    except (TypeError, ValueError):
+        wait = 10.0
+    try:
+        call = app.relay.claim(user["id"], window_id, wait, call_id=call_id)
+    except RelayCrossUserError as exc:
+        app.db.audit(user["id"], user["username"], "relay.cross_user_claim",
+                     call_id or "", {"code": exc.code}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    if call is None:
+        return 204, {"Cache-Control": "no-store", "Pragma": "no-cache"}, b""
+    payload = _relay_public_call(call)
+    response = response_json(payload, headers={"Pragma": "no-cache"})
+    # 浏览器已经拿到这份 payload；服务端内存中立即擦除 Key，重复领取
+    # 只会得到 409，不会再次下发。
+    app.relay.consume_auth(call.call_id)
+    return response
+
+
+def h_relay_result(app: App, req, call_id: str):
+    user = _auth(app, req)
+    data = req.json()
+    if not isinstance(data, dict):
+        raise HTTPError(400, "结果必须是 JSON 对象")
+    body_text = data.get("body_text")
+    if not isinstance(body_text, str):
+        raise HTTPError(400, "body_text 必须是字符串")
+    try:
+        status = int(data.get("status") or 0)
+        latency_ms = int(data.get("latency_ms") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPError(400, "status / latency_ms 必须是整数") from exc
+    if not (0 <= status <= 599):
+        raise HTTPError(400, "status 超出范围")
+    error_kind = str(data.get("error_kind") or "").strip().lower()
+    if error_kind not in ("", "network", "abort", "timeout", "http"):
+        raise HTTPError(400, "error_kind 必须是 network/abort/timeout/http")
+    truncated = bool(data.get("truncated"))
+    try:
+        app.relay.complete(user["id"], call_id, status, body_text,
+                           latency_ms, error_kind, truncated)
+    except RelayCrossUserError as exc:
+        app.db.audit(user["id"], user["username"], "relay.cross_user_result",
+                     call_id, {"code": exc.code}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayOversizeError as exc:
+        app.db.audit(user["id"], user["username"], "relay.result_oversize",
+                     call_id, {"bytes": len(body_text.encode("utf-8")),
+                               "limit": int(app.config.get("relay_max_response_bytes",
+                                                           1048576))}, req.ip)
+        raise _relay_http_error(exc) from exc
+    except RelayError as exc:
+        raise _relay_http_error(exc) from exc
+    return response_json({"ok": True})
+
+
+def h_relay_release(app: App, req):
+    # sendBeacon 不能带 X-CSRF；只释放当前用户自己的窗口，影响面是可恢复
+    # 的租约释放，不涉及模型 Key 或数据写入。
+    user = _auth(app, req, csrf=False)
+    data = req.json()
+    window_id = str((data or {}).get("window_id") or req.query.get("window_id") or "").strip()
+    released = app.relay.release_window(user["id"], window_id) if window_id else False
+    return response_json({"ok": True, "released": bool(released)})
+
+
+def _run_relay_test(app: App, test_id: str, user: dict[str, Any],
+                    model: dict[str, Any], spec: RelaySpec) -> None:
+    result: dict[str, Any] = {}
+    try:
+        claim_timeout, exec_timeout = browser_relay_timeouts(model)
+        relay_result = app.relay.submit(user["id"], model, spec,
+                                        purpose="relay-test",
+                                        claim_timeout=claim_timeout,
+                                        exec_timeout=exec_timeout)
+        status = int(relay_result.status or 0)
+        raw = str(relay_result.text or "")
+        info = {"state": "done", "ok": 200 <= status < 300,
+                "http_status": status, "latency_ms": relay_result.latency_ms,
+                "bytes": len(raw.encode("utf-8"))}
+        if status >= 400:
+            info.update({"ok": False, "error": f"HTTP {status}"})
+        else:
+            try:
+                data = json.loads(raw)
+                info["reply"] = parse_test_reply(data, str(model.get("provider") or "openai"))
+            except json.JSONDecodeError:
+                info.update({"ok": False, "error": "响应不是合法 JSON"})
+        result = info
+    except RelayError as exc:
+        result = {"state": "failed", "ok": False, "error": str(exc)[:500],
+                  "code": exc.code, "error_kind": exc.kind}
+    except Exception as exc:  # noqa: BLE001 - 后台线程必须收敛失败
+        result = {"state": "failed", "ok": False,
+                  "error": f"{type(exc).__name__}: {str(exc)[:400]}"}
+    finally:
+        spec.auth = {}
+    result["finished_at"] = iso_now()
+    with app.relay_tests_lock:
+        test = app.relay_tests.get(test_id)
+        if test:
+            test.update(result)
+    try:
+        app.db.audit(user["id"], user["username"], "model.relay_test", test_id,
+                     {"model_id": model.get("id"), "ok": result.get("ok"),
+                      "http_status": result.get("http_status"),
+                      "bytes": result.get("bytes")}, "")
+    except Exception:
+        pass
+
+
+def h_model_relay_test(app: App, req, model_id: str):
+    user = _admin(app, req)
+    if not app.relay.enabled:
+        raise _relay_http_error(RelayDisabledError())
+    row = _model_row(app, int(model_id))
+    model = _relay_model(app, row)
+    if model.get("transport") != "browser":
+        raise HTTPError(400, "该模型不是浏览器代理模型")
+    if model.get("provider") not in ("openai", "anthropic"):
+        raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+    spec = browser_test_spec(model)
+    test_id = new_id("RT", with_time=False)
+    now = iso_now()
+    with app.relay_tests_lock:
+        if len(app.relay_tests) > 100:
+            for key in sorted(app.relay_tests)[:50]:
+                app.relay_tests.pop(key, None)
+        app.relay_tests[test_id] = {
+            "test_id": test_id, "model_id": model.get("id"), "model_name": model.get("name"),
+            "user_id": user["id"], "state": "pending", "ok": None,
+            "created_at": now, "finished_at": "",
+        }
+    thread = threading.Thread(target=_run_relay_test,
+                              args=(app, test_id, dict(user), model, spec),
+                              name="relay-test", daemon=True)
+    thread.start()
+    return response_json({"test_id": test_id, "state": "pending"}, status=202)
+
+
+def h_model_relay_test_get(app: App, req, model_id: str, test_id: str):
+    user = _admin(app, req)
+    with app.relay_tests_lock:
+        test = dict(app.relay_tests.get(test_id) or {})
+    if not test:
+        raise HTTPError(404, "自检任务不存在")
+    if int(test.get("user_id") or 0) != int(user["id"]):
+        raise HTTPError(403, "不能查看其他管理员的自检任务")
+    if int(test.get("model_id") or 0) != int(model_id):
+        raise HTTPError(404, "自检任务与模型不匹配")
+    test.pop("user_id", None)
+    return response_json(test)
+
+
 def h_model_capabilities(app: App, req, model_id: str):
     user = _admin(app, req)
     row = _model_row(app, int(model_id))
@@ -3326,11 +3652,39 @@ def h_model_discover(app: App, req):
     except (TypeError, ValueError) as exc:
         raise HTTPError(400, "timeout_sec 必须是整数") from exc
     model = {
+        "id": existing["id"] if existing else 0,
+        "name": (existing or {}).get("name") or "",
         "provider": provider, "base_url": base_url, "api_key": api_key,
         "extra": extra, "timeout_sec": timeout_sec,
+        "transport": str(extra.get("transport") or "server"),
+        "_relay_max_bytes": int(app.config.get("relay_max_response_bytes", 1048576)),
         "allow_private": bool(app.config.get("model_discovery_allow_private", True)),
         "private_allowlist": app.config.get("model_private_allowlist", ""),
     }
+    if model["transport"] == "browser":
+        if provider not in ("openai", "anthropic"):
+            raise HTTPError(400, "浏览器代理模型只支持 openai / anthropic")
+        if not validate_browser_url(base_url,
+                                    allow_http=bool(app.config.get("relay_allow_insecure_http", False))):
+            raise HTTPError(400, "浏览器代理 Base URL 不符合安全要求")
+        try:
+            result = app.relay.submit(user["id"], model, browser_models_spec(model),
+                                      purpose="model.discover")
+        except RelayError as exc:
+            raise HTTPError(503 if exc.http_status in (0, 503) else exc.http_status,
+                            str(exc)[:600], {"code": exc.code}) from exc
+        if not (200 <= int(result.status or 0) < 300):
+            raise HTTPError(502, f"获取模型列表失败: HTTP {result.status}")
+        try:
+            names = parse_model_names(json.loads(result.text), provider)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPError(502, f"浏览器回传的模型列表无法解析: {str(exc)[:300]}") from exc
+        parsed = urlparse(base_url)
+        app.db.audit(user["id"], user["username"], "model.discover", "",
+                     {"provider": provider, "transport": "browser",
+                      "base_url_host": parsed.hostname or "",
+                      "base_url_path": parsed.path[:300], "count": len(names)}, req.ip)
+        return response_json({"models": names, "count": len(names)})
     try:
         names = list_models(model, timeout=timeout_sec)
     except OutboundPolicyError as exc:

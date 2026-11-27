@@ -41,8 +41,8 @@ class UsageStore:
         self.db.execute(
             "INSERT INTO llm_usage_events(id,user_id,task_id,task_kind,skill_name,model_id,"
             "model_name,provider,model,scope,purpose,stage,status,input_tokens,output_tokens,"
-            "total_tokens,estimated_input_tokens,latency_ms,error,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "total_tokens,estimated_input_tokens,latency_ms,error,transport,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (usage_id, _int(event.get("user_id")), str(event.get("task_id") or ""),
              str(event.get("task_kind") or "direct"), str(event.get("skill_name") or ""),
              str(event.get("model_id") or ""), str(event.get("model_name") or ""),
@@ -52,7 +52,9 @@ class UsageStore:
              _int(event.get("input_tokens")), _int(event.get("output_tokens")),
              _int(event.get("total_tokens")),
              _int(event.get("estimated_input_tokens")), _int(event.get("latency_ms")),
-             str(event.get("error") or "")[:400], str(event.get("created_at") or iso_now())))
+             str(event.get("error") or "")[:400],
+             "browser" if str(event.get("transport") or "") == "browser" else "server",
+             str(event.get("created_at") or iso_now())))
         return usage_id
 
     # ---------- 时间范围 ----------
@@ -109,7 +111,8 @@ class UsageStore:
             "SELECT * FROM llm_usage_events WHERE " + where + " ORDER BY created_at", tuple(args))]
 
         totals = {"calls": 0, "failed_calls": 0, "input_tokens": 0, "output_tokens": 0,
-                  "total_tokens": 0, "tasks": 0, "skills": 0, "users": 0}
+                  "total_tokens": 0, "tasks": 0, "skills": 0, "users": 0,
+                  "browser_calls": 0}
         daily = {d: {"date": d, "calls": 0, "failed_calls": 0, "input_tokens": 0,
                      "output_tokens": 0, "total_tokens": 0, "models": []} for d in rng["dates"]}
         day_models: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
@@ -127,6 +130,8 @@ class UsageStore:
             totals["input_tokens"] += tin
             totals["output_tokens"] += tout
             totals["total_tokens"] += ttotal
+            if str(e.get("transport") or "server") == "browser":
+                totals["browser_calls"] += 1
             if e.get("task_id"):
                 task_ids.add(str(e["task_id"]))
             if e.get("skill_name"):
@@ -160,12 +165,17 @@ class UsageStore:
                 "scope": str(e.get("scope") or "admin"), "calls": 0, "failed_calls": 0,
                 "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
                 "latency_total": 0, "latency_n": 0, "users": set(),
+                "transports": set(), "browser_calls": 0,
             })
             m["calls"] += 1
             m["failed_calls"] += 0 if ok else 1
             m["input_tokens"] += tin
             m["output_tokens"] += tout
             m["total_tokens"] += ttotal
+            transport = str(e.get("transport") or "server")
+            m["transports"].add(transport)
+            if transport == "browser":
+                m["browser_calls"] += 1
             if _int(e.get("latency_ms")):
                 m["latency_total"] += _int(e.get("latency_ms"))
                 m["latency_n"] += 1
@@ -196,6 +206,7 @@ class UsageStore:
                 u["display_name"] = row.get("display_name") or ""
         for m in models.values():
             m["users"] = len(m["users"])
+            m["transports"] = sorted(m.get("transports") or ["server"])
             m["latency_ms_avg"] = round(m["latency_total"] / m["latency_n"]) if m["latency_n"] else 0
             m.pop("latency_total", None); m.pop("latency_n", None)
         for d in daily.values():
@@ -367,6 +378,8 @@ class UsageStore:
                 "calls": calls, "input_tokens": tin, "output_tokens": tout, "total_tokens": tks,
                 "has_events": bool(evs),
                 "models": sorted({str(e.get("model_name") or "") for e in evs if e.get("model_name")}),
+                "transports": sorted({str(e.get("transport") or "server") for e in evs}),
+                "browser_calls": sum(1 for e in evs if str(e.get("transport") or "server") == "browser"),
             })
         return {"range": {k: rng[k] for k in ("days", "start", "end")}, "page": page,
                 "page_size": page_size, "total": int((total or {}).get("n") or 0), "items": items}

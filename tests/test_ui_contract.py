@@ -18,7 +18,7 @@ def test_manifest_actions_and_forms_are_consistent():
     manifest = json.loads((ROOT / "tests/manifests/ui_actions.json").read_text(encoding="utf-8"))
     counts = manifest["counts"]
     assert counts["distinct_actions"] > 0 and counts["action_instances"] >= counts["distinct_actions"]
-    assert counts["forms"] == 18
+    assert counts["forms"] == 19
     ids = set(manifest["forms"])
     assert "login-form" in ids and "workshop" not in ids
     for action in manifest["actions"]:
@@ -63,3 +63,20 @@ def test_responsive_breakpoints_cover_narrow_mobile():
     css = _text("web/assets/css/app.css")
     assert re.search(r"@media\s*\(max-width:\s*640px\)", css)
     assert "overflow-x" in css or "min-width: 0" in css
+
+
+def test_browser_relay_frontend_and_self_check_are_wired():
+    relay = _text("web/assets/js/relay.js")
+    app = _text("web/assets/js/app.js")
+    admin = _text("web/assets/js/page_admin.js")
+    httpd = _text("bbu/httpd.py")
+    assert (ROOT / "web/relay-check.html").is_file()
+    for token in ("/api/relay/status", "/api/relay/calls", "/api/relay/release"):
+        assert token in relay
+    assert "sendBeacon" in relay and "AbortController" in relay
+    assert "startRelay" in app and "relay-pill" in app
+    assert "browser_relay" in admin and "relay-test" in admin
+    assert "浏览器代理" in admin
+    assert "transportBadge" in _text("web/assets/js/page_usage.js")
+    assert "browser_calls" in _text("web/assets/js/page_usage.js")
+    assert "connect-src 'self' https: http:" in httpd

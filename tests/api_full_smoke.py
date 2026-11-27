@@ -140,6 +140,12 @@ EXPECTED_ROUTES = {
     "DELETE /api/models/{id}",
     "POST /api/models/{id}/test",
     "POST /api/models/{id}/capabilities",
+    "POST /api/models/{id}/relay-test",
+    "GET /api/models/{id}/relay-test/{test_id}",
+    "GET /api/relay/status",
+    "GET /api/relay/calls",
+    "POST /api/relay/calls/{call_id}/result",
+    "POST /api/relay/release",
     "POST /api/models/discover",
     "POST /api/models/test",
     "GET /api/users",
@@ -556,6 +562,49 @@ def main() -> int:
         hit("PUT /api/models/{id}")
         admin_client.json("DELETE", f"/api/models/{model_id}")
         hit("DELETE /api/models/{id}")
+
+        # 浏览器代理：状态/长轮询/回传/释放/管理员自检
+        _, relay_status = admin_client.json("GET", "/api/relay/status")
+        assert relay_status["enabled"] is True and relay_status["window"]["window_id"]
+        relay_window = relay_status["window"]["window_id"]
+        hit("GET /api/relay/status")
+        status, _, _ = admin_client.request(
+            "GET", f"/api/relay/calls?window_id={relay_window}&wait=0")
+        assert status == 204, status
+        hit("GET /api/relay/calls")
+        admin_client.json("POST", "/api/relay/release",
+                          {"window_id": relay_window})
+        hit("POST /api/relay/release")
+        admin_client.json("POST", "/api/relay/calls/not-a-call/result",
+                          {"body_text": "", "status": 0}, expected=404)
+        hit("POST /api/relay/calls/{call_id}/result")
+        _, browser_model = admin_client.json("POST", "/api/models", {
+            "name": "api-browser-relay", "provider": "openai",
+            "base_url": "https://maas.example.com/v1",
+            "api_key": "browser-test-key", "model": "browser-model",
+            "roles": ["default"],
+            "extra": {"transport": "browser",
+                      "browser_relay": {"max_concurrent": 1,
+                                        "claim_timeout_sec": 5,
+                                        "exec_timeout_sec": 30,
+                                        "allow_roles": []}},
+        }, expected=201)
+        browser_id = browser_model["model"]["id"]
+        _, relay_test = admin_client.json(
+            "POST", f"/api/models/{browser_id}/relay-test", expected=202)
+        assert relay_test["state"] == "pending" and relay_test["test_id"]
+        hit("POST /api/models/{id}/relay-test")
+        relay_test_id = relay_test["test_id"]
+        for _ in range(20):
+            _, relay_test_detail = admin_client.json(
+                "GET", f"/api/models/{browser_id}/relay-test/{relay_test_id}")
+            if relay_test_detail["state"] != "pending":
+                break
+            time.sleep(0.1)
+        assert relay_test_detail["state"] in ("failed", "done"), relay_test_detail
+        hit("GET /api/models/{id}/relay-test/{test_id}")
+        admin_client.json("DELETE", f"/api/models/{browser_id}")
+
         planner_server, planner_port = start_mock(_PlannerMock)
         _, created = admin_client.json("POST", "/api/models", {
             "name": "api-planner", "provider": "openai",

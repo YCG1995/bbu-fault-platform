@@ -28,16 +28,19 @@ export async function renderModels() {
     </div></div>
     <div class="card"><div class="card-body tight table-wrap">
       ${models.length ? `<table class="data"><thead><tr>
-        <th>配置</th><th>协议 / 模型</th><th>角色</th><th>优先级</th><th>密钥</th><th>状态</th><th>操作</th>
+        <th>配置</th><th>协议 / 模型</th><th>执行位置</th><th>角色</th><th>优先级</th><th>密钥</th><th>状态</th><th>操作</th>
       </tr></thead><tbody>${models.map((m) => `<tr>
         <td><div style="font-weight:600">${esc(m.name)}</div><div class="mono tiny muted">${esc(m.base_url || '—')}</div></td>
         <td>${esc(providerName(m.provider))}<div class="mono tiny">${esc(m.model)}</div></td>
+        <td>${m.transport === 'browser'
+          ? '<span class="badge info"><i class="dot"></i>浏览器代理</span>'
+          : '<span class="badge muted"><i class="dot"></i>服务端</span>'}</td>
         <td>${(m.roles || []).map((r) => `<span class="role-tag">${esc(ROLE_LABELS[r] || r)}</span>`).join('') || '—'}</td>
         <td>${m.priority}</td>
         <td class="mono tiny">${esc(m.api_key_masked || '—')}</td>
         <td><button class="switch ${m.enabled ? 'on' : ''}" data-act="toggle" data-id="${m.id}" aria-label="启用/停用"></button></td>
         <td><div class="inline" style="gap:4px">
-          <button class="btn btn-sm" data-act="test" data-id="${m.id}">测试</button>
+          <button class="btn btn-sm" data-act="test" data-id="${m.id}">${m.transport === 'browser' ? '浏览器内自检' : '测试'}</button>
           <button class="btn btn-sm" data-act="edit" data-id="${m.id}">编辑</button>
           <button class="btn btn-sm btn-danger" data-act="delete" data-id="${m.id}">删除</button>
         </div></td></tr>`).join('')}</tbody></table>`
@@ -54,6 +57,8 @@ export async function renderModels() {
     'new-model': () => openModelModal(null, () => renderModels()),
     edit: (el) => openModelModal(models.find((m) => String(m.id) === el.dataset.id), () => renderModels()),
     test: async (el) => {
+      const m = models.find((x) => String(x.id) === el.dataset.id);
+      if (m?.transport === 'browser') return runRelayTest(m, el);
       setBusy(el, true, '测试中…');
       try {
         const res = await api(`/api/models/${el.dataset.id}/test`, { method: 'POST' });
@@ -80,6 +85,30 @@ export async function renderModels() {
   bindActions(view, handlers);
   bindTopbar(handlers);
   return view;
+}
+
+async function runRelayTest(model, button) {
+  setBusy(button, true, '自检中…');
+  try {
+    const start = await api(`/api/models/${model.id}/relay-test`, { method: 'POST' });
+    const testId = start.test_id;
+    for (let i = 0; i < 90; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const test = await api(`/api/models/${model.id}/relay-test/${encodeURIComponent(testId)}`);
+      if (test.state === 'pending') continue;
+      if (test.state === 'done' && test.ok) {
+        toast(`浏览器内自检成功：${test.reply || 'OK'} · ${test.latency_ms ?? '—'} ms`, 'ok');
+      } else {
+        toast(`浏览器内自检失败：${test.error || test.code || '未返回有效响应'}`, 'error', 8000);
+      }
+      return;
+    }
+    toast('浏览器内自检超时：请确认本页保持打开且有可用模型', 'error', 8000);
+  } catch (err) {
+    toast(err.message, 'error', 8000);
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 function openModelModal(model, onDone) {
@@ -120,6 +149,10 @@ function openModelModal(model, onDone) {
   const initialSuggestion = findModel(initialBase, initialModel);
   const initialMax = model?.max_tokens ?? (initialSuggestion ? initialSuggestion[1] : 8192);
   const platformValue = model ? (initialPreset?.id || 'custom') : companyPreset.id;
+  const initialExtra = model?.extra || {};
+  const browserRelay = model?.browser_relay || initialExtra.browser_relay || {};
+  const isBrowser = (model?.transport || initialExtra.transport || 'server') === 'browser';
+  const browserRoles = Array.isArray(browserRelay.allow_roles) ? browserRelay.allow_roles : [];
 
   const m = modal({
     title: model ? '编辑模型配置' : '添加模型配置',
@@ -143,7 +176,28 @@ function openModelModal(model, onDone) {
             ${['openai', 'anthropic', 'mock'].map((p) => `<option value="${p}" ${(model?.provider || 'openai') === p ? 'selected' : ''}>${providerName(p)}</option>`).join('')}
           </select></div>
       </div>
-      <div class="form-row"><label class="label">Base URL <span class="hint">可手动输入，也可从常用平台下拉选择</span></label>
+      <div class="form-row">
+        <label class="check" style="font-weight:600"><input type="checkbox" id="browser-transport" ${isBrowser ? 'checked' : ''}>
+          浏览器代理执行 <span class="hint">请求由当前打开的浏览器发起，服务端只解析响应</span></label>
+        <div class="help">适用于平台服务器无法直连模型网关、但浏览器可经系统代理访问的现场。Base URL 必须是浏览器视角可达地址；Key 只在执行瞬间下发到浏览器内存，不进入 URL、日志或轨迹。</div>
+      </div>
+      <div class="card" id="browser-relay-box" style="box-shadow:none;border-color:#c7d2fe;margin-bottom:14px;${isBrowser ? '' : 'display:none'}">
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-row"><label class="label">单窗口并发</label><input class="input" type="number" id="browser-max-concurrent" min="1" max="4" value="${Number(browserRelay.max_concurrent) || 2}"><div class="help">1–4，默认 2</div></div>
+            <div class="form-row"><label class="label">认领超时（秒）</label><input class="input" type="number" id="browser-claim-timeout" min="5" max="60" value="${Number(browserRelay.claim_timeout_sec) || 10}"><div class="help">5–60，默认 10</div></div>
+            <div class="form-row"><label class="label">执行超时（秒）</label><input class="input" type="number" id="browser-exec-timeout" min="30" max="120" value="${Number(browserRelay.exec_timeout_sec) || 90}"><div class="help">30–120，默认 90</div></div>
+          </div>
+          <div class="form-row" style="margin-bottom:0"><label class="label">允许执行的用户角色</label>
+            <div class="inline" style="gap:14px;flex-wrap:wrap">
+              ${[['engineer', '工程师'], ['reviewer', '专家'], ['admin', '管理员']].map(([value, label]) =>
+                `<label class="check"><input type="checkbox" data-browser-role="${value}" ${browserRoles.includes(value) ? 'checked' : ''}> ${label}</label>`).join('')}
+            </div>
+            <div class="help">不勾选=所有登录角色均可承接；勾选后仅这些角色能看到并领取该模型。</div>
+          </div>
+        </div>
+      </div>
+      <div class="form-row"><label class="label">Base URL <span class="hint">可手动输入，也可从常用平台下拉选择；浏览器代理不要填 127.0.0.1 / localhost</span></label>
         <input class="input mono" name="base_url" id="base-url" list="base-url-options" value="${esc(initialBase)}" placeholder="${esc(maasBase)}">
         <datalist id="base-url-options">${presets.filter((p) => p.base_url).map((p) => `<option value="${esc(p.base_url)}" label="${esc(p.label)}"></option>`).join('')}</datalist>
         <div class="help" id="platform-note">${esc(initialPreset?.note || '自定义地址：按服务端实际 OpenAI 兼容或 Anthropic 端点填写。')}</div>
@@ -189,6 +243,8 @@ function openModelModal(model, onDone) {
   const baseInput = m.body.querySelector('#base-url');
   const providerSelect = m.body.querySelector('#provider-select');
   const platformSelect = m.body.querySelector('#model-platform');
+  const browserCheck = m.body.querySelector('#browser-transport');
+  const browserBox = m.body.querySelector('#browser-relay-box');
   const modelInput = m.body.querySelector('#model-name');
   const modelOptions = m.body.querySelector('#model-options');
   const modelSelect = m.body.querySelector('#model-select');
@@ -295,10 +351,21 @@ function openModelModal(model, onDone) {
   renderModelOptions(initialModels);
 
   providerSelect.addEventListener('change', () => {
+    if (browserCheck.checked && providerSelect.value === 'mock') {
+      providerSelect.value = 'openai';
+      toast('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议，已切回 OpenAI', 'warn');
+    }
     const defaults = { openai: maasBase, anthropic: 'https://api.anthropic.com', mock: '' };
     if (!baseInput.value || Object.values(defaults).includes(baseInput.value) || baseInput.value === 'https://api.openai.com/v1') {
       baseInput.value = defaults[providerSelect.value] || '';
       syncFromBase();
+    }
+  });
+  browserCheck.addEventListener('change', () => {
+    browserBox.style.display = browserCheck.checked ? '' : 'none';
+    if (browserCheck.checked && providerSelect.value === 'mock') {
+      providerSelect.value = 'openai';
+      toast('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议，已切回 OpenAI', 'warn');
     }
   });
 
@@ -310,6 +377,28 @@ function openModelModal(model, onDone) {
     out.enabled = model?.enabled ?? 1;
     try { out.extra = JSON.parse(out.extra || '{}'); }
     catch (e) { throw new Error('扩展参数不是合法 JSON：' + e.message); }
+    if (!out.extra || typeof out.extra !== 'object' || Array.isArray(out.extra)) {
+      throw new Error('扩展参数必须是 JSON 对象');
+    }
+    const browser = !!browserCheck.checked;
+    if (browser && (out.provider === 'mock' || out.provider === '')) {
+      throw new Error('浏览器代理只支持 OpenAI 兼容或 Anthropic 协议');
+    }
+    out.extra.transport = browser ? 'browser' : 'server';
+    if (browser) {
+      const maxConcurrent = Number(m.body.querySelector('#browser-max-concurrent').value || 2);
+      const claimTimeout = Number(m.body.querySelector('#browser-claim-timeout').value || 10);
+      const execTimeout = Number(m.body.querySelector('#browser-exec-timeout').value || 90);
+      if (!(maxConcurrent >= 1 && maxConcurrent <= 4)) throw new Error('单窗口并发必须在 1–4');
+      if (!(claimTimeout >= 5 && claimTimeout <= 60)) throw new Error('认领超时必须在 5–60 秒');
+      if (!(execTimeout >= 30 && execTimeout <= 120)) throw new Error('执行超时必须在 30–120 秒');
+      out.extra.browser_relay = {
+        max_concurrent: maxConcurrent,
+        claim_timeout_sec: claimTimeout,
+        exec_timeout_sec: execTimeout,
+        allow_roles: [...form.querySelectorAll('[data-browser-role]:checked')].map((el) => el.dataset.browserRole),
+      };
+    }
     if (!out.api_key) delete out.api_key;
     return out;
   }
@@ -370,6 +459,10 @@ function openModelModal(model, onDone) {
       const btn = e.target.closest('#model-test');
       let payload;
       try { payload = collect(); } catch (err) { toast(err.message, 'error'); return; }
+      if (payload.extra?.transport === 'browser') {
+        toast('浏览器代理模型请先保存，再点击列表中的“浏览器内自检”', 'warn');
+        return;
+      }
       if (model) payload.model_id = model.id;
       setBusy(btn, true, '测试中…');
       try {
